@@ -1,0 +1,49 @@
+services:
+  # PostgreSQL Database (only service in Docker)
+  postgres:
+    image: postgres:15-alpine
+    container_name: sixbtc_postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${DB_NAME:-sixbtc}
+      POSTGRES_USER: ${DB_USER:-sixbtc}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+    ports:
+      - "5433:5432"  # Map to 5433 to avoid conflict with existing PostgreSQL
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-sixbtc} -d ${DB_NAME:-sixbtc}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    networks:
+      - sixbtc_network
+
+    # Resource limits (adjust based on your server)
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+volumes:
+  postgres_data:
+    driver: local
+    name: sixbtc_postgres_data
+
+networks:
+  sixbtc_network:
+    driver: bridge
+    name: sixbtc_network

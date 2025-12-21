@@ -1,0 +1,271 @@
+"""
+Configuration Loader for SixBTC
+
+Loads configuration from YAML file with environment variable interpolation.
+Follows Fast Fail principle - crashes immediately if config is invalid.
+"""
+
+import os
+import re
+from pathlib import Path
+from typing import Any, Dict
+
+import yaml
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field, validator
+
+
+class Config(BaseModel):
+    """
+    Master configuration model for SixBTC
+
+    All values are REQUIRED - no fallback defaults!
+    Missing or invalid config will cause system to crash at startup (Fast Fail)
+    """
+
+    # Raw config data (loaded from YAML)
+    _raw_config: Dict[str, Any] = {}
+
+    class Config:
+        """Pydantic config"""
+        arbitrary_types_allowed = True
+        extra = "allow"  # Allow extra fields from YAML
+
+    def __init__(self, **data):
+        """Initialize with raw config data"""
+        super().__init__(**data)
+        self._raw_config = data
+
+    def get(self, key_path: str, default: Any = None) -> Any:
+        """
+        Get nested config value using dot notation
+
+        Example:
+            config.get('risk.atr.stop_multiplier')  # Returns 2.0
+            config.get('trading.timeframes.available')  # Returns ['15m', '30m', ...]
+
+        Args:
+            key_path: Dot-separated path to config key
+            default: Default value if key not found
+
+        Returns:
+            Config value or default
+        """
+        keys = key_path.split('.')
+        value = self._raw_config
+
+        for key in keys:
+            if isinstance(value, dict) and key in value:
+                value = value[key]
+            else:
+                return default
+
+        return value
+
+    def get_required(self, key_path: str) -> Any:
+        """
+        Get required config value - raises error if missing
+
+        Args:
+            key_path: Dot-separated path to config key
+
+        Returns:
+            Config value
+
+        Raises:
+            ValueError: If key not found
+        """
+        value = self.get(key_path)
+        if value is None:
+            raise ValueError(f"Required config key not found: {key_path}")
+        return value
+
+
+def _interpolate_env_vars(config_str: str) -> str:
+    """
+    Replace ${VAR_NAME} placeholders with environment variables
+
+    Args:
+        config_str: YAML config as string
+
+    Returns:
+        Config string with env vars interpolated
+
+    Raises:
+        ValueError: If required env var is missing
+    """
+    pattern = re.compile(r'\$\{(\w+)\}')
+
+    def replacer(match):
+        var_name = match.group(1)
+        value = os.getenv(var_name)
+
+        if value is None:
+            raise ValueError(
+                f"Environment variable '{var_name}' is required but not set. "
+                f"Check your .env file or environment."
+            )
+
+        return value
+
+    return pattern.sub(replacer, config_str)
+
+
+def load_config(config_path: str | Path = "config/config.yaml") -> Config:
+    """
+    Load SixBTC configuration from YAML file
+
+    Process:
+    1. Load .env file (if exists)
+    2. Read YAML config
+    3. Interpolate environment variables (${VAR})
+    4. Parse and validate YAML
+    5. Return Config object
+
+    Args:
+        config_path: Path to YAML config file
+
+    Returns:
+        Config object with loaded configuration
+
+    Raises:
+        FileNotFoundError: If config file doesn't exist
+        ValueError: If config is invalid or env vars missing
+        yaml.YAMLError: If YAML parsing fails
+
+    Example:
+        >>> from src.config import load_config
+        >>> config = load_config()
+        >>> config.get('risk.atr.stop_multiplier')
+        2.0
+        >>> config.get('trading.timeframes.available')
+        ['15m', '30m', '1h', '4h', '1d']
+    """
+    # 1. Load .env file (if exists)
+    env_path = Path(".env")
+    if env_path.exists():
+        load_dotenv(env_path)
+
+    # 2. Read YAML config
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Config file not found: {config_path}\n"
+            f"Expected location: {config_path.absolute()}"
+        )
+
+    with open(config_path, 'r') as f:
+        config_str = f.read()
+
+    # 3. Interpolate environment variables
+    try:
+        config_str = _interpolate_env_vars(config_str)
+    except ValueError as e:
+        raise ValueError(
+            f"Failed to interpolate environment variables in {config_path}: {e}"
+        ) from e
+
+    # 4. Parse YAML
+    try:
+        config_dict = yaml.safe_load(config_str)
+    except yaml.YAMLError as e:
+        raise yaml.YAMLError(
+            f"Failed to parse YAML config {config_path}: {e}"
+        ) from e
+
+    if not isinstance(config_dict, dict):
+        raise ValueError(
+            f"Config file {config_path} must contain a YAML dictionary, "
+            f"got {type(config_dict)}"
+        )
+
+    # 5. Create Config object
+    config = Config(**config_dict)
+
+    # 6. Validate critical settings (Fast Fail)
+    _validate_config(config)
+
+    return config
+
+
+def _validate_config(config: Config) -> None:
+    """
+    Validate critical configuration settings
+
+    Raises ValueError if any critical settings are invalid.
+    This ensures Fast Fail principle - crash early if config is broken.
+
+    Args:
+        config: Loaded configuration
+
+    Raises:
+        ValueError: If validation fails
+    """
+    # Validate timeframes
+    timeframes = config.get('trading.timeframes.available')
+    if not timeframes or not isinstance(timeframes, list):
+        raise ValueError(
+            "trading.timeframes.available must be a non-empty list"
+        )
+
+    valid_timeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '8h', '12h', '1d']
+    for tf in timeframes:
+        if tf not in valid_timeframes:
+            raise ValueError(
+                f"Invalid timeframe '{tf}' in trading.timeframes.available. "
+                f"Valid options: {valid_timeframes}"
+            )
+
+    # Validate risk management
+    sizing_mode = config.get('risk.sizing_mode')
+    if sizing_mode not in ['fixed', 'atr']:
+        raise ValueError(
+            f"risk.sizing_mode must be 'fixed' or 'atr', got '{sizing_mode}'"
+        )
+
+    # Validate database config
+    db_host = config.get('database.host')
+    db_port = config.get('database.port')
+    db_name = config.get('database.database')
+
+    if not all([db_host, db_port, db_name]):
+        raise ValueError(
+            "Database configuration incomplete. Required: host, port, database"
+        )
+
+    # Validate execution mode
+    exec_mode = config.get('system.scalability.execution_mode')
+    if exec_mode not in ['sync', 'async', 'multiprocess', 'hybrid']:
+        raise ValueError(
+            f"system.scalability.execution_mode must be one of "
+            f"['sync', 'async', 'multiprocess', 'hybrid'], got '{exec_mode}'"
+        )
+
+    # Success
+    print(f"✓ Configuration loaded and validated successfully")
+    print(f"  - Timeframes: {timeframes}")
+    print(f"  - Risk mode: {sizing_mode}")
+    print(f"  - Execution mode: {exec_mode}")
+    print(f"  - Database: {db_host}:{db_port}/{db_name}")
+
+
+# Convenience function for quick testing
+if __name__ == "__main__":
+    """Quick test of config loader"""
+    try:
+        config = load_config()
+        print("\n" + "="*60)
+        print("CONFIGURATION LOADED SUCCESSFULLY")
+        print("="*60)
+        print(f"\nSystem: {config.get('system.name')} v{config.get('system.version')}")
+        print(f"Timeframes: {config.get('trading.timeframes.available')}")
+        print(f"Risk sizing: {config.get('risk.sizing_mode')}")
+        print(f"Max strategies: {config.get('system.scalability.max_strategies')}")
+        print(f"Execution mode: {config.get('system.scalability.execution_mode')}")
+        print(f"\nDatabase: {config.get('database.host')}:{config.get('database.port')}")
+        print(f"Database name: {config.get('database.database')}")
+        print("\n" + "="*60)
+    except Exception as e:
+        print(f"\n❌ Configuration loading failed:")
+        print(f"   {e}")
+        raise

@@ -1,0 +1,22 @@
+The following strategy code has validation errors. Fix them while maintaining the core logic.
+
+=== ORIGINAL CODE ===
+{{ original_code }}
+
+=== VALIDATION ERRORS ===
+{% for error in errors %}
+- {{ error }}
+{% endfor %}
+
+=== REQUIREMENTS ===
+1. Must inherit from StrategyCore
+2. Must implement generate_signal(self, df: pd.DataFrame) -> Signal | None
+3. NO lookahead bias (no center=True, no negative shifts)
+4. Function must be pure (no state mutation)
+5. Use proper imports
+
+Generate ONLY the corrected Python code. NO explanations.
+
+```python
+# Fixed code here
+```
