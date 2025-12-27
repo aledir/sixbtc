@@ -60,8 +60,8 @@ class BinanceDataDownloader:
         self.data_dir = Path(cache_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Volume threshold
-        self.min_volume_24h = self.config.get_required('trading.data.min_volume_24h')
+        # Volume threshold (0 = no filter, pairs_updater already handles selection)
+        self.min_volume_24h = self.config.get('data_scheduler.min_volume_usd', 0)
 
         logger.info(f"BinanceDataDownloader initialized - data_dir: {self.data_dir}")
 
@@ -213,7 +213,7 @@ class BinanceDataDownloader:
         self,
         symbol: str,
         timeframe: str,
-        days: int,
+        days: Optional[int] = None,
         force_refresh: bool = False
     ) -> pd.DataFrame:
         """
@@ -222,7 +222,7 @@ class BinanceDataDownloader:
         Args:
             symbol: Symbol base (e.g., 'BTC')
             timeframe: CCXT timeframe (e.g., '5m', '15m', '1h', '1d')
-            days: Number of days to download
+            days: Number of days to download (None = all available history)
             force_refresh: Force re-download even if cached
 
         Returns:
@@ -231,29 +231,51 @@ class BinanceDataDownloader:
         # File path for cached data
         file_path = self.data_dir / f"{symbol}_{timeframe}.parquet"
 
+        # Calculate required start date
+        now = pd.Timestamp.now(tz='UTC')
+        if days is None:
+            required_start = pd.Timestamp('2017-01-01', tz='UTC')
+        else:
+            required_start = now - pd.Timedelta(days=days)
+
         # Load existing data if available
         if file_path.exists() and not force_refresh:
             logger.debug(f"Loading cached data: {file_path}")
             df = pd.read_parquet(file_path)
 
-            # Check if we need to update
+            first_timestamp = df['timestamp'].min()
             last_timestamp = df['timestamp'].max()
-            now = pd.Timestamp.now(tz='UTC')
-
-            # If data is fresh (less than 1 timeframe old), return it
             tf_seconds = self._timeframe_to_seconds(timeframe)
-            if (now - last_timestamp).total_seconds() < tf_seconds:
-                logger.info(f"{symbol} {timeframe}: Using cached data (fresh)")
+
+            # Check if cache covers required period (backfill check)
+            needs_backfill = first_timestamp > required_start + pd.Timedelta(days=1)
+
+            # Check if cache is up to date (forward check)
+            needs_update = (now - last_timestamp).total_seconds() >= tf_seconds
+
+            if not needs_backfill and not needs_update:
+                logger.info(f"{symbol} {timeframe}: Using cached data (complete)")
                 return df
 
-            # Otherwise, download only missing candles
-            logger.info(f"{symbol} {timeframe}: Updating cached data")
-            start_date = last_timestamp + pd.Timedelta(seconds=tf_seconds)
+            if needs_backfill:
+                # Cache doesn't cover required period - download from required_start
+                logger.info(
+                    f"{symbol} {timeframe}: Backfilling - cache starts at "
+                    f"{first_timestamp.date()}, need {required_start.date()}"
+                )
+                start_date = required_start
+            else:
+                # Just append new candles
+                logger.info(f"{symbol} {timeframe}: Updating cached data")
+                start_date = last_timestamp + pd.Timedelta(seconds=tf_seconds)
         else:
             # No cache - download from scratch
-            start_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=days)
+            if days is None:
+                logger.info(f"{symbol} {timeframe}: Downloading ALL available history")
+            else:
+                logger.info(f"{symbol} {timeframe}: Downloading {days} days from scratch")
+            start_date = required_start
             df = pd.DataFrame()
-            logger.info(f"{symbol} {timeframe}: Downloading {days} days from scratch")
 
         # Download data
         ccxt_symbol = f"{symbol}/USDT:USDT"
@@ -327,7 +349,7 @@ class BinanceDataDownloader:
         self,
         symbols: List[str],
         timeframe: str,
-        days: int,
+        days: Optional[int] = None,
         force_refresh: bool = False
     ) -> Dict[str, pd.DataFrame]:
         """
@@ -336,7 +358,7 @@ class BinanceDataDownloader:
         Args:
             symbols: List of symbols
             timeframe: CCXT timeframe
-            days: Number of days
+            days: Number of days (None = all available)
             force_refresh: Force re-download
 
         Returns:
@@ -363,7 +385,7 @@ class BinanceDataDownloader:
     def download_all_timeframes(
         self,
         symbols: Optional[List[str]] = None,
-        days: int = 180,
+        days: Optional[int] = None,
         force_refresh: bool = False
     ) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
@@ -630,3 +652,18 @@ class BinanceDataDownloader:
         """
         start_date = datetime.now() - timedelta(days=days)
         return int(start_date.timestamp() * 1000)
+
+    def cleanup_obsolete_pairs(self, pairs_file: Optional[Path] = None) -> int:
+        """
+        DISABLED: No longer deletes cached data.
+
+        Keeping historical data for coins that drop out of top 50 is valuable:
+        - They may return to top 50 later
+        - Re-downloading is expensive (time, bandwidth, rate limits)
+        - Storage is cheap
+
+        Returns:
+            Always 0 (no files deleted)
+        """
+        logger.debug("cleanup_obsolete_pairs() is disabled - keeping all historical data")
+        return 0

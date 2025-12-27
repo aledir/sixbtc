@@ -1,20 +1,30 @@
 """
 Hyperliquid Client - Exchange API Integration
 
-Handles all Hyperliquid API interactions with dry-run support.
+Real Hyperliquid SDK implementation for live trading.
+Based on sevenbtc's production-tested implementation.
 
 CRITICAL:
-- dry_run=True: NO real orders placed (for testing)
-- dry_run=False: Real orders (production only)
+- dry_run=True: Log operations without executing (NO fake state)
+- dry_run=False: Real orders (production)
 """
 
-import logging
-from typing import Optional, Dict, Any, List
-from dataclasses import dataclass
-from enum import Enum
+import os
 import time
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+import ccxt
+from eth_account import Account
+from hyperliquid.exchange import Exchange
+from hyperliquid.info import Info
+from hyperliquid.utils import constants
+
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class OrderStatus(Enum):
@@ -49,21 +59,24 @@ class Position:
     entry_price: float
     current_price: float
     unrealized_pnl: float
+    leverage: int = 1
+    liquidation_price: Optional[float] = None
+    margin_used: float = 0.0
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
 
 
 class HyperliquidClient:
     """
-    Hyperliquid API client with dry-run support
+    Hyperliquid API client with real SDK integration
 
-    Handles:
-    - Order placement (market orders)
+    Features:
+    - Market data fetching (OHLCV, tickers, prices)
+    - Account state queries (balance, positions)
+    - Order execution (market orders)
     - Position management
-    - Subaccount switching
-    - Account state queries
 
-    CRITICAL: In dry_run mode, NO real API calls are made
+    dry_run mode: Logs operations without executing
     """
 
     def __init__(
@@ -77,57 +90,133 @@ class HyperliquidClient:
         Initialize Hyperliquid client
 
         Args:
-            config: Configuration dict (from executor config)
-            private_key: Hyperliquid private key (required for live)
-            vault_address: Hyperliquid vault address (required for live)
-            dry_run: If True, simulate all operations (SAFE)
+            config: Configuration dict
+            private_key: Hyperliquid private key (or from env/config)
+            vault_address: Hyperliquid wallet address (or from env/config)
+            dry_run: If True, log operations without executing
 
         Raises:
-            ValueError: If live mode without credentials or in test environment
+            ValueError: If live mode without valid credentials
         """
-        # Handle both config dict and direct parameters
-        if config is not None:
-            # CRITICAL: No fallback defaults - config must be complete
-            # If dry_run is not in config, crash immediately
+        # Determine dry_run mode
+        if dry_run is not None:
+            self.dry_run = dry_run
+        elif config is not None:
             try:
                 self.dry_run = config['development']['testing']['dry_run']
             except KeyError:
-                # Fallback for test configs that may not have nested structure
-                self.dry_run = config['dry_run']
-
-            # Get hyperliquid config (will crash if missing)
-            hl_config = config['hyperliquid']
-            self.testnet = hl_config.get('testnet', True)  # Testnet OK to default True for safety
-            self.private_key = hl_config.get('private_key') or private_key
-            self.vault_address = hl_config.get('vault_address') or vault_address
+                try:
+                    self.dry_run = config.get('dry_run', True)
+                except (KeyError, TypeError):
+                    self.dry_run = True
         else:
-            self.dry_run = dry_run
-            self.testnet = True
-            self.private_key = private_key
-            self.vault_address = vault_address
+            self.dry_run = True
+
+        # Get credentials from config, params, or environment
+        if config is not None:
+            hl_config = config.get('hyperliquid', {})
+            self.private_key = private_key or hl_config.get('private_key') or os.getenv('HYPERLIQUID_PRIVATE_KEY')
+            self.wallet_address = vault_address or hl_config.get('vault_address') or hl_config.get('wallet_address') or os.getenv('HYPERLIQUID_WALLET_ADDRESS')
+            self.testnet = hl_config.get('testnet', False)
+        else:
+            self.private_key = private_key or os.getenv('HYPERLIQUID_PRIVATE_KEY')
+            self.wallet_address = vault_address or os.getenv('HYPERLIQUID_WALLET_ADDRESS')
+            self.testnet = False
 
         self.current_subaccount = 1
 
-        # Dry-run state (simulated)
-        self._mock_orders: List[Order] = []
-        self._mock_positions: Dict[str, Position] = {}
-        self._mock_balance: float = 10000.0  # $10k starting balance
-        self._order_counter = 0
+        # Initialize Info client (read-only, always available)
+        api_url = constants.TESTNET_API_URL if self.testnet else constants.MAINNET_API_URL
+        self.info = Info(api_url, skip_ws=True)
 
-        # CRITICAL: Block live trading in test environment
+        # Initialize Exchange client for trading (only if credentials provided)
+        self.exchange_client = None
+        if self.private_key and self.wallet_address:
+            try:
+                account = Account.from_key(self.private_key)
+                self.exchange_client = Exchange(account, api_url)
+                wallet_display = f"{self.wallet_address[:6]}...{self.wallet_address[-4:]}"
+                logger.info(f"Hyperliquid Exchange client initialized: {wallet_display}")
+            except Exception as e:
+                logger.error(f"Failed to initialize Exchange client: {e}")
+                self.exchange_client = None
+
+        # Initialize CCXT client for market data
+        self.ccxt_client = ccxt.hyperliquid({
+            "enableRateLimit": True,
+            "timeout": 30000,
+            "rateLimit": 200,
+        })
+
+        # Cache for asset metadata
+        self._asset_meta_cache: Dict[str, Dict] = {}
+        self._last_request_time = 0
+        self._load_asset_metadata()
+
+        # Validate live mode credentials
         if not self.dry_run:
-            raise ValueError("Live trading not allowed in tests")
+            if not self.private_key or not self.wallet_address:
+                raise ValueError("Live trading requires valid private_key and wallet_address")
+            if not self.exchange_client:
+                raise ValueError("Live trading requires Exchange client initialization")
+            logger.warning("LIVE TRADING MODE - Real orders will be placed!")
+        else:
+            logger.info("Dry-run mode enabled - Operations will be logged only")
 
-        logger.info("Dry-run mode enabled - No real orders will be placed")
+    def _load_asset_metadata(self):
+        """Load asset metadata (sz_decimals, max leverage) from Hyperliquid"""
+        try:
+            meta = self.info.meta()
+            for asset in meta.get("universe", []):
+                symbol = asset.get("name")
+                self._asset_meta_cache[symbol] = {
+                    "sz_decimals": asset.get("szDecimals", 5),
+                    "max_leverage": asset.get("maxLeverage", 20),
+                }
+            logger.info(f"Loaded metadata for {len(self._asset_meta_cache)} assets")
+        except Exception as e:
+            logger.error(f"Failed to load asset metadata: {e}")
 
-    def __str__(self) -> str:
-        """String representation for debugging"""
-        mode = "DRY RUN" if self.dry_run else "LIVE"
-        return f"HyperliquidClient(mode={mode}, subaccount={self.current_subaccount})"
+    def _wait_rate_limit(self, min_interval: float = 0.2):
+        """Wait for rate limit compliance"""
+        elapsed = time.time() - self._last_request_time
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+        self._last_request_time = time.time()
 
-    def __repr__(self) -> str:
-        """String representation for debugging"""
-        return self.__str__()
+    def get_sz_decimals(self, symbol: str) -> int:
+        """Get size decimals for an asset"""
+        base_coin = symbol.split("/")[0].split("-")[0]
+        if base_coin not in self._asset_meta_cache:
+            self._load_asset_metadata()
+        return self._asset_meta_cache.get(base_coin, {}).get("sz_decimals", 5)
+
+    def get_max_leverage(self, symbol: str) -> int:
+        """Get maximum leverage for an asset"""
+        base_coin = symbol.split("/")[0].split("-")[0]
+        if base_coin not in self._asset_meta_cache:
+            self._load_asset_metadata()
+        return self._asset_meta_cache.get(base_coin, {}).get("max_leverage", 20)
+
+    def round_size(self, symbol: str, size: float) -> float:
+        """Round order size to asset's sz_decimals precision"""
+        sz_decimals = self.get_sz_decimals(symbol)
+        return round(size, sz_decimals)
+
+    def round_price(self, price: float) -> float:
+        """Round price to appropriate tick size based on price level"""
+        if price >= 10000:
+            return round(price, 1)
+        elif price >= 1000:
+            return round(price, 2)
+        elif price >= 100:
+            return round(price, 3)
+        elif price >= 10:
+            return round(price, 4)
+        elif price >= 1:
+            return round(price, 5)
+        else:
+            return round(price, 6)
 
     def switch_subaccount(self, subaccount_id: int) -> bool:
         """
@@ -143,62 +232,195 @@ class HyperliquidClient:
             logger.error(f"Invalid subaccount_id: {subaccount_id}")
             return False
 
-        if self.dry_run:
-            logger.debug(f"[DRY RUN] Switched to subaccount {subaccount_id}")
-            self.current_subaccount = subaccount_id
-            return True
-        else:
-            # TODO: Real subaccount switch via Hyperliquid SDK
-            logger.info(f"Switched to subaccount {subaccount_id}")
-            self.current_subaccount = subaccount_id
-            return True
+        self.current_subaccount = subaccount_id
+        logger.info(f"Switched to subaccount {subaccount_id}")
+        return True
 
-    def _simulate_order(
-        self,
-        symbol: str,
-        side: str,
-        size: float,
-        order_type: str = 'market',
-        stop_loss: Optional[float] = None,
-        take_profit: Optional[float] = None
-    ) -> Dict:
+    def get_current_price(self, symbol: str) -> float:
         """
-        Simulate order execution (dry-run only)
+        Get current market price for symbol
+
+        Args:
+            symbol: Trading pair (e.g., 'BTC')
+
+        Returns:
+            Current mid price
+        """
+        try:
+            self._wait_rate_limit()
+            all_mids = self.info.all_mids()
+
+            # Normalize symbol (BTC, BTC-USDC, BTC/USDC:USDC all → BTC)
+            base_symbol = symbol.split("/")[0].split("-")[0]
+
+            if base_symbol in all_mids:
+                return float(all_mids[base_symbol])
+            else:
+                logger.warning(f"Symbol {base_symbol} not found in all_mids")
+                return 0.0
+
+        except Exception as e:
+            logger.error(f"Failed to get current price for {symbol}: {e}")
+            return 0.0
+
+    def get_current_prices(self) -> Dict[str, float]:
+        """
+        Get current prices for all symbols
+
+        Returns:
+            Dict mapping symbol to price
+        """
+        try:
+            self._wait_rate_limit()
+            all_mids = self.info.all_mids()
+            return {symbol: float(price) for symbol, price in all_mids.items()}
+        except Exception as e:
+            logger.error(f"Failed to get current prices: {e}")
+            return {}
+
+    def get_account_balance(self) -> float:
+        """
+        Get account balance for current subaccount
+
+        Returns:
+            Available balance in USD
+        """
+        if not self.wallet_address:
+            logger.error("No wallet address configured")
+            return 0.0
+
+        try:
+            self._wait_rate_limit()
+            user_state = self.info.user_state(self.wallet_address)
+            margin_summary = user_state.get("marginSummary", {})
+            account_value = float(margin_summary.get("accountValue", 0))
+            return account_value
+
+        except Exception as e:
+            logger.error(f"Failed to get account balance: {e}")
+            return 0.0
+
+    def get_account_state(self, address: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get full account state from Hyperliquid
+
+        Args:
+            address: Account address (uses configured wallet if None)
+
+        Returns:
+            Account state dict with marginSummary and assetPositions
+        """
+        address = address or self.wallet_address
+        if not address:
+            logger.error("No wallet address configured")
+            return {}
+
+        try:
+            self._wait_rate_limit()
+            return self.info.user_state(address)
+
+        except Exception as e:
+            logger.error(f"Failed to get account state: {e}")
+            return {}
+
+    def get_positions(self) -> List[Position]:
+        """
+        Get all open positions on current subaccount
+
+        Returns:
+            List of Position objects
+        """
+        if not self.wallet_address:
+            logger.error("No wallet address configured")
+            return []
+
+        try:
+            self._wait_rate_limit()
+            user_state = self.info.user_state(self.wallet_address)
+
+            positions = []
+            for asset_pos in user_state.get("assetPositions", []):
+                pos_data = asset_pos.get("position", {})
+
+                size_raw = float(pos_data.get("szi", 0))
+                if size_raw == 0:
+                    continue  # Skip closed positions
+
+                coin = pos_data.get("coin", "")
+                entry_price = float(pos_data.get("entryPx", 0))
+                unrealized_pnl = float(pos_data.get("unrealizedPnl", 0))
+
+                # Calculate mark price from entry and PnL
+                mark_price = entry_price + (unrealized_pnl / abs(size_raw)) if size_raw != 0 else entry_price
+
+                leverage_data = pos_data.get("leverage", {})
+                leverage = int(float(leverage_data.get("value", 1))) if isinstance(leverage_data, dict) else 1
+
+                liq_px = pos_data.get("liquidationPx")
+                liquidation_price = float(liq_px) if liq_px else None
+
+                margin_used = float(pos_data.get("marginUsed", 0))
+
+                positions.append(Position(
+                    symbol=coin,
+                    side="long" if size_raw > 0 else "short",
+                    size=abs(size_raw),
+                    entry_price=entry_price,
+                    current_price=mark_price,
+                    unrealized_pnl=unrealized_pnl,
+                    leverage=leverage,
+                    liquidation_price=liquidation_price,
+                    margin_used=margin_used
+                ))
+
+            logger.debug(f"Retrieved {len(positions)} positions")
+            return positions
+
+        except Exception as e:
+            logger.error(f"Failed to get positions: {e}")
+            return []
+
+    def get_position(self, symbol: str) -> Optional[Position]:
+        """
+        Get position for specific symbol
 
         Args:
             symbol: Trading pair
-            side: 'long' or 'short'
-            size: Position size
-            order_type: Order type (market/limit)
-            stop_loss: Stop loss price
-            take_profit: Take profit price
 
         Returns:
-            Dict with execution details
+            Position object or None if no position
         """
-        # Get mock price (in production, would use real market data)
-        fill_price = self.get_current_price(symbol)
+        base_symbol = symbol.split("/")[0].split("-")[0]
+        positions = self.get_positions()
 
-        # Simulate slippage (0.02%)
-        slippage = 0.0002
-        if side == 'long':
-            fill_price *= (1 + slippage)
-        else:
-            fill_price *= (1 - slippage)
+        for pos in positions:
+            if pos.symbol == base_symbol:
+                return pos
 
-        # Calculate fee (0.045% taker fee)
-        fee = size * fill_price * 0.00045
+        return None
 
-        self._order_counter += 1
-        order_id = f"mock_order_{self._order_counter}"
+    def get_open_positions(self, address: Optional[str] = None) -> List[Dict]:
+        """
+        Get open positions as list of dicts
 
-        return {
-            'order_id': order_id,
-            'fill_price': fill_price,
-            'size': size,
-            'fee': fee,
-            'simulated': True
-        }
+        Args:
+            address: Account address (uses configured wallet if None)
+
+        Returns:
+            List of position dicts
+        """
+        positions = self.get_positions()
+        return [
+            {
+                'coin': pos.symbol,
+                'side': pos.side,
+                'szi': pos.size,
+                'entryPx': pos.entry_price,
+                'unrealizedPnl': pos.unrealized_pnl,
+                'positionValue': pos.size * pos.current_price
+            }
+            for pos in positions
+        ]
 
     def place_market_order(
         self,
@@ -207,71 +429,134 @@ class HyperliquidClient:
         size: float,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None
-    ) -> Order:
+    ) -> Optional[Order]:
         """
         Place market order
 
         Args:
             symbol: Trading pair (e.g., 'BTC')
-            side: 'long' or 'short'
+            side: 'long'/'buy' or 'short'/'sell'
             size: Position size
             stop_loss: Stop loss price (optional)
             take_profit: Take profit price (optional)
 
         Returns:
-            Order object with execution details
+            Order object with execution details, or None if failed
 
         Raises:
             ValueError: If invalid parameters
         """
+        # Normalize side
+        if side == 'buy':
+            side = 'long'
+        elif side == 'sell':
+            side = 'short'
+
         if side not in ['long', 'short']:
             raise ValueError(f"Invalid side: {side}. Must be 'long' or 'short'")
 
         if size <= 0:
             raise ValueError(f"Invalid size: {size}. Must be positive")
 
-        if self.dry_run:
-            # Simulate order execution
-            execution = self._simulate_order(symbol, side, size, 'market', stop_loss, take_profit)
+        # Normalize symbol
+        base_symbol = symbol.split("/")[0].split("-")[0]
+        rounded_size = self.round_size(base_symbol, size)
 
-            order = Order(
-                order_id=execution['order_id'],
-                symbol=symbol,
+        if self.dry_run:
+            # Log only, no execution
+            current_price = self.get_current_price(base_symbol)
+            logger.info(
+                f"[DRY RUN] Would place market order: {base_symbol} {side} {rounded_size} "
+                f"@ ~${current_price:.2f} (SL={stop_loss}, TP={take_profit})"
+            )
+            return Order(
+                order_id=f"dry_run_{int(time.time())}",
+                symbol=base_symbol,
                 side=side,
-                size=size,
-                entry_price=execution['fill_price'],
+                size=rounded_size,
+                entry_price=current_price,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 status=OrderStatus.FILLED,
                 timestamp=time.time()
             )
 
-            self._mock_orders.append(order)
+        if not self.exchange_client:
+            logger.error("Exchange client not initialized - cannot place orders")
+            return None
 
-            # Create mock position
-            self._mock_positions[symbol] = Position(
-                symbol=symbol,
-                side=side,
-                size=size,
-                entry_price=order.entry_price,
-                current_price=order.entry_price,
-                unrealized_pnl=0.0,
-                stop_loss=stop_loss,
-                take_profit=take_profit
-            )
+        try:
+            # Get current market price
+            self._wait_rate_limit()
+            all_mids = self.info.all_mids()
+
+            if base_symbol not in all_mids:
+                logger.error(f"Symbol {base_symbol} not found in market data")
+                return None
+
+            current_price = float(all_mids[base_symbol])
+            is_buy = (side == 'long')
+
+            # Use aggressive pricing (10% spread) to ensure execution
+            if is_buy:
+                aggressive_price = current_price * 1.10
+            else:
+                aggressive_price = current_price * 0.90
+
+            aggressive_price = self.round_price(aggressive_price)
 
             logger.info(
-                f"[DRY RUN] Placed market order: {symbol} {side} {size} @ {order.entry_price}"
+                f"Placing market order: {base_symbol} {side} {rounded_size} "
+                f"(current=${current_price:.2f}, aggressive=${aggressive_price:.2f})"
             )
 
-            return order
-        else:
-            # TODO: Real order placement via Hyperliquid SDK
-            logger.warning(
-                f"[LIVE] Placing real order: {symbol} {side} {size}"
+            result = self.exchange_client.order(
+                base_symbol,
+                is_buy,
+                float(rounded_size),
+                aggressive_price,
+                {"limit": {"tif": "Ioc"}},
+                reduce_only=False,
             )
-            # Placeholder - integrate real Hyperliquid SDK here
-            raise NotImplementedError("Live trading not yet implemented")
+
+            if result and result.get("status") == "ok":
+                statuses = result.get("response", {}).get("data", {}).get("statuses", [])
+
+                if statuses and len(statuses) > 0:
+                    if "error" in statuses[0]:
+                        logger.error(f"Order rejected: {statuses[0]['error']}")
+                        return None
+
+                    filled_data = statuses[0].get("filled")
+                    if filled_data:
+                        fill_price = float(filled_data.get("avgPx", aggressive_price))
+                        filled_size = float(filled_data.get("totalSz", rounded_size))
+                        order_id = str(filled_data.get("oid", -1))
+
+                        logger.info(f"Order #{order_id} filled: {filled_size} @ ${fill_price:.2f}")
+
+                        return Order(
+                            order_id=order_id,
+                            symbol=base_symbol,
+                            side=side,
+                            size=filled_size,
+                            entry_price=fill_price,
+                            stop_loss=stop_loss,
+                            take_profit=take_profit,
+                            status=OrderStatus.FILLED,
+                            timestamp=time.time()
+                        )
+
+                logger.warning("Order placed but not filled immediately")
+                return None
+
+            else:
+                logger.error(f"Order placement failed: {result}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to place market order: {e}", exc_info=True)
+            return None
 
     def place_order(
         self,
@@ -284,48 +569,42 @@ class HyperliquidClient:
         take_profit: Optional[float] = None
     ) -> Dict:
         """
-        Place order (generic interface for tests)
+        Place order (generic interface)
 
         Args:
             symbol: Trading pair
-            side: 'long' or 'short' (or 'buy'/'sell')
+            side: 'long'/'short' or 'buy'/'sell'
             size: Position size
-            order_type: Order type
-            dry_run: Override dry-run setting (must be True in test mode)
+            order_type: Order type (currently only 'market' supported)
+            dry_run: Override dry-run setting
             stop_loss: Stop loss price
             take_profit: Take profit price
 
         Returns:
             Dict with execution details
-
-        Raises:
-            ValueError: If attempting live trading when dry_run is enforced
         """
-        # Normalize side
-        if side == 'buy':
-            side = 'long'
-        elif side == 'sell':
-            side = 'short'
-
-        # Check dry_run override
         effective_dry_run = dry_run if dry_run is not None else self.dry_run
+        original_dry_run = self.dry_run
+        self.dry_run = effective_dry_run
 
-        # CRITICAL: Block live trading
-        if not effective_dry_run:
-            raise ValueError("Live trading disabled")
+        try:
+            order = self.place_market_order(symbol, side, size, stop_loss, take_profit)
 
-        order = self.place_market_order(symbol, side, size, stop_loss, take_profit)
+            if order:
+                return {
+                    'status': 'ok' if not effective_dry_run else 'simulated',
+                    'order_id': order.order_id,
+                    'symbol': order.symbol,
+                    'fill_price': order.entry_price,
+                    'size': order.size,
+                    'side': order.side,
+                    'simulated': effective_dry_run
+                }
+            else:
+                return {'status': 'error', 'message': 'Order placement failed'}
 
-        return {
-            'status': 'simulated',
-            'order_id': order.order_id,
-            'symbol': symbol,
-            'fill_price': order.entry_price,
-            'size': order.size,
-            'side': order.side,
-            'fee': size * order.entry_price * 0.00045,
-            'simulated': True
-        }
+        finally:
+            self.dry_run = original_dry_run
 
     def close_position(
         self,
@@ -342,22 +621,61 @@ class HyperliquidClient:
         Returns:
             True if closed successfully
         """
+        base_symbol = symbol.split("/")[0].split("-")[0]
+        position = self.get_position(base_symbol)
+
+        if not position:
+            logger.warning(f"No position to close for {base_symbol}")
+            return False
+
         if self.dry_run:
-            if symbol in self._mock_positions:
-                position = self._mock_positions[symbol]
-                logger.info(
-                    f"[DRY RUN] Closed position {symbol}: {position.side} {position.size} "
-                    f"(reason: {reason})"
-                )
-                del self._mock_positions[symbol]
+            logger.info(
+                f"[DRY RUN] Would close position {base_symbol}: {position.side} {position.size} "
+                f"(reason: {reason})"
+            )
+            return True
+
+        if not self.exchange_client:
+            logger.error("Exchange client not initialized")
+            return False
+
+        try:
+            # Close by placing opposite order with reduce_only
+            is_buy = (position.side == 'short')  # Opposite to close
+
+            # Get current price for aggressive pricing
+            self._wait_rate_limit()
+            all_mids = self.info.all_mids()
+            current_price = float(all_mids.get(base_symbol, 0))
+
+            if is_buy:
+                aggressive_price = current_price * 1.10
+            else:
+                aggressive_price = current_price * 0.90
+
+            aggressive_price = self.round_price(aggressive_price)
+
+            logger.info(f"Closing position: {base_symbol} {position.size} (reason: {reason})")
+
+            result = self.exchange_client.order(
+                base_symbol,
+                is_buy,
+                float(position.size),
+                aggressive_price,
+                {"limit": {"tif": "Ioc"}},
+                reduce_only=True,
+            )
+
+            if result and result.get("status") == "ok":
+                logger.info(f"Position closed for {base_symbol}")
                 return True
             else:
-                logger.warning(f"[DRY RUN] No position to close for {symbol}")
+                logger.error(f"Failed to close position: {result}")
                 return False
-        else:
-            # TODO: Real position close via Hyperliquid SDK
-            logger.warning(f"[LIVE] Closing position: {symbol}")
-            raise NotImplementedError("Live trading not yet implemented")
+
+        except Exception as e:
+            logger.error(f"Error closing position for {base_symbol}: {e}")
+            return False
 
     def close_all_positions(self) -> int:
         """
@@ -366,17 +684,19 @@ class HyperliquidClient:
         Returns:
             Number of positions closed
         """
-        if self.dry_run:
-            count = len(self._mock_positions)
-            logger.info(
-                f"[DRY RUN] Closing all {count} positions on subaccount {self.current_subaccount}"
-            )
-            self._mock_positions.clear()
-            return count
-        else:
-            # TODO: Real close all via Hyperliquid SDK
-            logger.warning(f"[LIVE] Closing all positions on subaccount {self.current_subaccount}")
-            raise NotImplementedError("Live trading not yet implemented")
+        positions = self.get_positions()
+
+        if not positions:
+            logger.info("No positions to close")
+            return 0
+
+        closed = 0
+        for pos in positions:
+            if self.close_position(pos.symbol, "Close all"):
+                closed += 1
+
+        logger.info(f"Closed {closed}/{len(positions)} positions")
+        return closed
 
     def cancel_all_orders(self) -> int:
         """
@@ -385,256 +705,496 @@ class HyperliquidClient:
         Returns:
             Number of orders cancelled
         """
+        if not self.wallet_address:
+            logger.error("No wallet address configured")
+            return 0
+
         if self.dry_run:
-            pending_orders = [
-                o for o in self._mock_orders
-                if o.status == OrderStatus.PENDING
-            ]
-            count = len(pending_orders)
+            logger.info("[DRY RUN] Would cancel all pending orders")
+            return 0
 
-            for order in pending_orders:
-                order.status = OrderStatus.CANCELLED
+        if not self.exchange_client:
+            logger.error("Exchange client not initialized")
+            return 0
 
-            logger.info(
-                f"[DRY RUN] Cancelled {count} pending orders on subaccount {self.current_subaccount}"
-            )
-            return count
-        else:
-            # TODO: Real cancel all via Hyperliquid SDK
-            logger.warning(
-                f"[LIVE] Cancelling all orders on subaccount {self.current_subaccount}"
-            )
-            raise NotImplementedError("Live trading not yet implemented")
+        try:
+            self._wait_rate_limit()
+            open_orders = self.info.open_orders(self.wallet_address)
 
-    def get_positions(self) -> List[Position]:
+            cancelled = 0
+            for order in open_orders:
+                try:
+                    coin = order.get("coin")
+                    oid = order.get("oid")
+                    if coin and oid:
+                        result = self.exchange_client.cancel(coin, int(oid))
+                        if result and result.get("status") == "ok":
+                            cancelled += 1
+                except Exception as e:
+                    logger.error(f"Failed to cancel order {order.get('oid')}: {e}")
+
+            logger.info(f"Cancelled {cancelled}/{len(open_orders)} orders")
+            return cancelled
+
+        except Exception as e:
+            logger.error(f"Failed to cancel all orders: {e}")
+            return 0
+
+    def get_orders(self, symbol: Optional[str] = None) -> List[Dict]:
         """
-        Get all open positions on current subaccount
-
-        Returns:
-            List of Position objects
-        """
-        if self.dry_run:
-            positions = list(self._mock_positions.values())
-            logger.debug(f"[DRY RUN] Retrieved {len(positions)} positions")
-            return positions
-        else:
-            # TODO: Real positions query via Hyperliquid SDK
-            raise NotImplementedError("Live trading not yet implemented")
-
-    def get_position(self, symbol: str) -> Optional[Position]:
-        """
-        Get position for specific symbol
-
-        Args:
-            symbol: Trading pair
-
-        Returns:
-            Position object or None if no position
-        """
-        if self.dry_run:
-            return self._mock_positions.get(symbol)
-        else:
-            # TODO: Real position query via Hyperliquid SDK
-            raise NotImplementedError("Live trading not yet implemented")
-
-    def get_account_balance(self) -> float:
-        """
-        Get account balance for current subaccount
-
-        Returns:
-            Balance in USD
-        """
-        if self.dry_run:
-            logger.debug(f"[DRY RUN] Account balance: ${self._mock_balance:.2f}")
-            return self._mock_balance
-        else:
-            # TODO: Real balance query via Hyperliquid SDK
-            raise NotImplementedError("Live trading not yet implemented")
-
-    def get_orders(self, symbol: Optional[str] = None) -> List[Order]:
-        """
-        Get orders (optionally filtered by symbol)
+        Get open orders (optionally filtered by symbol)
 
         Args:
             symbol: Filter by symbol (optional)
 
         Returns:
-            List of Order objects
+            List of order dicts
         """
-        if self.dry_run:
-            if symbol:
-                orders = [o for o in self._mock_orders if o.symbol == symbol]
-            else:
-                orders = self._mock_orders
+        if not self.wallet_address:
+            logger.error("No wallet address configured")
+            return []
 
-            logger.debug(f"[DRY RUN] Retrieved {len(orders)} orders")
+        try:
+            self._wait_rate_limit()
+            open_orders = self.info.open_orders(self.wallet_address)
+
+            base_symbol = symbol.split("/")[0].split("-")[0] if symbol else None
+
+            orders = []
+            for order in open_orders:
+                if base_symbol and order.get("coin") != base_symbol:
+                    continue
+
+                orders.append({
+                    "oid": order.get("oid"),
+                    "symbol": order.get("coin"),
+                    "side": "buy" if order.get("isBuy") else "sell",
+                    "size": float(order.get("sz", 0)),
+                    "price": float(order.get("limitPx", 0)),
+                })
+
+            logger.debug(f"Retrieved {len(orders)} orders")
             return orders
-        else:
-            # TODO: Real orders query via Hyperliquid SDK
-            raise NotImplementedError("Live trading not yet implemented")
+
+        except Exception as e:
+            logger.error(f"Failed to get orders: {e}")
+            return []
+
+    def place_trigger_order(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        trigger_price: float,
+        order_type: str = "sl",
+        is_market: bool = True,
+        reduce_only: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Place a trigger order (Stop Loss or Take Profit)
+
+        Args:
+            symbol: Trading pair (e.g., 'BTC')
+            side: 'buy' or 'sell' (direction when triggered)
+            size: Order size
+            trigger_price: Price at which the order triggers
+            order_type: 'sl' for Stop Loss or 'tp' for Take Profit
+            is_market: If True, execute as market order when triggered
+            reduce_only: If True, order can only reduce position (default True for SL/TP)
+
+        Returns:
+            Dict with order details or None if failed
+        """
+        if order_type not in ["sl", "tp"]:
+            logger.error(f"Invalid order_type: {order_type}. Must be 'sl' or 'tp'")
+            return None
+
+        # Normalize
+        base_symbol = symbol.split("/")[0].split("-")[0]
+        if side == 'long':
+            side = 'buy'
+        elif side == 'short':
+            side = 'sell'
+
+        rounded_size = self.round_size(base_symbol, size)
+        rounded_trigger = self.round_price(trigger_price)
+        order_type_str = "Stop Loss" if order_type == "sl" else "Take Profit"
+
+        if self.dry_run:
+            logger.info(
+                f"[DRY RUN] Would place {order_type_str}: {base_symbol} {side} {rounded_size} "
+                f"@ trigger ${rounded_trigger:.2f}"
+            )
+            return {
+                "status": "simulated",
+                "order_id": f"dry_run_trigger_{int(time.time())}",
+                "symbol": base_symbol,
+                "trigger_price": rounded_trigger,
+                "order_type": order_type,
+                "side": side,
+                "size": rounded_size,
+            }
+
+        if not self.exchange_client:
+            logger.error("Exchange client not initialized - cannot place trigger orders")
+            return None
+
+        try:
+            is_buy = side.lower() in ["buy", "long"]
+
+            # Build trigger order type per Hyperliquid API
+            trigger_order_type = {
+                "trigger": {
+                    "triggerPx": float(rounded_trigger),
+                    "isMarket": is_market,
+                    "tpsl": order_type,
+                }
+            }
+
+            # Use trigger price as limit price for market triggers
+            limit_price = rounded_trigger
+
+            logger.info(
+                f"Placing {order_type_str}: {base_symbol} {side} {rounded_size} "
+                f"@ trigger ${rounded_trigger:.2f}"
+            )
+
+            self._wait_rate_limit()
+            result = self.exchange_client.order(
+                base_symbol,
+                is_buy,
+                float(rounded_size),
+                float(limit_price),
+                trigger_order_type,
+                reduce_only=reduce_only,
+            )
+
+            if result and result.get("status") == "ok":
+                statuses = result.get("response", {}).get("data", {}).get("statuses", [])
+
+                if statuses and len(statuses) > 0:
+                    status_data = statuses[0]
+
+                    # Check for errors
+                    if "error" in status_data:
+                        logger.error(f"{order_type_str} rejected: {status_data['error']}")
+                        return None
+
+                    # Trigger orders are in "resting" state when placed
+                    resting_data = status_data.get("resting")
+                    if resting_data:
+                        order_id = resting_data.get("oid", -1)
+                        logger.info(
+                            f"{order_type_str} #{order_id} PLACED: {rounded_size} {base_symbol} "
+                            f"@ trigger ${rounded_trigger:.2f}"
+                        )
+                        return {
+                            "status": "ok",
+                            "order_id": str(order_id),
+                            "symbol": base_symbol,
+                            "trigger_price": trigger_price,
+                            "order_type": order_type,
+                            "side": side,
+                            "size": rounded_size,
+                        }
+
+                    # Rare case: trigger executed immediately
+                    filled_data = status_data.get("filled")
+                    if filled_data:
+                        fill_price = float(filled_data.get("avgPx", trigger_price))
+                        order_id = filled_data.get("oid", -1)
+                        logger.info(
+                            f"{order_type_str} #{order_id} FILLED IMMEDIATELY @ ${fill_price:.2f}"
+                        )
+                        return {
+                            "status": "ok",
+                            "order_id": str(order_id),
+                            "symbol": base_symbol,
+                            "fill_price": fill_price,
+                            "filled": True,
+                        }
+
+                logger.warning(f"{order_type_str} placed but status unclear")
+                return None
+            else:
+                logger.error(f"{order_type_str} placement failed: {result}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to place {order_type_str}: {e}", exc_info=True)
+            return None
+
+    def cancel_order(self, symbol: str, order_id: str) -> bool:
+        """
+        Cancel a specific order
+
+        Args:
+            symbol: Trading pair
+            order_id: Order ID to cancel
+
+        Returns:
+            True if cancelled successfully
+        """
+        base_symbol = symbol.split("/")[0].split("-")[0]
+
+        if self.dry_run:
+            logger.info(f"[DRY RUN] Would cancel order {order_id} for {base_symbol}")
+            return True
+
+        if not self.exchange_client:
+            logger.error("Exchange client not initialized")
+            return False
+
+        try:
+            self._wait_rate_limit()
+            result = self.exchange_client.cancel(base_symbol, int(order_id))
+
+            if result and result.get("status") == "ok":
+                # Check for errors inside response
+                statuses = result.get("response", {}).get("data", {}).get("statuses", [])
+                if statuses and "error" in statuses[0]:
+                    logger.error(f"Cancel failed: {statuses[0]['error']}")
+                    return False
+
+                logger.info(f"Cancelled order {order_id} for {base_symbol}")
+                return True
+            else:
+                logger.error(f"Cancel failed: {result}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to cancel order {order_id}: {e}")
+            return False
 
     def update_stop_loss(
         self,
         symbol: str,
-        new_stop_loss: float
-    ) -> bool:
+        new_stop_loss: float,
+        old_order_id: Optional[str] = None,
+        size: Optional[float] = None
+    ) -> Optional[Dict[str, Any]]:
         """
-        Update stop loss for existing position
+        Update stop loss for existing position (cancel old + place new)
+
+        This is the core method for trailing stop implementation.
 
         Args:
             symbol: Trading pair
             new_stop_loss: New stop loss price
+            old_order_id: Existing SL order to cancel (optional)
+            size: Position size (required if old_order_id is None)
 
         Returns:
-            True if updated successfully
+            New order details or None if failed
         """
+        base_symbol = symbol.split("/")[0].split("-")[0]
+
         if self.dry_run:
-            if symbol in self._mock_positions:
-                self._mock_positions[symbol].stop_loss = new_stop_loss
-                logger.info(
-                    f"[DRY RUN] Updated stop loss for {symbol}: {new_stop_loss}"
-                )
-                return True
-            else:
-                logger.warning(f"[DRY RUN] No position found for {symbol}")
-                return False
-        else:
-            # TODO: Real SL update via Hyperliquid SDK
-            raise NotImplementedError("Live trading not yet implemented")
+            logger.info(
+                f"[DRY RUN] Would update SL for {base_symbol}: ${new_stop_loss:.2f}"
+            )
+            return {"status": "simulated", "trigger_price": new_stop_loss}
+
+        # Cancel existing SL if provided
+        if old_order_id:
+            cancelled = self.cancel_order(base_symbol, old_order_id)
+            if not cancelled:
+                logger.error(f"Failed to cancel old SL order {old_order_id}")
+                return None
+
+        # Get position to determine side and size
+        position = self.get_position(base_symbol)
+        if not position:
+            logger.error(f"No position found for {base_symbol}")
+            return None
+
+        # Determine SL order side (opposite of position)
+        sl_side = "sell" if position.side == "long" else "buy"
+        order_size = size or position.size
+
+        # Place new SL
+        return self.place_trigger_order(
+            symbol=base_symbol,
+            side=sl_side,
+            size=order_size,
+            trigger_price=new_stop_loss,
+            order_type="sl",
+            is_market=True,
+            reduce_only=True
+        )
 
     def update_take_profit(
         self,
         symbol: str,
-        new_take_profit: float
-    ) -> bool:
+        new_take_profit: float,
+        old_order_id: Optional[str] = None,
+        size: Optional[float] = None
+    ) -> Optional[Dict[str, Any]]:
         """
-        Update take profit for existing position
+        Update take profit for existing position (cancel old + place new)
 
         Args:
             symbol: Trading pair
             new_take_profit: New take profit price
+            old_order_id: Existing TP order to cancel (optional)
+            size: Position size (required if old_order_id is None)
 
         Returns:
-            True if updated successfully
+            New order details or None if failed
         """
-        if self.dry_run:
-            if symbol in self._mock_positions:
-                self._mock_positions[symbol].take_profit = new_take_profit
-                logger.info(
-                    f"[DRY RUN] Updated take profit for {symbol}: {new_take_profit}"
-                )
-                return True
-            else:
-                logger.warning(f"[DRY RUN] No position found for {symbol}")
-                return False
-        else:
-            # TODO: Real TP update via Hyperliquid SDK
-            raise NotImplementedError("Live trading not yet implemented")
+        base_symbol = symbol.split("/")[0].split("-")[0]
 
-    def get_current_price(self, symbol: str) -> float:
+        if self.dry_run:
+            logger.info(
+                f"[DRY RUN] Would update TP for {base_symbol}: ${new_take_profit:.2f}"
+            )
+            return {"status": "simulated", "trigger_price": new_take_profit}
+
+        # Cancel existing TP if provided
+        if old_order_id:
+            cancelled = self.cancel_order(base_symbol, old_order_id)
+            if not cancelled:
+                logger.error(f"Failed to cancel old TP order {old_order_id}")
+                return None
+
+        # Get position
+        position = self.get_position(base_symbol)
+        if not position:
+            logger.error(f"No position found for {base_symbol}")
+            return None
+
+        # Determine TP order side (opposite of position)
+        tp_side = "sell" if position.side == "long" else "buy"
+        order_size = size or position.size
+
+        # Place new TP
+        return self.place_trigger_order(
+            symbol=base_symbol,
+            side=tp_side,
+            size=order_size,
+            trigger_price=new_take_profit,
+            order_type="tp",
+            is_market=True,
+            reduce_only=True
+        )
+
+    def place_order_with_sl_tp(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None
+    ) -> Dict[str, Any]:
         """
-        Get current market price for symbol
+        Place market order with optional SL and TP orders
+
+        This is the main entry point for opening a position with protection.
 
         Args:
             symbol: Trading pair
+            side: 'long' or 'short'
+            size: Position size
+            stop_loss: Stop loss price (optional)
+            take_profit: Take profit price (optional)
 
         Returns:
-            Current price
+            Dict with entry order and SL/TP order details
         """
-        if self.dry_run:
-            # Mock price (in real implementation, would fetch from WebSocket cache)
-            return 42000.0
-        else:
-            # TODO: Real price fetch via Hyperliquid SDK or WebSocket
-            raise NotImplementedError("Live trading not yet implemented")
+        base_symbol = symbol.split("/")[0].split("-")[0]
+        result = {
+            "entry": None,
+            "stop_loss": None,
+            "take_profit": None,
+            "status": "error"
+        }
 
-    def get_account_state(self, address: str) -> Dict[str, Any]:
+        # 1. Place entry order
+        entry_order = self.place_market_order(base_symbol, side, size)
+        if not entry_order:
+            logger.error(f"Failed to place entry order for {base_symbol}")
+            return result
+
+        result["entry"] = {
+            "order_id": entry_order.order_id,
+            "fill_price": entry_order.entry_price,
+            "size": entry_order.size,
+            "side": entry_order.side,
+        }
+
+        # Determine SL/TP side (opposite of entry)
+        sl_tp_side = "sell" if side in ["long", "buy"] else "buy"
+
+        # 2. Place Stop Loss if specified
+        if stop_loss:
+            sl_order = self.place_trigger_order(
+                symbol=base_symbol,
+                side=sl_tp_side,
+                size=size,
+                trigger_price=stop_loss,
+                order_type="sl"
+            )
+            if sl_order:
+                result["stop_loss"] = sl_order
+            else:
+                logger.warning(f"Failed to place SL at ${stop_loss:.2f}")
+
+        # 3. Place Take Profit if specified
+        if take_profit:
+            tp_order = self.place_trigger_order(
+                symbol=base_symbol,
+                side=sl_tp_side,
+                size=size,
+                trigger_price=take_profit,
+                order_type="tp"
+            )
+            if tp_order:
+                result["take_profit"] = tp_order
+            else:
+                logger.warning(f"Failed to place TP at ${take_profit:.2f}")
+
+        result["status"] = "ok"
+        return result
+
+    def set_leverage(self, symbol: str, leverage: int) -> bool:
         """
-        Get account state from Hyperliquid
+        Set leverage for a symbol
 
         Args:
-            address: Account address
+            symbol: Trading pair
+            leverage: Leverage value (1-50x depending on asset)
 
         Returns:
-            Account state dict with marginSummary and assetPositions
+            True if successful
         """
+        base_symbol = symbol.split("/")[0].split("-")[0]
+        max_lev = self.get_max_leverage(base_symbol)
+
+        if leverage > max_lev:
+            logger.warning(f"Requested leverage {leverage}x exceeds max {max_lev}x for {base_symbol}")
+            leverage = max_lev
+
         if self.dry_run:
-            # Return mock account state
-            positions = []
-            for symbol, pos in self._mock_positions.items():
-                positions.append({
-                    'position': {
-                        'coin': pos.symbol,
-                        'entryPx': str(pos.entry_price),
-                        'leverage': {
-                            'value': 5,
-                            'type': 'cross'
-                        },
-                        'liquidationPx': '0.0',
-                        'marginUsed': str(pos.size * pos.entry_price / 5),
-                        'positionValue': str(pos.size * pos.entry_price),
-                        'returnOnEquity': '0.0',
-                        'szi': str(pos.size),
-                        'unrealizedPnl': str(pos.unrealized_pnl)
-                    },
-                    'type': 'oneWay'
-                })
+            logger.info(f"[DRY RUN] Would set leverage for {base_symbol}: {leverage}x")
+            return True
 
-            return {
-                'marginSummary': {
-                    'accountValue': str(self._mock_balance),
-                    'totalNtlPos': str(sum(p.size * p.entry_price for p in self._mock_positions.values())),
-                    'totalRawUsd': str(self._mock_balance),
-                    'withdrawable': str(self._mock_balance * 0.5)
-                },
-                'assetPositions': positions
-            }
-        else:
-            # TODO: Real account state query
-            raise NotImplementedError("Live trading not yet implemented")
+        if not self.exchange_client:
+            logger.error("Exchange client not initialized")
+            return False
 
-    def get_open_positions(self, address: str) -> List[Dict]:
-        """
-        Get open positions from account state
+        try:
+            result = self.exchange_client.update_leverage(leverage, base_symbol, is_cross=False)
 
-        Args:
-            address: Account address
+            if result and result.get("status") == "ok":
+                logger.info(f"Set leverage for {base_symbol}: {leverage}x")
+                return True
+            else:
+                logger.error(f"Failed to set leverage: {result}")
+                return False
 
-        Returns:
-            List of position dicts
-        """
-        state = self.get_account_state(address)
-        positions = []
-
-        for asset_pos in state.get('assetPositions', []):
-            pos = asset_pos.get('position', {})
-            positions.append({
-                'coin': pos.get('coin'),
-                'entryPx': pos.get('entryPx'),
-                'szi': pos.get('szi'),
-                'unrealizedPnl': pos.get('unrealizedPnl'),
-                'positionValue': pos.get('positionValue')
-            })
-
-        return positions
-
-    def get_current_prices(self) -> Dict[str, float]:
-        """
-        Get current prices for all symbols
-
-        Returns:
-            Dict mapping symbol to price
-        """
-        if self.dry_run:
-            # Return mock prices
-            return {
-                'BTC': 50000.0,
-                'ETH': 3000.0,
-                'SOL': 100.0
-            }
-        else:
-            # TODO: Real price fetch
-            raise NotImplementedError("Live trading not yet implemented")
+        except Exception as e:
+            logger.error(f"Error setting leverage: {e}")
+            return False
 
     def health_check(self) -> Dict[str, Any]:
         """
@@ -643,19 +1203,25 @@ class HyperliquidClient:
         Returns:
             Health status dict
         """
-        if self.dry_run:
-            return {
-                'status': 'healthy',
-                'dry_run': True,
-                'subaccount': self.current_subaccount,
-                'positions': len(self._mock_positions),
-                'orders': len(self._mock_orders),
-                'balance': self._mock_balance
-            }
-        else:
-            # TODO: Real health check
-            return {
-                'status': 'healthy',
-                'dry_run': False,
-                'subaccount': self.current_subaccount
-            }
+        try:
+            self._wait_rate_limit()
+            self.ccxt_client.load_markets()
+            status = 'healthy'
+        except Exception:
+            status = 'unhealthy'
+
+        return {
+            'status': status,
+            'dry_run': self.dry_run,
+            'subaccount': self.current_subaccount,
+            'has_exchange_client': self.exchange_client is not None,
+            'has_wallet': self.wallet_address is not None,
+            'timestamp': datetime.now().isoformat()
+        }
+
+    def __str__(self) -> str:
+        mode = "DRY RUN" if self.dry_run else "LIVE"
+        return f"HyperliquidClient(mode={mode}, subaccount={self.current_subaccount})"
+
+    def __repr__(self) -> str:
+        return self.__str__()

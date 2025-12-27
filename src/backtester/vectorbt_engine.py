@@ -13,8 +13,19 @@ from datetime import datetime
 from src.strategies.base import StrategyCore, Signal
 from src.utils.logger import get_logger
 from src.config.loader import load_config
+import math
 
 logger = get_logger(__name__)
+
+
+def sanitize_float(value: float, default: float = 0.0) -> float:
+    """
+    Sanitize float values for JSON storage.
+    Replaces Infinity and NaN with default value.
+    """
+    if value is None or math.isnan(value) or math.isinf(value):
+        return default
+    return float(value)
 
 
 class VectorBTBacktester:
@@ -59,28 +70,40 @@ class VectorBTBacktester:
         symbol_name = symbol or 'UNKNOWN'
         logger.info(f"Running backtest for {symbol_name} ({len(data)} candles)")
 
-        # Generate signals
-        entries, exits, sizes, stop_losses, take_profits = self._generate_signals(
+        # Generate signals with ATR-based SL/TP and indicator exits
+        entries, exits, sizes, sl_pcts, tp_pcts = self._generate_signals_with_atr(
             strategy,
-            data
+            data,
+            symbol
         )
 
         if entries.sum() == 0:
             logger.warning(f"No entry signals generated for {symbol_name}")
             return self._empty_results()
 
+        # Build portfolio kwargs
+        portfolio_kwargs = {
+            'close': data['close'],
+            'entries': entries,
+            'size': sizes,
+            'size_type': 'percent',
+            'fees': self.fee_rate,
+            'slippage': self.slippage,
+            'init_cash': self.initial_capital,
+            'freq': '15min',
+            'sl_stop': sl_pcts,
+        }
+
+        # Add indicator-based exits if any exist
+        if exits.sum() > 0:
+            portfolio_kwargs['exits'] = exits
+
+        # Add take profit only if any are set
+        if tp_pcts.notna().sum() > 0:
+            portfolio_kwargs['tp_stop'] = tp_pcts
+
         # Run VectorBT backtest
-        portfolio = vbt.Portfolio.from_signals(
-            close=data['close'],
-            entries=entries,
-            exits=exits,
-            size=sizes,
-            size_type='percent',
-            fees=self.fee_rate,
-            slippage=self.slippage,
-            init_cash=self.initial_capital,
-            freq='1min'  # Will be adjusted based on data frequency
-        )
+        portfolio = vbt.Portfolio.from_signals(**portfolio_kwargs)
 
         # Extract metrics
         metrics = self._extract_metrics(portfolio, entries.sum())
@@ -134,54 +157,77 @@ class VectorBTBacktester:
 
         return portfolio_metrics
 
-    def _generate_signals(
+    def _generate_signals_with_atr(
         self,
         strategy: StrategyCore,
-        data: pd.DataFrame
+        data: pd.DataFrame,
+        symbol: str = None
     ) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
         """
-        Generate entry/exit signals for entire dataset
+        Generate entry/exit signals with ATR-based SL/TP percentages
+
+        Supports three exit mechanisms:
+        1. sl_stop/tp_stop - VectorBT native percentage stops
+        2. exits - indicator-based exit signals (direction='close')
+        3. time_exit - handled by strategy returning 'close' after N bars
 
         Args:
             strategy: StrategyCore instance
-            data: OHLCV DataFrame
+            data: OHLCV DataFrame with high, low, close columns
+            symbol: Symbol name for per-coin leverage
 
         Returns:
-            (entries, exits, sizes, stop_losses, take_profits) as boolean/float Series
+            (entries, exits, sizes, sl_pcts, tp_pcts) - entries/exits as bool, others as float Series
         """
-        entries = pd.Series(False, index=data.index)
-        exits = pd.Series(False, index=data.index)
-        sizes = pd.Series(0.0, index=data.index)
-        stop_losses = pd.Series(np.nan, index=data.index)
-        take_profits = pd.Series(np.nan, index=data.index)
+        import talib as ta
 
-        in_position = False
+        entries = pd.Series(False, index=data.index)
+        exits = pd.Series(False, index=data.index)  # Indicator-based exits
+        sizes = pd.Series(0.0, index=data.index)
+        sl_pcts = pd.Series(np.nan, index=data.index)  # SL as % of price
+        tp_pcts = pd.Series(np.nan, index=data.index)  # TP as % of price
+
+        # Pre-calculate ATR for entire dataset
+        if all(col in data.columns for col in ['high', 'low', 'close']):
+            atr = ta.ATR(data['high'], data['low'], data['close'], timeperiod=14)
+        else:
+            # Fallback: estimate ATR from close only
+            atr = data['close'].rolling(14).std() * 1.5
 
         for i in range(len(data)):
             # Get data up to current bar (no lookahead!)
             df_slice = data.iloc[:i+1].copy()
 
-            # Generate signal
-            signal = strategy.generate_signal(df_slice)
+            # Generate signal (pass symbol for per-coin leverage)
+            signal = strategy.generate_signal(df_slice, symbol)
 
             if signal is None:
                 continue
 
-            # Handle signal
-            if signal.direction in ['long', 'short'] and not in_position:
-                # Entry signal
+            # Process entry signals
+            if signal.direction in ['long', 'short']:
                 entries.iloc[i] = True
-                sizes.iloc[i] = signal.size
-                stop_losses.iloc[i] = signal.stop_loss
-                take_profits.iloc[i] = signal.take_profit
-                in_position = True
+                sizes.iloc[i] = signal.size if signal.size is not None else 1.0
 
-            elif signal.direction == 'close' and in_position:
-                # Exit signal
+                # Calculate SL/TP as percentages using ATR
+                current_price = data['close'].iloc[i]
+                current_atr = atr.iloc[i] if not np.isnan(atr.iloc[i]) else current_price * 0.02
+
+                # SL = ATR * multiplier / price (as decimal percentage)
+                sl_distance = current_atr * signal.atr_stop_multiplier
+                sl_pcts.iloc[i] = sl_distance / current_price
+
+                # TP = ATR * multiplier / price (as decimal percentage)
+                # Only set if strategy has take_profit enabled
+                if signal.tp_type is not None:
+                    tp_distance = current_atr * signal.atr_take_multiplier
+                    tp_pcts.iloc[i] = tp_distance / current_price
+
+            # Process exit signals (indicator-based close)
+            elif signal.direction == 'close':
                 exits.iloc[i] = True
-                in_position = False
 
-        return entries, exits, sizes, stop_losses, take_profits
+        return entries, exits, sizes, sl_pcts, tp_pcts
 
     def _extract_metrics(self, portfolio, n_signals: int) -> Dict:
         """
@@ -240,27 +286,27 @@ class VectorBTBacktester:
 
         return {
             # Returns
-            'total_return': float(total_return),
-            'cagr': self._calculate_cagr(portfolio),
+            'total_return': sanitize_float(total_return),
+            'cagr': sanitize_float(self._calculate_cagr(portfolio)),
 
             # Risk-adjusted
-            'sharpe_ratio': float(sharpe),
-            'sortino_ratio': float(sortino),
-            'max_drawdown': float(max_dd),
+            'sharpe_ratio': sanitize_float(sharpe),
+            'sortino_ratio': sanitize_float(sortino),
+            'max_drawdown': sanitize_float(max_dd),
 
             # Trade stats
             'total_trades': int(total_trades),
-            'win_rate': float(win_rate),
-            'expectancy': float(expectancy),
-            'profit_factor': float(profit_factor),
+            'win_rate': sanitize_float(win_rate),
+            'expectancy': sanitize_float(expectancy),
+            'profit_factor': sanitize_float(profit_factor, default=1.0),
 
             # Custom
-            'ed_ratio': float(ed_ratio),
-            'consistency': float(consistency),
+            'ed_ratio': sanitize_float(ed_ratio),
+            'consistency': sanitize_float(consistency),
 
             # Metadata
             'n_signals_generated': int(n_signals),
-            'signal_execution_rate': float(total_trades / n_signals) if n_signals > 0 else 0.0,
+            'signal_execution_rate': sanitize_float(total_trades / n_signals) if n_signals > 0 else 0.0,
         }
 
     def _extract_trades(self, portfolio) -> List[Dict]:
@@ -456,6 +502,23 @@ class VectorBTEngine:
         self.backtester.slippage = slippage
 
         return self.backtester.backtest(strategy, data)
+
+    def backtest_multi_symbol(
+        self,
+        strategy: StrategyCore,
+        data: Dict[str, pd.DataFrame]
+    ) -> Dict:
+        """
+        Run backtest across multiple symbols (portfolio)
+
+        Args:
+            strategy: StrategyCore instance
+            data: Dict mapping symbol → OHLCV DataFrame
+
+        Returns:
+            Portfolio-level metrics with symbol_breakdown
+        """
+        return self.backtester.backtest_multi_symbol(strategy, data)
 
     def calculate_metrics(self, portfolio) -> Dict:
         """

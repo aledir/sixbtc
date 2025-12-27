@@ -2,7 +2,7 @@
 Main Orchestrator
 
 Coordinates live trading execution across multiple strategies and timeframes.
-Uses adaptive scheduling and multi-WebSocket data provider.
+Uses adaptive scheduling and Hyperliquid WebSocket data provider.
 
 Following CLAUDE.md:
 - Dry-run mode for safe testing
@@ -12,12 +12,16 @@ Following CLAUDE.md:
 """
 
 import signal
-from typing import List, Optional, Dict
+import importlib.util
+import sys
+import tempfile
+from pathlib import Path
+from typing import List, Optional, Dict, Type
 from dataclasses import dataclass
 from datetime import datetime
 import pandas as pd
 
-from src.orchestration.websocket_provider import MultiWebSocketDataProvider
+from src.data.hyperliquid_websocket import HyperliquidDataProvider
 from src.orchestration.adaptive_scheduler import AdaptiveScheduler
 from src.executor.hyperliquid_client import HyperliquidClient
 from src.executor.risk_manager import RiskManager
@@ -83,7 +87,7 @@ class Orchestrator:
         self.scheduler = AdaptiveScheduler(config)
 
         # Data provider (initialized later)
-        self.data_provider: Optional[MultiWebSocketDataProvider] = None
+        self.data_provider: Optional[HyperliquidDataProvider] = None
 
         # Active strategies
         self.strategies: List[StrategyInstance] = []
@@ -121,11 +125,21 @@ class Orchestrator:
 
             for db_strat in db_strategies:
                 try:
-                    # Import strategy class dynamically
-                    # NOTE: In real implementation, would use proper module loading
-                    # For now, we'll create a mock instance
+                    # Dynamically load strategy class from stored code
+                    strategy_class = self._load_strategy_class(
+                        db_strat.name,
+                        db_strat.code
+                    )
+
+                    if strategy_class is None:
+                        logger.error(f"Failed to load class for {db_strat.name}")
+                        continue
+
+                    # Instantiate strategy
+                    strategy_obj = strategy_class()
+
                     strategy_instance = StrategyInstance(
-                        strategy=None,  # Placeholder
+                        strategy=strategy_obj,
                         subaccount_id=db_strat.subaccount_id or 0,
                         symbol=db_strat.symbol or 'BTC',
                         timeframe=db_strat.timeframe or '15m',
@@ -133,6 +147,7 @@ class Orchestrator:
                     )
 
                     self.strategies.append(strategy_instance)
+                    logger.info(f"Loaded strategy: {db_strat.name}")
 
                 except Exception as e:
                     logger.error(f"Failed to load strategy {db_strat.name}: {e}")
@@ -140,8 +155,71 @@ class Orchestrator:
 
         logger.info(f"Loaded {len(self.strategies)} strategy instances")
 
+    def _load_strategy_class(
+        self,
+        name: str,
+        code: str
+    ) -> Optional[Type[StrategyCore]]:
+        """
+        Dynamically load a strategy class from code string.
+
+        Args:
+            name: Strategy name (used as module name)
+            code: Python code containing the strategy class
+
+        Returns:
+            Strategy class if successful, None otherwise
+        """
+        if not code:
+            logger.error(f"No code found for strategy {name}")
+            return None
+
+        try:
+            # Write code to temp file
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                suffix='.py',
+                delete=False
+            ) as f:
+                f.write(code)
+                temp_path = Path(f.name)
+
+            # Load module from file
+            spec = importlib.util.spec_from_file_location(name, temp_path)
+
+            if spec is None or spec.loader is None:
+                logger.error(f"Failed to create module spec for {name}")
+                return None
+
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+
+            # Find the strategy class (subclass of StrategyCore)
+            for attr_name in dir(module):
+                attr = getattr(module, attr_name)
+                if (
+                    isinstance(attr, type) and
+                    issubclass(attr, StrategyCore) and
+                    attr is not StrategyCore
+                ):
+                    logger.debug(f"Found strategy class: {attr_name}")
+                    return attr
+
+            logger.error(f"No StrategyCore subclass found in {name}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error loading strategy {name}: {e}", exc_info=True)
+            return None
+
+        finally:
+            # Clean up temp file
+            if temp_path.exists():
+                temp_path.unlink()
+
     def initialize_data_provider(self) -> None:
-        """Initialize multi-WebSocket data provider"""
+        """Initialize Hyperliquid WebSocket data provider"""
         # Collect all symbols/timeframes from strategies
         symbols = set()
         timeframes = set()
@@ -158,11 +236,10 @@ class Orchestrator:
             f"{len(timeframes)} timeframes"
         )
 
-        self.data_provider = MultiWebSocketDataProvider(
-            config=self.config,
-            symbols=symbols,
-            timeframes=timeframes
-        )
+        # Get singleton data provider
+        self.data_provider = HyperliquidDataProvider(config=self.config)
+        self.data_provider.symbols = symbols
+        self.data_provider.timeframes = timeframes
 
     def start(self) -> None:
         """Start orchestrator"""
@@ -285,6 +362,10 @@ class Orchestrator:
             if not strategy_inst.active:
                 continue
 
+            if strategy_inst.strategy is None:
+                logger.warning(f"Strategy instance has no strategy object")
+                continue
+
             try:
                 # Get market data
                 df = self._get_market_data(
@@ -296,13 +377,15 @@ class Orchestrator:
                     # Not enough data yet
                     continue
 
-                # Generate signal
-                # NOTE: In real implementation, would call strategy.generate_signal(df)
-                # For now, this is a placeholder
-                signal = None  # strategy_inst.strategy.generate_signal(df)
+                # Generate signal from strategy
+                signal = strategy_inst.strategy.generate_signal(df)
 
                 if signal:
                     self.stats['signals_generated'] += 1
+                    logger.info(
+                        f"Signal generated: {signal.direction} {strategy_inst.symbol} "
+                        f"(reason: {signal.reason})"
+                    )
 
                     # Execute signal
                     self._execute_signal(strategy_inst, signal)

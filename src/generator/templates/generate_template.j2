@@ -1,0 +1,397 @@
+You are an expert quantitative trader. Generate a PARAMETERIZED strategy template following the EXACT structure specified below.
+
+=== STRATEGY SPECIFICATION ===
+
+Strategy Type: {{ strategy_type }}
+Timeframe: {{ timeframe }}
+Template ID: {{ template_id }}
+
+=== MANDATORY STRUCTURE ===
+
+This template MUST follow this EXACT structure. Do NOT add or remove components.
+
+{% if structure.entry_long and structure.entry_short %}
+ENTRY: BIDIRECTIONAL (both long AND short entries required)
+{% elif structure.entry_long %}
+ENTRY: LONG ONLY (generate ONLY long entries, NO short entries)
+{% else %}
+ENTRY: SHORT ONLY (generate ONLY short entries, NO long entries)
+{% endif %}
+
+STOP LOSS: ALWAYS REQUIRED (use ATR-based or percentage-based)
+
+{% if structure.take_profit %}
+TAKE PROFIT: REQUIRED (use ATR, RR_RATIO, or percentage-based)
+{% else %}
+TAKE PROFIT: DO NOT USE (tp_type must NOT be set)
+{% endif %}
+
+{% if structure.exit_indicator %}
+EXIT INDICATOR: REQUIRED
+- Generate Signal(direction='close') when exit condition is met
+- Exit condition should be based on indicator reversal (e.g., RSI returns to neutral)
+- This is SEPARATE from stop loss/take profit
+{% else %}
+EXIT INDICATOR: DO NOT GENERATE (no direction='close' signals)
+{% endif %}
+
+{% if structure.time_exit %}
+TIME EXIT: REQUIRED
+- Include exit_type=ExitType.TIME_BASED in Signal
+- Include exit_after_bars={{ "{{ exit_bars }}" }} parameter
+{% else %}
+TIME EXIT: DO NOT USE
+{% endif %}
+
+=== STRATEGY TYPE GUIDANCE ===
+
+{% if strategy_type == 'MOM' %}
+MOMENTUM Strategy:
+- Identify trending moves early using momentum indicators
+- RSI divergences, MACD crossovers, ROC, momentum oscillators
+- Entry on breakouts or momentum confirmation
+{% elif strategy_type == 'REV' %}
+MEAN REVERSION Strategy:
+- Identify overbought/oversold extreme conditions
+- RSI extremes, Bollinger Band touches, deviation from mean
+- Entry on bounces from statistical extremes
+{% elif strategy_type == 'TRN' %}
+TREND FOLLOWING Strategy:
+- Ride established trends
+- Moving average crossovers, ADX confirmation, trend strength
+- Entry on pullbacks within strong trends
+{% elif strategy_type == 'BRE' %}
+BREAKOUT Strategy:
+- Trade range/consolidation breakouts
+- Support/resistance levels, Donchian channels, N-bar highs/lows
+- Entry on volume-confirmed breakouts
+{% elif strategy_type == 'VOL' %}
+VOLATILITY Strategy:
+- Trade volatility expansions and contractions
+- Bollinger Band squeeze, ATR breakouts, Keltner channels
+- Entry on volatility expansion from squeeze
+{% elif strategy_type == 'SCA' %}
+SCALPING Strategy:
+- Quick entries and exits on minor price movements
+- Short-term oscillators, micro-trends, fast EMAs
+- Tight stops, quick profits
+{% endif %}
+
+=== ENTRY LOGIC CATEGORIES ===
+
+Choose ONE primary category for your entry logic. This creates diversity across templates.
+DO NOT rely only on TA-Lib indicators - explore other approaches!
+
+**1. INDICATOR-BASED** (Traditional TA)
+   Common oscillators: RSI, MACD, Stochastic, CCI, Williams %R, MFI
+   Moving averages: EMA, SMA, WMA, DEMA, TEMA, KAMA
+   Bands/Channels: BBANDS (Bollinger), Keltner, Donchian
+   Trend: ADX, Supertrend, Parabolic SAR, Ichimoku
+   Less common: AROON, CMO, TRIX, ULTOSC, ROC, Fisher
+
+   Libraries available:
+   - TA-Lib: `ta.RSI()`, `ta.BBANDS()`, `ta.MACD()`, etc.
+   - pandas_ta: `df.ta.supertrend()`, `df.ta.squeeze()`, `df.ta.vwap()`, `df.ta.ichimoku()`
+
+   Example TA-Lib: `rsi = ta.RSI(df['close'], {{ "{{ indicator_period }}" }})`
+   Example pandas_ta: `supertrend = df.ta.supertrend(length={{ "{{ indicator_period }}" }})`
+
+**2. PRICE ACTION** (No indicators, pure price)
+   - Break of previous day/week high or low
+   - Higher highs / lower lows sequence
+   - Price vs previous N bars high/low
+   - Example: `break_high = df['close'].iloc[-1] > df['high'].iloc[-2:-{{ "{{ lookback }}" }}].max()`
+
+**3. CANDLESTICK PATTERNS** (Single or multi-bar)
+   - Engulfing (bullish/bearish)
+   - Pin bar / Hammer / Shooting star
+   - Inside bar breakout
+   - Doji at extremes
+   - Example: `engulf = (df['close'].iloc[-1] > df['open'].iloc[-2]) and (df['open'].iloc[-1] < df['close'].iloc[-2])`
+
+**4. BODY/RANGE ANALYSIS** (Candle anatomy)
+   - Large body candles (momentum)
+   - Small body = indecision
+   - Body vs wick ratio
+   - Range expansion/contraction
+   - Example: `body = abs(df['close'].iloc[-1] - df['open'].iloc[-1]); range_ = df['high'].iloc[-1] - df['low'].iloc[-1]`
+
+**5. STRUCTURE-BASED** (Market structure)
+   - Support/resistance levels (swing highs/lows)
+   - Double top/bottom
+   - Trend line breaks
+   - Pivot points (daily PP, R1, S1)
+   - Example: `swing_low = df['low'].rolling({{ "{{ lookback }}" }}).min().iloc[-1]`
+
+**6. VOLUME-BASED** (Volume as primary trigger)
+   - Volume spike entry (volume > N x average)
+   - Volume dry-up reversal
+   - Price + volume confirmation
+   - Example: `vol_avg = df['volume'].rolling(20).mean().iloc[-1]; vol_spike = df['volume'].iloc[-1] > vol_avg * {{ "{{ volume_mult }}" }}`
+
+**7. STATISTICAL** (Quantitative approach)
+   - Z-score of price (deviation from mean)
+   - Percentile rank
+   - Standard deviation bands
+   - Linear regression channel
+   - Example: `z = (df['close'].iloc[-1] - df['close'].rolling({{ "{{ period }}" }}).mean().iloc[-1]) / df['close'].rolling({{ "{{ period }}" }}).std().iloc[-1]`
+
+**8. MULTI-TIMEFRAME PROXY** (Simulated HTF levels)
+   - Use longer lookback to simulate higher timeframe
+   - Daily levels on intraday (e.g., 96-bar high on 15m = daily high)
+   - Example for 15m simulating daily: `daily_high = df['high'].rolling(96).max().iloc[-1]`
+
+IMPORTANT: Be CREATIVE! Combine categories or use less common approaches.
+The walk-forward validation will filter out strategies that don't work.
+
+=== PARAMETERIZATION RULES ===
+
+Your code MUST use Jinja2 placeholders for ALL variable parameters.
+Use double braces: {{ "{{ parameter_name }}" }}
+
+REQUIRED PARAMETERS (include ALL of these):
+- {{ "{{ indicator_period }}" }} - Main indicator lookback period
+- {{ "{{ entry_threshold }}" }} - Entry trigger threshold
+{% if structure.exit_indicator %}
+- {{ "{{ exit_threshold }}" }} - Exit indicator threshold
+{% endif %}
+- {{ "{{ atr_multiplier }}" }} - ATR multiplier for stop loss
+{% if structure.time_exit %}
+- {{ "{{ exit_bars }}" }} - Number of bars for time-based exit
+{% endif %}
+- {{ "{{ leverage }}" }} - Position leverage
+
+OPTIONAL ADDITIONAL PARAMETERS (choose 1-3 based on your entry logic category):
+
+For INDICATOR-BASED:
+- {{ "{{ fast_period }}" }}, {{ "{{ slow_period }}" }} - For crossover strategies
+- {{ "{{ threshold_high }}" }}, {{ "{{ threshold_low }}" }} - For range-based entries
+
+For PRICE ACTION / STRUCTURE:
+- {{ "{{ lookback }}" }} - Bars to look back for highs/lows/structure
+- {{ "{{ break_threshold }}" }} - Minimum break distance (e.g., 0.001 = 0.1%)
+
+For CANDLESTICK / BODY-RANGE:
+- {{ "{{ body_ratio }}" }} - Minimum body/range ratio (e.g., 0.6 = 60%)
+- {{ "{{ wick_ratio }}" }} - Maximum wick ratio for pin bars
+
+For VOLUME-BASED:
+- {{ "{{ volume_mult }}" }} - Volume spike multiplier (e.g., 2.0 = 2x average)
+- {{ "{{ volume_period }}" }} - Volume average period
+
+For STATISTICAL:
+- {{ "{{ z_threshold }}" }} - Z-score threshold (e.g., 2.0)
+- {{ "{{ percentile }}" }} - Percentile threshold (e.g., 5, 95)
+
+For MULTI-TIMEFRAME PROXY:
+- {{ "{{ htf_lookback }}" }} - Higher timeframe lookback (e.g., 96 for daily on 15m)
+
+=== NO LOOKAHEAD BIAS ===
+
+FORBIDDEN patterns (will be rejected):
+- rolling(center=True)
+- shift(-N) where N > 0
+- Any access to future data
+
+ALLOWED patterns:
+- rolling(N) without center
+- shift(N) where N >= 0
+- iloc[-1] for current bar
+- iloc[-2] for previous bar
+
+=== CODE TEMPLATE ===
+
+```python
+import pandas as pd
+import numpy as np
+import talib as ta
+import pandas_ta as pta  # Optional: for supertrend, squeeze, vwap, ichimoku, etc.
+from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType{% if structure.time_exit %}, ExitType{% endif %}
+
+
+class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
+    """
+    {{ strategy_type }} strategy template for {{ timeframe }} timeframe
+    Structure: {{ structure.name }}
+
+    Parameters:
+    - indicator_period: Main indicator lookback
+    - entry_threshold: Entry trigger level
+{% if structure.exit_indicator %}
+    - exit_threshold: Exit trigger level
+{% endif %}
+    - atr_multiplier: Stop loss ATR multiplier
+{% if structure.time_exit %}
+    - exit_bars: Time-based exit after N bars
+{% endif %}
+    - leverage: Position leverage
+
+{% if structure.entry_long and structure.entry_short %}
+    Entry Long: [describe long entry condition]
+    Entry Short: [describe short entry condition]
+{% elif structure.entry_long %}
+    Entry Long: [describe long entry condition]
+    Entry Short: NOT GENERATED (structure is LONG_ONLY)
+{% else %}
+    Entry Long: NOT GENERATED (structure is SHORT_ONLY)
+    Entry Short: [describe short entry condition]
+{% endif %}
+{% if structure.exit_indicator %}
+    Exit: Indicator-based close signal when [describe exit condition]
+{% endif %}
+{% if structure.time_exit %}
+    Time Exit: Close after {{ "{{ exit_bars }}" }} bars
+{% endif %}
+    """
+
+    leverage = {{ "{{ leverage }}" }}
+
+    def __init__(self, params: dict = None):
+        super().__init__(params)
+
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
+        min_bars = 100
+        if len(df) < min_bars:
+            return None
+
+        # ============================================
+        # CALCULATE INDICATORS
+        # Use parameterized periods: {{ "{{ indicator_period }}" }}
+        # ============================================
+
+        current_price = df['close'].iloc[-1]
+
+        # ATR for stop loss calculation
+        atr = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+        current_atr = atr.iloc[-1]
+
+        if pd.isna(current_atr) or current_atr <= 0:
+            return None
+
+        # YOUR INDICATOR CALCULATIONS HERE
+        # Example: rsi = ta.RSI(df['close'], timeperiod={{ "{{ indicator_period }}" }})
+
+        # ============================================
+{% if structure.exit_indicator %}
+        # EXIT CONDITION (indicator-based)
+        # Check exit BEFORE entry to close existing positions first
+        # ============================================
+
+        exit_condition = False  # YOUR EXIT LOGIC using {{ "{{ exit_threshold }}" }}
+
+        if exit_condition:
+            return Signal(
+                direction='close',
+                reason="Exit: [describe why exiting]"
+            )
+
+        # ============================================
+{% endif %}
+        # ENTRY CONDITIONS
+        # ============================================
+
+{% if structure.entry_long %}
+        entry_long = False  # YOUR LONG ENTRY using {{ "{{ entry_threshold }}" }}
+{% endif %}
+{% if structure.entry_short %}
+        entry_short = False  # YOUR SHORT ENTRY using {{ "{{ entry_threshold }}" }}
+{% endif %}
+
+{% if structure.entry_long %}
+        if entry_long:
+            return Signal(
+                direction='long',
+                leverage=self.leverage,
+                sl_type=StopLossType.ATR,
+                atr_stop_multiplier={{ "{{ atr_multiplier }}" }},
+{% if structure.take_profit %}
+                tp_type=TakeProfitType.RR_RATIO,
+                rr_ratio=2.0,
+{% endif %}
+{% if structure.time_exit %}
+                exit_type=ExitType.TIME_BASED,
+                exit_after_bars={{ "{{ exit_bars }}" }},
+{% endif %}
+                reason="Long: [describe entry reason]"
+            )
+
+{% endif %}
+{% if structure.entry_short %}
+        if entry_short:
+            return Signal(
+                direction='short',
+                leverage=self.leverage,
+                sl_type=StopLossType.ATR,
+                atr_stop_multiplier={{ "{{ atr_multiplier }}" }},
+{% if structure.take_profit %}
+                tp_type=TakeProfitType.RR_RATIO,
+                rr_ratio=2.0,
+{% endif %}
+{% if structure.time_exit %}
+                exit_type=ExitType.TIME_BASED,
+                exit_after_bars={{ "{{ exit_bars }}" }},
+{% endif %}
+                reason="Short: [describe entry reason]"
+            )
+
+{% endif %}
+        return None
+```
+
+=== PARAMETERS SCHEMA ===
+
+After the code, provide a JSON schema with parameter values:
+
+```json
+{
+  "indicator_period": {"type": "int", "values": [7, 14, 21, 28]},
+  "entry_threshold": {"type": "int", "values": [25, 30, 35, 40]},
+{% if structure.exit_indicator %}
+  "exit_threshold": {"type": "int", "values": [45, 50, 55, 60]},
+{% endif %}
+  "atr_multiplier": {"type": "float", "values": [1.5, 2.0, 2.5, 3.0]},
+{% if structure.time_exit %}
+  "exit_bars": {"type": "int", "values": [10, 20, 30, 50]},
+{% endif %}
+  "leverage": {"type": "int", "values": [3, 5, 10, 15]}
+}
+```
+
+=== FINAL CHECKLIST ===
+
+Before generating, verify:
+{% if structure.entry_long and not structure.entry_short %}
+[ ] ONLY long entries (NO entry_short, NO direction='short')
+{% elif structure.entry_short and not structure.entry_long %}
+[ ] ONLY short entries (NO entry_long, NO direction='long')
+{% else %}
+[ ] Both long AND short entries present
+{% endif %}
+[ ] Stop loss is ALWAYS set (sl_type required)
+{% if structure.take_profit %}
+[ ] Take profit IS set (tp_type required)
+{% else %}
+[ ] Take profit is NOT set (no tp_type)
+{% endif %}
+{% if structure.exit_indicator %}
+[ ] Exit indicator generates Signal(direction='close')
+{% else %}
+[ ] NO direction='close' signals
+{% endif %}
+{% if structure.time_exit %}
+[ ] Time exit with exit_after_bars parameter
+{% else %}
+[ ] NO exit_after_bars parameter
+{% endif %}
+[ ] All Jinja2 placeholders use double braces {{ "{{ }}" }}
+[ ] Parameter schema matches placeholders in code
+[ ] 50-200 total parameter combinations
+
+Generate the complete parameterized template now.
+
+REQUIREMENTS:
+1. Be STRICT with structure compliance (entry direction, SL, TP, exits)
+2. Be CREATIVE with entry logic - choose from the 8 categories above
+3. In the docstring, specify which ENTRY LOGIC CATEGORY you chose
+4. Parameters schema must match the placeholders in your code
+5. Aim for 50-200 total parameter combinations

@@ -119,13 +119,24 @@ class TestLoadStrategies:
     @patch('src.orchestration.orchestrator.get_session')
     def test_load_strategies_with_data(self, mock_session, config):
         """Test loading strategies from database"""
-        # Mock strategy model
+        # Mock strategy model with all required attributes
         mock_strat = MagicMock()
         mock_strat.name = 'Strategy_MOM_abc123'
         mock_strat.subaccount_id = 1
         mock_strat.symbol = 'BTC'
         mock_strat.timeframe = '15m'
         mock_strat.status = 'LIVE'
+        # The orchestrator loads strategy code from DB and writes to temp file
+        mock_strat.code = '''
+from src.strategies.base import StrategyCore, Signal
+import pandas as pd
+
+class Strategy_MOM_abc123(StrategyCore):
+    leverage = 5
+
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
+        return None
+'''
 
         # Mock database session
         mock_query = MagicMock()

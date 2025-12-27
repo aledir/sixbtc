@@ -163,8 +163,8 @@ def generate(ctx, count, timeframe, strategy_type, use_patterns):
             console.print("[red]Error: 'generation' section missing from config[/red]")
             return
 
-        # Initialize builder
-        builder = StrategyBuilder(config, init_ai=True)
+        # Initialize builder (pass raw config dict)
+        builder = StrategyBuilder(config._raw_config, init_ai=True)
 
         if not builder.ai_manager:
             console.print("[yellow]Warning: AI Manager not available (check API keys)[/yellow]")
@@ -785,42 +785,79 @@ def deploy(ctx, dry_run, live):
 @cli.command()
 @click.option('--dry-run', is_flag=True, default=True, help='Run in dry-run mode (default: True)')
 @click.option('--live', is_flag=True, help='Run in LIVE mode (real trading)')
+@click.option('--mode', type=click.Choice(['auto', 'manual']), default='auto', help='auto=full autopilot, manual=signal execution only')
 @click.pass_context
-def run(ctx, dry_run, live):
-    """Start the main orchestrator for live trading"""
+def run(ctx, dry_run, live, mode):
+    """Start the autonomous trading system"""
     logger = ctx.obj['logger']
     config = ctx.obj['config']
 
-    # Determine mode
+    # Determine trading mode
     if live:
         dry_run = False
-        console.print("[bold red]WARNING: LIVE MODE ENABLED - Real trading will occur![/bold red]")
-        console.print("[yellow]Press Ctrl+C within 5 seconds to cancel...[/yellow]\n")
+        console.print("\n[bold red]" + "=" * 60 + "[/bold red]")
+        console.print("[bold red]WARNING: LIVE TRADING MODE ENABLED[/bold red]")
+        console.print("[bold red]Real orders will be placed on Hyperliquid![/bold red]")
+        console.print("[bold red]" + "=" * 60 + "[/bold red]")
+        console.print("\n[yellow]Press Ctrl+C within 10 seconds to cancel...[/yellow]\n")
         import time
-        time.sleep(5)
+        time.sleep(10)
     else:
-        console.print("[bold green]DRY-RUN MODE - No real orders will be placed[/bold green]\n")
+        console.print("\n[bold green]DRY-RUN MODE[/bold green]")
+        console.print("[dim]No real orders will be placed[/dim]\n")
 
-    try:
-        from src.orchestration.orchestrator import Orchestrator
+    if mode == 'auto':
+        # Full autonomous mode with AutoPilot
+        console.print("[bold cyan]AUTOPILOT MODE[/bold cyan]")
+        console.print("The system will autonomously:")
+        console.print("  - Generate strategies every 4 hours")
+        console.print("  - Backtest pending strategies every 30 min")
+        console.print("  - Classify and select top 10 every hour")
+        console.print("  - Deploy to subaccounts every 24 hours")
+        console.print("  - Monitor performance every 15 min\n")
 
-        logger.info(f"Starting orchestrator (dry_run={dry_run})...")
-        console.print(f"Initializing orchestrator...\n")
+        try:
+            from src.orchestration.autopilot import AutoPilot
 
-        # Create orchestrator
-        orch = Orchestrator(config, dry_run=dry_run)
+            logger.info(f"Starting AutoPilot (dry_run={dry_run})...")
 
-        # Start
-        console.print("[green]Orchestrator started. Press Ctrl+C to stop gracefully.[/green]\n")
-        orch.start()
+            # Create and start autopilot
+            autopilot = AutoPilot(config._raw_config, dry_run=dry_run)
 
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Shutdown requested...[/yellow]")
-        logger.info("Graceful shutdown initiated")
-    except Exception as e:
-        console.print(f"\n[bold red]Error:[/bold red] {e}")
-        logger.error(f"Orchestrator error: {e}", exc_info=True)
-        sys.exit(1)
+            console.print("[green]AutoPilot started. Press Ctrl+C to stop gracefully.[/green]\n")
+            autopilot.start()
+
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Shutdown requested...[/yellow]")
+            logger.info("Graceful shutdown initiated")
+        except Exception as e:
+            console.print(f"\n[bold red]Error:[/bold red] {e}")
+            logger.error(f"AutoPilot error: {e}", exc_info=True)
+            sys.exit(1)
+
+    else:
+        # Manual mode - just execute signals from existing strategies
+        console.print("[bold cyan]MANUAL MODE[/bold cyan]")
+        console.print("Signal execution only (no auto-generation)\n")
+
+        try:
+            from src.orchestration.orchestrator import Orchestrator
+
+            logger.info(f"Starting orchestrator (dry_run={dry_run})...")
+
+            # Create orchestrator
+            orch = Orchestrator(config, dry_run=dry_run)
+
+            console.print("[green]Orchestrator started. Press Ctrl+C to stop gracefully.[/green]\n")
+            orch.start()
+
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Shutdown requested...[/yellow]")
+            logger.info("Graceful shutdown initiated")
+        except Exception as e:
+            console.print(f"\n[bold red]Error:[/bold red] {e}")
+            logger.error(f"Orchestrator error: {e}", exc_info=True)
+            sys.exit(1)
 
 
 @cli.command()

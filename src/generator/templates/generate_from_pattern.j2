@@ -1,0 +1,154 @@
+You are an expert quantitative trader. Translate this validated trading pattern into a StrategyCore class.
+
+=== VALIDATED PATTERN ===
+
+Name: {{ pattern.name }}
+Formula: {{ pattern.formula }}
+{% if pattern.formula_readable %}
+Readable: {{ pattern.formula_readable }}
+{% endif %}
+
+Target: {{ pattern.target_name }}
+Direction: {{ pattern.target_direction | upper }}
+Timeframe: {{ pattern.timeframe }}
+Holding Period: {{ pattern.holding_period or "4h" }}
+
+Performance:
+  - Edge: {{ "%.2f"|format(pattern.test_edge * 100) }}%
+  - Win Rate: {{ "%.1f"|format(pattern.test_win_rate * 100) }}%
+  - Signals: {{ pattern.test_n_signals }}
+  - Quality Score: {{ "%.2f"|format(pattern.quality_score) }}
+
+{% if pattern.strategy_type %}
+Strategy Type: {{ pattern.strategy_type }}
+{% endif %}
+
+=== TRADING PARAMETERS ===
+
+{% if pattern.suggested_sl_type %}
+Suggested Stop Loss: {{ pattern.suggested_sl_type }} (multiplier: {{ pattern.suggested_sl_multiplier or 2.0 }})
+{% else %}
+Use ATR-based Stop Loss with multiplier 2.0
+{% endif %}
+
+{% if pattern.suggested_tp_type %}
+Suggested Take Profit: {{ pattern.suggested_tp_type }}{% if pattern.suggested_rr_ratio %} (R:R {{ pattern.suggested_rr_ratio }}){% endif %}
+
+{% else %}
+Use RR_RATIO with ratio 2.0
+{% endif %}
+
+=== STRICT REQUIREMENTS ===
+
+1. DIRECTION: Generate signals ONLY for {{ pattern.target_direction | upper }} positions
+   - DO NOT generate signals for the opposite direction
+   - This pattern is validated ONLY for {{ pattern.target_direction }} trades
+
+2. LEVERAGE: Use leverage = {{ leverage }}
+
+3. INHERITANCE: Class MUST inherit from StrategyCore
+
+4. METHOD: MUST implement generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None
+
+5. NO LOOKAHEAD BIAS:
+   - ALLOWED: df['close'].rolling(10).max()
+   - FORBIDDEN: df['close'].rolling(10, center=True).max()
+   - ALLOWED: df['close'].iloc[-1]
+   - FORBIDDEN: df['close'].shift(-1)
+
+6. STOP LOSS is REQUIRED for every entry signal
+
+=== OUTPUT FORMAT ===
+
+Generate ONLY the Python code block. NO explanations.
+
+```python
+import pandas as pd
+import numpy as np
+import talib as ta
+from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType
+
+
+class Strategy_{{ pattern.strategy_type or "GEN" }}_{{ strategy_id }}(StrategyCore):
+    """
+    Pattern-based strategy: {{ pattern.name }}
+
+    Direction: {{ pattern.target_direction | upper }} only
+    Timeframe: {{ pattern.timeframe }}
+    Holding Period: {{ pattern.holding_period or "4h" }}
+
+    Entry: Translates pattern formula into entry condition
+    Exit: {% if pattern.suggested_sl_type %}{{ pattern.suggested_sl_type }}{% else %}ATR{% endif %}-based SL, {% if pattern.suggested_tp_type %}{{ pattern.suggested_tp_type }}{% else %}RR_RATIO{% endif %} TP
+
+    Pattern Edge: {{ "%.2f"|format(pattern.test_edge * 100) }}%
+    Pattern Win Rate: {{ "%.1f"|format(pattern.test_win_rate * 100) }}%
+    """
+
+    leverage = {{ leverage }}
+
+    def __init__(self, params: dict = None):
+        """Initialize strategy with parameters"""
+        super().__init__(params)
+
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
+        """
+        Generate {{ pattern.target_direction }} signal based on pattern: {{ pattern.name }}
+
+        Pattern formula: {{ pattern.formula }}
+        """
+        # Minimum data requirement
+        min_bars = 100
+        if len(df) < min_bars:
+            return None
+
+        # ======================
+        # IMPLEMENT PATTERN LOGIC HERE
+        # Translate the pattern formula into indicator calculations
+        # ======================
+
+        current_price = df['close'].iloc[-1]
+
+        # ATR for volatility-adaptive stops
+        atr = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+        current_atr = atr.iloc[-1]
+
+        if pd.isna(current_atr) or current_atr <= 0:
+            return None
+
+        # ======================
+        # ENTRY CONDITION
+        # Based on pattern: {{ pattern.formula }}
+        # ======================
+
+        entry_condition = False  # TODO: Implement pattern logic
+
+        if entry_condition:
+            return Signal(
+                direction='{{ pattern.target_direction }}',
+                leverage=self.leverage,
+                sl_type=StopLossType.{{ pattern.suggested_sl_type or "ATR" }},
+                {% if pattern.suggested_sl_type == "ATR" or not pattern.suggested_sl_type %}
+                atr_stop_multiplier={{ pattern.suggested_sl_multiplier or 2.0 }},
+                {% elif pattern.suggested_sl_type == "PERCENTAGE" %}
+                sl_pct={{ pattern.suggested_sl_multiplier or 0.02 }},
+                {% endif %}
+                tp_type=TakeProfitType.{{ pattern.suggested_tp_type or "RR_RATIO" }},
+                {% if pattern.suggested_tp_type == "RR_RATIO" or not pattern.suggested_tp_type %}
+                rr_ratio={{ pattern.suggested_rr_ratio or 2.0 }},
+                {% elif pattern.suggested_tp_type == "ATR" %}
+                atr_take_multiplier={{ pattern.suggested_rr_ratio or 3.0 }},
+                {% endif %}
+                reason="Pattern {{ pattern.name }}: [describe condition]"
+            )
+
+        return None
+```
+
+=== IMPORTANT ===
+
+1. Translate the pattern formula EXACTLY - do not modify the logic
+2. Generate signals ONLY in {{ pattern.target_direction | upper }} direction
+3. Keep entry conditions simple (2-3 conditions max)
+4. The pattern was validated with this logic - changing it invalidates the backtest
+
+Generate the complete code now.

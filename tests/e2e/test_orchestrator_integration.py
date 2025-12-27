@@ -74,6 +74,17 @@ class TestOrchestratorIntegration:
         mock_strategy.symbol = 'BTC'
         mock_strategy.timeframe = '15m'
         mock_strategy.status = 'LIVE'
+        # The orchestrator loads strategy code from DB and writes to temp file
+        mock_strategy.code = '''
+from src.strategies.base import StrategyCore, Signal
+import pandas as pd
+
+class Strategy_MOM_test123(StrategyCore):
+    leverage = 5
+
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
+        return None
+'''
 
         mock_query = MagicMock()
         mock_query.filter.return_value.all.return_value = [mock_strategy]

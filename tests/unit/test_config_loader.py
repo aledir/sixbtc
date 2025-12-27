@@ -140,9 +140,7 @@ class TestConfigValidation:
                 'database': 'sixbtc'
             },
             'system': {
-                'scalability': {
-                    'execution_mode': 'sync'
-                }
+                'execution_mode': 'sync'  # Correct path: system.execution_mode
             }
         }
         config = Config(**config_data)
@@ -160,7 +158,7 @@ class TestConfigValidation:
             },
             'risk': {'sizing_mode': 'atr'},
             'database': {'host': 'localhost', 'port': 5432, 'database': 'sixbtc'},
-            'system': {'scalability': {'execution_mode': 'sync'}}
+            'system': {'execution_mode': 'sync'}
         }
         config = Config(**config_data)
 
@@ -177,7 +175,7 @@ class TestConfigValidation:
             },
             'risk': {'sizing_mode': 'atr'},
             'database': {'host': 'localhost', 'port': 5432, 'database': 'sixbtc'},
-            'system': {'scalability': {'execution_mode': 'sync'}}
+            'system': {'execution_mode': 'sync'}
         }
         config = Config(**config_data)
 
@@ -190,7 +188,7 @@ class TestConfigValidation:
             'trading': {'timeframes': {'available': ['15m']}},
             'risk': {'sizing_mode': 'invalid'},  # Invalid mode
             'database': {'host': 'localhost', 'port': 5432, 'database': 'sixbtc'},
-            'system': {'scalability': {'execution_mode': 'sync'}}
+            'system': {'execution_mode': 'sync'}
         }
         config = Config(**config_data)
 
@@ -203,7 +201,7 @@ class TestConfigValidation:
             'trading': {'timeframes': {'available': ['15m']}},
             'risk': {'sizing_mode': 'atr'},
             'database': {'host': 'localhost'},  # Missing port and database
-            'system': {'scalability': {'execution_mode': 'sync'}}
+            'system': {'execution_mode': 'sync'}
         }
         config = Config(**config_data)
 
@@ -217,9 +215,7 @@ class TestConfigValidation:
             'risk': {'sizing_mode': 'atr'},
             'database': {'host': 'localhost', 'port': 5432, 'database': 'sixbtc'},
             'system': {
-                'scalability': {
-                    'execution_mode': 'invalid'  # Invalid mode
-                }
+                'execution_mode': 'invalid'  # Invalid mode
             }
         }
         config = Config(**config_data)
@@ -238,9 +234,7 @@ class TestLoadConfig:
             'system': {
                 'name': 'SixBTC',
                 'version': '1.0.0',
-                'scalability': {
-                    'execution_mode': 'sync'
-                }
+                'execution_mode': 'sync'
             },
             'trading': {
                 'timeframes': {
@@ -277,8 +271,7 @@ class TestLoadConfig:
 system:
   name: SixBTC
   version: 1.0.0
-  scalability:
-    execution_mode: sync
+  execution_mode: sync
 trading:
   timeframes:
     available: [15m, 30m]

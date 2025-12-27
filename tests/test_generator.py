@@ -22,26 +22,14 @@ from src.strategies.base import StrategyCore, Signal
 
 @pytest.fixture
 def mock_config():
-    """Mock configuration"""
+    """Mock configuration for new AIClient structure"""
     return {
         'ai': {
-            'providers': [
-                {
-                    'name': 'openai',
-                    'model': 'gpt-4',
-                    'api_key': 'test_key_openai',
-                    'enabled': True
-                },
-                {
-                    'name': 'anthropic',
-                    'model': 'claude-3-5-sonnet',
-                    'api_key': 'test_key_anthropic',
-                    'enabled': True
-                }
-            ],
-            'rotation_strategy': 'round_robin',
-            'max_retries': 3,
-            'timeout': 30
+            'mode': 'cli',
+            'cli': {
+                'model': 'claude',
+                'timeout': 300
+            }
         },
         'generation': {
             'strategies_per_cycle': 20,
@@ -91,172 +79,142 @@ class TestAIManager:
     """Test AI provider management"""
 
     def test_initialization(self, mock_config):
-        """Test AI manager initialization"""
-        manager = AIManager(mock_config['ai'])
+        """Test AI manager initialization with CLI provider"""
+        with patch('src.ai.cli_provider.CLIProvider.is_available_sync') as mock_avail:
+            mock_avail.return_value = True
+            manager = AIManager(mock_config)
 
-        assert len(manager.providers) == 2
-        assert manager.current_provider_idx == 0
-        assert manager.rotation_strategy == 'round_robin'
+            # New AIManager wraps AIClient with CLI provider
+            assert manager._provider_name == 'cli:claude'
+            assert manager.client is not None
 
-    def test_generate_with_openai(self, mock_config):
-        """Test strategy generation with OpenAI"""
-        # Create manager
-        manager = AIManager(mock_config['ai'])
+    def test_generate_with_cli(self, mock_config):
+        """Test strategy generation with CLI provider"""
+        with patch('src.ai.cli_provider.CLIProvider.is_available_sync') as mock_avail:
+            mock_avail.return_value = True
+            with patch('src.ai.cli_provider.CLIProvider.generate_response') as mock_gen:
+                # Mock CLI response
+                import asyncio
+                future = asyncio.Future()
+                future.set_result("class Strategy_TEST:\n    pass")
+                mock_gen.return_value = future
 
-        # Mock OpenAI client directly in the manager's clients dict
-        mock_client = Mock()
-        mock_response = Mock()
-        mock_response.choices = [
-            Mock(message=Mock(content="class Strategy_TEST:\n    pass"))
-        ]
-        mock_response.usage = Mock(total_tokens=100)
-        mock_client.chat.completions.create.return_value = mock_response
+                manager = AIManager(mock_config)
 
-        # Replace the openai client with our mock
-        manager.clients['openai'] = mock_client
+                with patch.object(manager.client, 'generate_response_sync') as mock_sync:
+                    mock_sync.return_value = "class Strategy_TEST:\n    pass"
 
-        result = manager.generate(
-            prompt="Generate a momentum strategy",
-            provider='openai'
-        )
+                    result = manager.generate(
+                        prompt="Generate a momentum strategy"
+                    )
 
-        assert "class Strategy_TEST" in result
-        mock_client.chat.completions.create.assert_called_once()
+                    assert "class Strategy_TEST" in result
+                    mock_sync.assert_called_once()
 
-    def test_provider_rotation_round_robin(self, mock_config):
-        """Test round-robin provider rotation"""
-        manager = AIManager(mock_config['ai'])
+    def test_get_provider_name(self, mock_config):
+        """Test getting provider name"""
+        with patch('src.ai.cli_provider.CLIProvider.is_available_sync') as mock_avail:
+            mock_avail.return_value = True
+            manager = AIManager(mock_config)
 
-        # First call should use provider 0
-        assert manager.current_provider_idx == 0
-
-        # Rotate
-        manager._rotate_provider()
-        assert manager.current_provider_idx == 1
-
-        # Rotate again (should wrap)
-        manager._rotate_provider()
-        assert manager.current_provider_idx == 0
+            provider_name = manager.get_provider_name()
+            assert provider_name == 'cli:claude'
 
     def test_retry_on_failure(self, mock_config):
-        """Test retry logic on provider failure"""
-        # Create manager
-        manager = AIManager(mock_config['ai'])
+        """Test retry logic on failure"""
+        with patch('src.ai.cli_provider.CLIProvider.is_available_sync') as mock_avail:
+            mock_avail.return_value = True
+            manager = AIManager(mock_config)
 
-        # Mock first call fails, second succeeds
-        mock_client_openai = Mock()
-        mock_success_response = Mock()
-        mock_success_response.choices = [Mock(message=Mock(content="Success"))]
-        mock_success_response.usage = Mock(total_tokens=50)
+            with patch.object(manager.client, 'generate_response_sync') as mock_sync:
+                mock_sync.return_value = "Success"
 
-        # First provider (openai) fails
-        mock_client_openai.chat.completions.create.side_effect = Exception("API Error")
+                result = manager.generate_with_retry(
+                    prompt="Test",
+                    max_retries=3
+                )
 
-        # Second provider (anthropic) succeeds
-        mock_client_anthropic = Mock()
-        mock_anthropic_response = Mock()
-        mock_anthropic_response.content = [Mock(text="Success")]
-        mock_anthropic_response.usage = Mock(input_tokens=25, output_tokens=25)
-        mock_client_anthropic.messages.create.return_value = mock_anthropic_response
-
-        # Replace the clients with our mocks
-        manager.clients['openai'] = mock_client_openai
-        manager.clients['anthropic'] = mock_client_anthropic
-
-        result = manager.generate_with_retry(
-            prompt="Test",
-            max_retries=2
-        )
-
-        assert result == "Success"
-        # First provider should be called once and fail
-        assert mock_client_openai.chat.completions.create.call_count == 1
-        # Second provider should be called once and succeed
-        assert mock_client_anthropic.messages.create.call_count == 1
+                assert result == "Success"
+                mock_sync.assert_called_once()
 
 
 class TestPatternFetcher:
     """Test pattern fetching from pattern-discovery API"""
 
     @patch('requests.get')
-    
-    def test_fetch_top_patterns(self, mock_get, mock_config, sample_patterns):
-        """Test fetching top patterns"""
-        # Mock API response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'patterns': sample_patterns,
-            'total': len(sample_patterns)
+    def test_fetch_production_patterns(self, mock_get, mock_config, sample_patterns):
+        """Test fetching production patterns"""
+        # Mock health check and API response
+        health_response = Mock()
+        health_response.status_code = 200
+
+        patterns_response = Mock()
+        patterns_response.status_code = 200
+        patterns_response.json.return_value = {
+            'patterns': sample_patterns
         }
-        mock_get.return_value = mock_response
+
+        mock_get.side_effect = [health_response, patterns_response]
 
         fetcher = PatternFetcher(mock_config['generation']['pattern_discovery_url'])
-        patterns = fetcher.fetch_top_patterns(
-            tier=1,
-            limit=10,
-            min_edge=0.03
-        )
+        patterns = fetcher.fetch_production_patterns(tier=1, limit=10)
 
         assert len(patterns) == 2
         assert patterns[0]['pattern_id'] == 'RSI_OVERSOLD_001'
-        assert patterns[0]['performance']['edge'] >= 0.03
 
     @patch('requests.get')
-    
-    def test_fetch_patterns_by_type(self, mock_get, mock_config, sample_patterns):
-        """Test fetching patterns by type"""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'patterns': [p for p in sample_patterns if p['type'] == 'REV']
+    def test_get_tier_1_patterns(self, mock_get, mock_config):
+        """Test fetching Tier 1 patterns"""
+        # Mock health check and API response
+        health_response = Mock()
+        health_response.status_code = 200
+
+        patterns_response = Mock()
+        patterns_response.status_code = 200
+        patterns_response.json.return_value = {
+            'patterns': [
+                {
+                    'id': 'test-123',
+                    'name': 'Test Pattern',
+                    'formula': 'RSI < 30',
+                    'tier': 1,
+                    'target_name': 'target_up_24h',
+                    'target_direction': 'bullish',
+                    'test_edge': 0.05,
+                    'test_win_rate': 0.62,
+                    'test_n_signals': 100,
+                    'quality_score': 0.8
+                }
+            ]
         }
-        mock_get.return_value = mock_response
+
+        mock_get.side_effect = [health_response, patterns_response]
 
         fetcher = PatternFetcher(mock_config['generation']['pattern_discovery_url'])
-        patterns = fetcher.fetch_by_type(pattern_type='REV')
+        patterns = fetcher.get_tier_1_patterns(limit=10, min_quality_score=0.75)
 
         assert len(patterns) == 1
-        assert patterns[0]['type'] == 'REV'
+        assert patterns[0].name == 'Test Pattern'
+        assert patterns[0].tier == 1
 
     @patch('requests.get')
-    
     def test_handle_api_error(self, mock_get, mock_config):
         """Test handling API errors"""
+        # Mock health check failure
         mock_get.side_effect = Exception("Connection error")
 
+        # PatternFetcher handles connection errors gracefully
         fetcher = PatternFetcher(mock_config['generation']['pattern_discovery_url'])
+        assert fetcher.is_available() is False
 
-        with pytest.raises(Exception):
-            fetcher.fetch_top_patterns()
+        # Methods return empty when unavailable
+        patterns = fetcher.fetch_production_patterns()
+        assert patterns == []
 
 
 class TestStrategyBuilder:
     """Test strategy code building"""
 
-    
-    def test_build_from_pattern(self, sample_patterns):
-        """Test building strategy from pattern"""
-        builder = StrategyBuilder()
-
-        code = builder.build_from_pattern(sample_patterns[0])
-
-        # Validate generated code
-        assert "class Strategy_" in code
-        assert "StrategyCore" in code
-        assert "generate_signal" in code
-        assert "rsi_period = 14" in code
-
-        # Should be valid Python
-        try:
-            ast.parse(code)
-            is_valid = True
-        except SyntaxError:
-            is_valid = False
-
-        assert is_valid is True
-
-    
     def test_build_from_template(self):
         """Test building strategy from Jinja2 template"""
         builder = StrategyBuilder()
@@ -361,70 +319,58 @@ class TestStrategyCodeQuality:
         for pattern in forbidden:
             assert pattern not in code
 
-    
-    def test_imports_present(self):
-        """Test that necessary imports are included"""
-        builder = StrategyBuilder()
-
-        code = builder.build_from_pattern({
-            'pattern_id': 'TEST',
-            'type': 'MOM',
-            'conditions': {'rsi_period': 14}
-        })
-
-        # Should have necessary imports
-        assert 'import pandas as pd' in code or 'from pandas' in code
-        assert 'StrategyCore' in code
-        assert 'Signal' in code
-
-    
-    def test_type_hints(self):
-        """Test that type hints are present"""
-        builder = StrategyBuilder()
-
-        code = builder.build_from_pattern({
-            'pattern_id': 'TEST',
-            'type': 'MOM',
-            'conditions': {}
-        })
-
-        # Should have type hints
-        assert 'pd.DataFrame' in code
-        assert 'Signal | None' in code or 'Optional[Signal]' in code
-
-
 class TestGeneratorIntegration:
     """Integration tests for complete generation workflow"""
 
     @patch('requests.get')
-    def test_full_generation_workflow(
+    def test_pattern_fetching_workflow(
         self,
         mock_get,
         mock_config,
         sample_patterns
     ):
-        """Test complete strategy generation workflow"""
-        # Mock pattern API
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {'patterns': sample_patterns}
-        mock_get.return_value = mock_response
+        """Test pattern fetching workflow"""
+        # Mock health check and pattern API
+        health_response = Mock()
+        health_response.status_code = 200
 
-        # 1. Fetch patterns
+        patterns_response = Mock()
+        patterns_response.status_code = 200
+        patterns_response.json.return_value = {'patterns': sample_patterns}
+
+        mock_get.side_effect = [health_response, patterns_response]
+
+        # Fetch patterns
         fetcher = PatternFetcher(mock_config['generation']['pattern_discovery_url'])
-        patterns = fetcher.fetch_top_patterns(tier=1, limit=5)
+        patterns = fetcher.fetch_production_patterns(tier=1, limit=5)
 
-        # 2. Build strategy
-        builder = StrategyBuilder()
-        code = builder.build_from_pattern(patterns[0])
-
-        # 3. Validate
-        assert builder.validate_code(code) is True
-
-        # Complete workflow validation
+        # Validate patterns fetched correctly
         assert len(patterns) > 0
-        assert "class Strategy_" in code
-        assert "generate_signal" in code
+        first = patterns[0]
+        # Check pattern_id field (dict format from sample_patterns fixture)
+        assert first['pattern_id'] == 'RSI_OVERSOLD_001'
+        assert first['type'] == 'REV'
+
+    def test_strategy_validation(self):
+        """Test strategy code validation (without AI generation)"""
+        builder = StrategyBuilder()
+
+        valid_code = '''import pandas as pd
+import talib as ta
+from src.strategies.base import StrategyCore, Signal
+
+class Strategy_MOM_test123(StrategyCore):
+    leverage = 5
+
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
+        if len(df) < 50:
+            return None
+        rsi = ta.RSI(df['close'], timeperiod=14)
+        if rsi.iloc[-1] < 30:
+            return Signal(direction='long', atr_stop_multiplier=2.0, atr_take_multiplier=3.0, reason="RSI oversold")
+        return None
+'''
+        assert builder.validate_code(valid_code) is True
 
 
 if __name__ == '__main__':

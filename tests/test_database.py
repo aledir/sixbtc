@@ -52,7 +52,7 @@ class Strategy_MOM_abc123(StrategyCore):
         'ai_provider': 'claude',
         'generation_prompt': 'Generate momentum strategy',
         'pattern_based': False,
-        'status': 'PENDING'
+        'status': 'GENERATED'
     }
 
 
@@ -163,7 +163,7 @@ class TestBacktestResultModel:
             strategy_type='MOM',
             timeframe='15m',
             code='test code',
-            status='PENDING'
+            status='GENERATED'
         )
         test_db.add(strategy)
         test_db.commit()
@@ -399,9 +399,9 @@ class TestDatabaseManager:
         strategy.status = 'TESTED'
         test_db.rollback()
 
-        # Status should still be PENDING
+        # Status should still be GENERATED
         result = test_db.query(Strategy).filter_by(id=strategy_id).first()
-        assert result.status == 'PENDING'
+        assert result.status == 'GENERATED'
 
 
 class TestDatabaseIntegration:
@@ -415,7 +415,7 @@ class TestDatabaseIntegration:
             strategy_type='MOM',
             timeframe='15m',
             code='test code',
-            status='PENDING'
+            status='GENERATED'
         )
         test_db.add(strategy)
         test_db.commit()

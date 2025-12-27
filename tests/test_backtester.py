@@ -30,7 +30,7 @@ class MockStrategy(StrategyCore):
         self.symbol = 'BTC'
         self.params = params
 
-    def generate_signal(self, df: pd.DataFrame) -> Signal | None:
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
         """Simple momentum strategy"""
         if len(df) < 20:
             return None

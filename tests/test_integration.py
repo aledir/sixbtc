@@ -159,7 +159,7 @@ class MockGeneratedStrategy(StrategyCore):
         self.symbol = 'BTC/USDT'
         self.quality = quality
 
-    def generate_signal(self, df: pd.DataFrame) -> Signal | None:
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
         if len(df) < 50:
             return None
 
@@ -497,7 +497,7 @@ class TestSystemResilience:
         """Test system handles backtest failures gracefully"""
         # Strategy that will fail
         class FailingStrategy(StrategyCore):
-            def generate_signal(self, df):
+            def generate_signal(self, df, symbol=None):
                 raise Exception("Intentional failure")
 
         strategy = FailingStrategy()
@@ -515,7 +515,7 @@ class TestSystemResilience:
     def test_handles_empty_signal_stream(self, full_config, sample_market_data):
         """Test system handles strategies that produce no signals"""
         class NoSignalStrategy(StrategyCore):
-            def generate_signal(self, df):
+            def generate_signal(self, df, symbol=None):
                 return None  # Never signals
 
         strategy = NoSignalStrategy()

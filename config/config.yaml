@@ -11,13 +11,14 @@
 system:
   name: "SixBTC"
   version: "1.0.0"
-  deployment_mode: auto  # auto, standalone, docker, supervisor
+  execution_mode: hybrid  # sync, async, multiprocess, hybrid
 
-  # Scalability settings
-  scalability:
-    max_strategies: 1000  # Architecture designed for up to 1000 live strategies
-    execution_mode: hybrid  # sync, async, multiprocess, hybrid
-    worker_pool_size: 10  # For multiprocess/hybrid mode (CPU cores)
+# ==============================================================================
+# DIRECTORIES
+# ==============================================================================
+directories:
+  strategies: strategies
+  data: data
 
 # ==============================================================================
 # DATABASE (PostgreSQL via Docker)
@@ -30,375 +31,199 @@ database:
   user: ${DB_USER}
   password: ${DB_PASSWORD}
 
-  # Connection pool (scales with number of strategies)
   pool:
     min_connections: 5
-    max_connections: 50  # Increase for high-load scenarios
-    pool_timeout: 30
+    max_connections: 50
     pool_recycle: 3600
 
 # ==============================================================================
 # HYPERLIQUID EXCHANGE
 # ==============================================================================
 hyperliquid:
-  # API Configuration
-  base_url: https://api.hyperliquid.xyz
   private_key: ${HL_PRIVATE_KEY}
   vault_address: ${HL_VAULT_ADDRESS}
 
-  # Fee Structure
-  maker_fee: 0.0000  # 0% maker fee
-  taker_fee: 0.00045  # 0.045% taker fee (4.5 basis points)
-  expected_slippage: 0.0005  # 0.05% estimated slippage
+  # Fees for backtesting (taker fee = market orders)
+  fee_rate: 0.00045  # 0.045% taker fee
+  slippage: 0.0005   # 0.05% estimated slippage
 
-  # WebSocket Configuration
   websocket:
-    max_symbols_per_connection: 100  # Hyperliquid limit
-    auto_reconnect: true
     ping_interval: 30
     ping_timeout: 10
 
-  # Subaccounts
   subaccounts:
-    total: 10  # Production: use all 10 subaccounts
+    total: 10
     test_mode:
-      enabled: false  # Set true for testing phase
-      count: 3  # Use only 3 subaccounts in test mode
-      capital_per_account: 100  # $100 per subaccount for testing
+      enabled: false
+      count: 3
+      capital_per_account: 100
 
 # ==============================================================================
 # TRADING CONFIGURATION
 # ==============================================================================
 trading:
-  # Timeframes (strategies distributed across all)
-  # Compatible with pattern-discovery validated timeframes
-  # Note: 5m excluded (pattern-discovery doesn't validate - too noisy for 4-year walk-forward)
-  # Note: 2h, 8h, 12h excluded (sample size issues for 6-month backtests)
   timeframes:
     available: ['15m', '30m', '1h', '4h', '1d']
-    primary: '15m'  # Default if not specified
-
-  # Data Sources
-  data:
-    # Live data (Hyperliquid WebSocket)
-    live_source: hyperliquid_websocket
-    lookback_bars: 1000  # Bars to keep in cache per symbol/timeframe
-
-    # Historical data (Binance for backtesting)
-    historical_source: binance
-    common_symbols_only: true  # Only coins on both HL and Binance
-    min_volume_24h: 5000000  # $5M minimum 24h volume
-
-  # Symbol Universe
-  symbols:
-    mode: dynamic  # dynamic or static
-    dynamic:
-      universe_size: 100  # Monitor top 100 coins by volume
-      update_frequency_hours: 24  # Refresh universe daily
-    static:
-      # Used only if mode = static
-      list: ['BTC', 'ETH', 'SOL', 'ARB', 'AVAX']
 
 # ==============================================================================
-# RISK MANAGEMENT (Fixed Fractional + ATR-Based)
+# RISK MANAGEMENT
 # ==============================================================================
 risk:
-  # Position Sizing Method
-  sizing_mode: atr  # 'fixed' or 'atr' (ATR recommended for crypto)
+  sizing_mode: atr  # 'fixed' or 'atr'
 
-  # Fixed Fractional Settings
   fixed_fractional:
-    risk_per_trade_pct: 0.02  # 2% of subaccount capital per trade
-    max_position_size_pct: 0.20  # Max 20% of capital in single position
+    risk_per_trade_pct: 0.02
+    max_position_size_pct: 0.20
 
-  # ATR-Based Settings (when sizing_mode = 'atr')
   atr:
-    period: 14  # ATR calculation period (bars)
-    stop_multiplier: 2.0  # Stop loss at 2×ATR from entry
-    take_profit_multiplier: 3.0  # Take profit at 3×ATR (1.5:1 R:R)
-    min_risk_reward: 1.5  # Minimum R:R ratio to accept trade
-
-    # ATR Volatility Adjustments
+    period: 14
+    stop_multiplier: 2.0
+    take_profit_multiplier: 3.0
+    min_risk_reward: 1.5
     volatility_scaling:
       enabled: true
-      low_volatility_threshold: 0.015  # <1.5% ATR → increase size
-      high_volatility_threshold: 0.05  # >5% ATR → decrease size
-      scaling_factor: 0.5  # Adjustment multiplier
+      low_volatility_threshold: 0.015
+      high_volatility_threshold: 0.05
+      scaling_factor: 0.5
 
-  # Global Position Limits
   limits:
-    max_open_positions_total: 100  # Total across all subaccounts
-    max_open_positions_per_subaccount: 4  # Per subaccount limit
-    max_leverage: 10  # Maximum leverage per position
-    max_correlated_positions: 5  # Max positions in correlated assets
+    max_open_positions_per_subaccount: 4
 
-  # Emergency Stops
   emergency:
-    # Portfolio-level stops
-    max_portfolio_drawdown: 0.30  # 30% total portfolio DD → stop all
-    max_daily_loss: 0.10  # 10% daily loss → stop all
-
-    # Subaccount-level stops
-    max_subaccount_drawdown: 0.25  # 25% subaccount DD → retire strategy
-    max_consecutive_losses: 5  # 5 consecutive losses → pause strategy
-
-    # Strategy-level stops
-    max_strategy_degradation: 0.50  # -50% vs backtest edge → retire
+    max_portfolio_drawdown: 0.30
+    max_daily_loss: 0.10
+    max_subaccount_drawdown: 0.25
+    max_consecutive_losses: 5
 
 # ==============================================================================
-# STRATEGY GENERATION (AI-Powered)
+# AI CONFIGURATION
+# ==============================================================================
+ai:
+  mode: cli  # "cli" or "api"
+  cli:
+    model: claude
+    timeout: 300
+  api:
+    model: claude-sonnet-4-20250514
+    timeout: 120
+
+# ==============================================================================
+# STRATEGY GENERATION
 # ==============================================================================
 generation:
-  # Frequency and Batch Size
-  frequency_hours: 4  # Generate new strategies every 4 hours
-  batch_size: 50  # Strategies per generation cycle
-
-  # AI Providers (multi-provider rotation)
-  ai_providers:
-    enabled: ['claude', 'gemini', 'codex']
-    rotation_mode: round_robin  # round_robin, random, weighted
-    timeout_seconds: 600  # 10 minutes per strategy generation
-
-  # Pattern Discovery Integration
+  frequency_hours: 4
+  batch_size: 50
+  min_quality_score: 0.75
+  max_fix_attempts: 3
   pattern_discovery:
-    enabled: true
     api_url: http://localhost:8001
-    tier_filter: 1  # Only use Tier 1 patterns (highest quality)
-    min_quality_score: 0.75
-    max_patterns_per_strategy: 3  # Combine up to 3 patterns
 
-  # Strategy Type Distribution
-  strategy_types:
-    pattern_based_pct: 0.30  # 30% use pattern-discovery patterns
-    custom_logic_pct: 0.70  # 70% custom AI-generated logic
+  # Leverage range for generated strategies
+  leverage:
+    min: 3
+    max: 20
 
-  # Timeframe Distribution (strategie distribuite equamente)
-  # Compatible with pattern-discovery (15m, 30m, 1h, 4h, 1d)
-  timeframe_distribution:
-    '15m': 0.25  # 25% of strategies (most signals, validated by pattern-discovery)
-    '30m': 0.20  # 20% of strategies
-    '1h': 0.25   # 25% of strategies
-    '4h': 0.20   # 20% of strategies (popular swing timeframe)
-    '1d': 0.10   # 10% of strategies (fewer signals, highest quality)
+  # SL/TP limits (strategy decides, config enforces limits)
+  sl_limits:
+    atr:
+      min_multiplier: 1.0
+      max_multiplier: 4.0
+    percentage:
+      min_pct: 0.005    # 0.5% minimum
+      max_pct: 0.10     # 10% maximum
 
 # ==============================================================================
-# BACKTESTING (VectorBT Engine)
+# BACKTESTING
 # ==============================================================================
 backtesting:
-  # Parallel Execution
-  parallel_workers: 10  # Number of parallel backtest workers
-  execution_mode: async  # sync, async, multiprocess
+  lookback_days: 180
+  initial_capital: 10000
 
-  # Backtest Parameters
-  lookback_days: 180  # 6 months of historical data
-  initial_capital: 10000  # $10k starting capital for backtest
+  # Multi-pair backtesting
+  backtest_pairs_count: 100  # Top N pairs by volume from database
 
-  # Minimum Performance Thresholds
+  # Dual-period backtesting (full + recent)
+  recent_period_days: 60     # Recent period for "in-form" validation
+  full_period_weight: 0.60   # Weight for full period score
+  recent_period_weight: 0.40 # Weight for recent period score
+
   thresholds:
-    min_sharpe: 1.0  # Minimum Sharpe ratio
-    min_win_rate: 0.55  # Minimum 55% win rate
-    min_total_trades: 100  # Minimum 100 trades
-    min_expectancy: 0.02  # Minimum 2% edge per trade
-    max_drawdown: 0.30  # Maximum 30% drawdown
-
-  # Parameter Optimization
-  optimization:
-    enabled: true
-    max_parameters: 4  # Limit to prevent overfitting
-    walk_forward:
-      enabled: true
-      windows: 4  # Number of expanding windows
-      min_stability: 0.70  # Minimum parameter stability across windows
-
-  # Validation Pipeline
-  validation:
-    # Lookahead Bias Detection
-    lookahead_check:
-      ast_analysis: true  # AST-based pattern detection
-      forbidden_patterns:
-        - "rolling.*center=True"  # Centered rolling
-        - "shift\\(-\\d+\\)"  # Negative shift
-        - "iloc\\[.*\\+.*\\]"  # Future index access
-
-    # Shuffle Test (Empirical Validation)
-    shuffle_test:
-      enabled: true
-      iterations: 100  # Number of shuffle iterations
-      min_p_value: 0.05  # Minimum p-value to pass
+    min_sharpe: 1.0
+    min_win_rate: 0.55
+    min_total_trades: 100
+    min_expectancy: 0.02
+    max_drawdown: 0.30
 
 # ==============================================================================
 # CLASSIFICATION & SELECTION
 # ==============================================================================
 classification:
-  # Selection Frequency
-  frequency_hours: 1  # Re-classify strategies every hour
-
-  # Composite Scoring Weights
+  frequency_hours: 1
   score_weights:
-    edge: 0.40  # 40% weight on expectancy
-    sharpe: 0.30  # 30% weight on Sharpe ratio
-    consistency: 0.20  # 20% weight on time-in-profit
-    stability: 0.10  # 10% weight on walk-forward stability
-
-  # Diversification Constraints
+    edge: 0.40
+    sharpe: 0.30
+    consistency: 0.20
+    stability: 0.10
   diversification:
-    max_same_type: 3  # Max 3 strategies of same type (MOM, REV, etc.)
-    max_same_timeframe: 5  # Max 5 strategies on same timeframe
-    min_correlation_threshold: 0.70  # Reject if correlation >0.7
-
-  # Market Regime Filtering (from sevenbtc)
-  market_regime:
-    enabled: true
-    detection_mode: auto  # auto, defensive, active, hunting
-    regime_preferences:
-      trending:
-        favor_types: ['TRN', 'BRE', 'MOM']
-      ranging:
-        favor_types: ['REV', 'MMK', 'GRD']
-      volatile:
-        favor_types: ['VOL', 'SCA']
+    max_same_type: 3
+    max_same_timeframe: 5
 
 # ==============================================================================
 # DEPLOYMENT & ROTATION
 # ==============================================================================
 deployment:
-  # Rotation Frequency
-  rotation_frequency_hours: 24  # Rotate strategies daily
-
-  # Deployment Strategy
-  strategy:
-    mode: gradual  # gradual or instant
-    gradual:
-      strategies_per_cycle: 3  # Replace 3 strategies at a time
-      cycle_interval_hours: 8  # Every 8 hours
-
-  # Shutdown Behavior
+  rotation_frequency_hours: 24
   shutdown:
-    close_positions: false  # Keep positions open on shutdown
-    cancel_orders: true  # Always cancel pending orders
-    graceful_timeout: 30  # Seconds to wait for graceful shutdown
+    close_positions: false
+    cancel_orders: true
 
 # ==============================================================================
-# EXECUTION & ORCHESTRATION
-# ==============================================================================
-execution:
-  # Main Orchestrator Settings
-  orchestrator:
-    mode: hybrid  # sync, async, multiprocess, hybrid
-    scheduling:
-      mode: adaptive  # fixed, adaptive
-      adaptive:
-        batch_strategies_same_tf: true  # Execute same-TF strategies together
-        max_iteration_time: 60  # Max 60s per iteration
-
-  # API Client Settings
-  api:
-    timeout: 10.0  # Hyperliquid API timeout (seconds)
-    max_retries: 3
-    retry_delay: 1.0  # Exponential backoff starting delay
-    rate_limit:
-      max_requests_per_second: 10
-      burst_size: 20
-
-  # Order Execution
-  orders:
-    default_type: market  # market or limit
-    slippage_tolerance: 0.01  # 1% max slippage
-    partial_fill_min_pct: 0.90  # Accept if ≥90% filled
-
-# ==============================================================================
-# MONITORING & HEALTH
+# MONITORING
 # ==============================================================================
 monitoring:
-  # Performance Snapshots
-  snapshot_interval_minutes: 15  # Save performance snapshot every 15min
+  snapshot_interval_minutes: 15
 
-  # Health Check (for Docker/K8s)
-  health_check:
-    enabled: true
-    port: 8080
-    endpoint: /health
-    checks:
-      - websocket_connected
-      - database_connected
-      - strategies_loaded
-      - no_critical_errors
-
-  # Dashboard
-  dashboard:
-    enabled: true
-    refresh_seconds: 5
-    display_mode: rich  # rich or simple
-
-  # Alerting
-  alerts:
-    enabled: true
-    channels:
-      - email  # Requires email config in .env
-      - log  # Always log to file
-
-    triggers:
-      emergency_stop: true
-      strategy_retired: true
-      high_drawdown: true
-      api_errors: true
+# ==============================================================================
+# PROCESSES
+# ==============================================================================
+processes:
+  generator:
+    parallel_threads: 1
+    daily_limit: 400
+    min_interval_seconds: 0
+  validator:
+    parallel_threads: 5
+  backtester:
+    parallel_threads: 10
+  classifier:
+    interval_hours: 1
+  subaccount_manager:
+    dry_run: true
+    rotation_interval_hours: 24
+    rebalance_enabled: true
 
 # ==============================================================================
 # LOGGING
 # ==============================================================================
 logging:
-  # Log Levels
-  level: INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
-
-  # Log Files
+  level: INFO
   file: logs/sixbtc.log
-  max_bytes: 10485760  # 10MB per file
-  backup_count: 5  # Keep 5 backup files
-
-  # Per-Module Logging
+  max_bytes: 10485760
+  backup_count: 5
   modules:
     orchestrator: INFO
     executor: INFO
     backtester: INFO
     generator: INFO
-    data_provider: WARNING  # Reduce WebSocket noise
-
-  # Format (ASCII only, no emojis)
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  date_format: "%Y-%m-%d %H:%M:%S"
+    data_provider: WARNING
 
 # ==============================================================================
-# DEVELOPMENT & TESTING
+# DATA SCHEDULER
 # ==============================================================================
-development:
-  # Debug Mode
-  debug:
-    enabled: false  # Enable for verbose output
-    save_prompts: false  # Save AI prompts to debug/
-    save_responses: false  # Save AI responses to debug/
-    save_market_snapshots: false  # Save market data snapshots
+data_scheduler:
+  enabled: true
+  update_hours: [4, 16]
+  top_pairs_count: 200
+  min_volume_usd: 0
+  download_days: null
 
-  # Testing
-  testing:
-    dry_run: false  # Enable for paper trading (no real orders)
-    mock_hyperliquid: false  # Use mock Hyperliquid client
-    fast_mode: false  # Skip some validations for speed
-
-# ==============================================================================
-# PERFORMANCE TUNING
-# ==============================================================================
-performance:
-  # Memory Management
-  memory:
-    max_cache_size_mb: 2048  # 2GB max for OHLCV cache
-    cache_cleanup_interval_hours: 6  # Cleanup old data every 6h
-
-  # CPU Optimization
-  cpu:
-    use_numba: true  # Use Numba JIT for calculations
-    parallel_indicator_calc: true  # Parallel indicator calculation
-
-  # Network Optimization
-  network:
-    connection_pool_size: 50  # HTTP connection pool
-    websocket_buffer_size: 65536  # 64KB WebSocket buffer

@@ -74,9 +74,7 @@ class RiskManager:
 
         # Position limits
         limits_config = self.config['limits']
-        self.max_positions_total = limits_config['max_open_positions_total']
         self.max_positions_per_subaccount = limits_config['max_open_positions_per_subaccount']
-        self.max_leverage = limits_config['max_leverage']
 
         # Emergency stops
         emergency_config = self.config['emergency']
@@ -350,9 +348,6 @@ class RiskManager:
             Tuple of (allowed, reason)
         """
         # Check position count limits
-        if current_positions_count >= self.max_positions_total:
-            return False, f"Max total positions ({self.max_positions_total}) reached"
-
         if subaccount_positions_count >= self.max_positions_per_subaccount:
             return False, f"Max subaccount positions ({self.max_positions_per_subaccount}) reached"
 
@@ -362,11 +357,6 @@ class RiskManager:
 
         if position_notional > max_notional:
             return False, f"Position size ${position_notional:.2f} exceeds max ${max_notional:.2f}"
-
-        # Check leverage limit
-        leverage = position_notional / account_balance
-        if leverage > self.max_leverage:
-            return False, f"Leverage {leverage:.1f}x exceeds max {self.max_leverage}x"
 
         return True, "OK"
 
@@ -411,9 +401,7 @@ class RiskManager:
             'atr_period': self.atr_period,
             'atr_stop_multiplier': self.atr_stop_multiplier,
             'atr_take_profit_multiplier': self.atr_take_profit_multiplier,
-            'max_positions_total': self.max_positions_total,
             'max_positions_per_subaccount': self.max_positions_per_subaccount,
-            'max_leverage': self.max_leverage,
             'volatility_scaling_enabled': self.scaling_enabled
         }
 

@@ -2,11 +2,26 @@
 Strategy Builder - AI-Powered Strategy Generation
 
 Generates StrategyCore classes using AI with pattern integration and validation.
+
+Two generation modes:
+1. Pattern-based: Translates validated patterns from pattern-discovery API
+   - One pattern = one strategy (no combinations)
+   - Direction forced from pattern's target_direction
+   - Uses pattern's suggested SL/TP parameters
+
+2. Template-based: AI generates parameterized templates, system generates variations
+   - AI creates ~20 templates/day with Jinja2 placeholders
+   - 21 valid template structures (entry/exit combinations)
+   - ParametricGenerator creates parameter combinations (no AI cost)
+   - Walk-forward validation filters overfitting
+
+Logic: Patterns first, templates as fallback when no patterns available.
 """
 
 import ast
 import re
 import uuid
+import random
 from typing import Optional, Literal
 from dataclasses import dataclass
 import logging
@@ -15,10 +30,16 @@ from pathlib import Path
 
 from src.generator.ai_manager import AIManager
 from src.generator.pattern_fetcher import PatternFetcher, Pattern
+from src.generator.template_generator import TemplateGenerator
+from src.generator.parametric_generator import (
+    ParametricGenerator,
+    GeneratedStrategy as ParametricStrategy
+)
+from src.database.models import StrategyTemplate
 
 logger = logging.getLogger(__name__)
 
-StrategyType = Literal['MOM', 'REV', 'TRN', 'BRE', 'VOL', 'ARB']
+StrategyType = Literal['MOM', 'REV', 'TRN', 'BRE', 'VOL', 'SCA']
 
 
 @dataclass
@@ -32,6 +53,12 @@ class GeneratedStrategy:
     ai_provider: str
     validation_passed: bool
     validation_errors: list[str]
+    leverage: int = 1
+    pattern_id: Optional[str] = None  # Pattern UUID if pattern-based
+    generation_mode: str = "custom"  # "pattern", "custom", or "template"
+    template_id: Optional[str] = None  # Template UUID if template-based
+    parameters: Optional[dict] = None  # Parameters used if template-based
+    parameter_hash: Optional[str] = None  # Hash for deduplication
 
 
 class StrategyBuilder:
@@ -40,7 +67,8 @@ class StrategyBuilder:
 
     Features:
     - Pattern-based generation (using pattern-discovery)
-    - Custom AI logic generation
+    - Template-based generation (AI templates + parametric variations)
+    - 21 valid template structures for maximum diversification
     - AST-based validation (lookahead bias detection)
     - Automatic code fixing
     """
@@ -60,7 +88,7 @@ class StrategyBuilder:
             try:
                 # Try to create AI manager if config provided
                 if config and 'ai' in config:
-                    self.ai_manager = AIManager(config['ai'])
+                    self.ai_manager = AIManager(config)  # Pass full config
                 else:
                     self.ai_manager = None
                     logger.warning("No AI config provided, AI generation disabled")
@@ -83,6 +111,14 @@ class StrategyBuilder:
             lstrip_blocks=True
         )
 
+        # Initialize template-based generators
+        if init_ai and config and 'ai' in config:
+            self.template_generator = TemplateGenerator(config)
+        else:
+            self.template_generator = None
+
+        self.parametric_generator = ParametricGenerator()
+
     def _default_config(self) -> dict:
         """Default configuration (for tests only - production must provide full config)"""
         return {
@@ -92,56 +128,56 @@ class StrategyBuilder:
                 },
                 'pattern_tier_filter': 1,
                 'min_quality_score': 0.75,
-                'pattern_based_pct': 0.30,
-                'max_fix_attempts': 3
+                'max_fix_attempts': 3,
+                'leverage': {
+                    'min': 3,
+                    'max': 20
+                }
             }
         }
 
-    def generate_strategy(
-        self,
-        strategy_type: StrategyType,
-        timeframe: str,
-        use_patterns: bool = True
-    ) -> GeneratedStrategy:
+    def _get_random_leverage(self) -> int:
+        """Get random leverage within configured range"""
+        lev_config = self.config.get('generation', {}).get('leverage', {})
+        min_lev = lev_config.get('min', 3)
+        max_lev = lev_config.get('max', 20)
+        return random.randint(min_lev, max_lev)
+
+    def generate_from_pattern(self, pattern: Pattern) -> Optional[GeneratedStrategy]:
         """
-        Generate a complete StrategyCore class
+        Generate strategy from a single validated pattern
+
+        One pattern = one strategy. Direction is forced from pattern.
 
         Args:
-            strategy_type: Type of strategy (MOM, REV, TRN, etc.)
-            timeframe: Target timeframe ('5m', '15m', '1h', etc.)
-            use_patterns: Whether to use pattern-discovery patterns
+            pattern: Validated pattern from pattern-discovery API
 
         Returns:
-            GeneratedStrategy object with code and metadata
+            GeneratedStrategy object or None if generation failed
         """
         strategy_id = self._generate_id()
+        leverage = self._get_random_leverage()
+
+        # Use pattern's strategy_type if available, otherwise derive from name
+        strategy_type = pattern.strategy_type or self._derive_strategy_type(pattern)
 
         logger.info(
-            f"Generating {strategy_type} strategy for {timeframe} (ID: {strategy_id})"
+            f"Generating pattern-based {strategy_type} strategy for {pattern.timeframe} "
+            f"(ID: {strategy_id}, pattern: {pattern.name})"
         )
 
-        # Fetch patterns if requested
-        patterns = []
-        if use_patterns:
-            patterns = self._fetch_patterns(timeframe)
-            if patterns:
-                logger.info(f"Using {len(patterns)} patterns from pattern-discovery")
-            else:
-                logger.info("No patterns available, using custom AI logic")
-
-        # Build prompt
-        template = self.template_env.get_template('generate_strategy.j2')
+        # Build prompt using pattern template
+        template = self.template_env.get_template('generate_from_pattern.j2')
         prompt = template.render(
-            strategy_type=strategy_type,
-            timeframe=timeframe,
+            pattern=pattern,
             strategy_id=strategy_id,
-            patterns=patterns
+            leverage=leverage
         )
 
         # Generate code with AI
         try:
-            response = self.ai_manager.generate(prompt, max_tokens=4000, temperature=0.7)
-            code = self._extract_code_block(response.content)
+            response = self.ai_manager.generate(prompt, max_tokens=4000, temperature=0.5)
+            code = self._extract_code_block(response)
 
             # Validate
             validation_passed, errors = self._validate_code(code)
@@ -150,80 +186,362 @@ class StrategyBuilder:
             if not validation_passed:
                 logger.warning(f"Initial validation failed: {errors}")
                 code = self._fix_code(code, errors)
+                if code is None:
+                    logger.error(f"Failed to fix code for pattern {pattern.name}")
+                    return None
                 validation_passed, errors = self._validate_code(code)
-
-            pattern_ids = [p.id for p in patterns]
 
             return GeneratedStrategy(
                 code=code,
                 strategy_id=strategy_id,
                 strategy_type=strategy_type,
-                timeframe=timeframe,
-                patterns_used=pattern_ids,
-                ai_provider=response.provider,
+                timeframe=pattern.timeframe,
+                patterns_used=[pattern.id],
+                ai_provider=self.ai_manager.get_provider_name(),
                 validation_passed=validation_passed,
-                validation_errors=errors
+                validation_errors=errors,
+                leverage=leverage,
+                pattern_id=pattern.id,
+                generation_mode="pattern"
             )
 
         except Exception as e:
-            logger.error(f"Strategy generation failed: {e}")
-            raise
+            logger.error(f"Pattern-based generation failed for {pattern.name}: {e}")
+            return None
+
+    def generate_strategy(
+        self,
+        strategy_type: StrategyType,
+        timeframe: str,
+        use_patterns: bool = True,
+        patterns: Optional[list] = None
+    ) -> Optional[GeneratedStrategy]:
+        """
+        Generate a complete StrategyCore class
+
+        Priority:
+        1. Use provided patterns
+        2. Fetch patterns from pattern-discovery
+        3. Fallback to template-based generation
+
+        Args:
+            strategy_type: Type of strategy (MOM, REV, TRN, etc.)
+            timeframe: Target timeframe ('5m', '15m', '1h', etc.)
+            use_patterns: Whether to use pattern-discovery patterns
+            patterns: Pre-selected patterns (if provided, uses first one)
+
+        Returns:
+            GeneratedStrategy object or None if generation failed
+        """
+        # If patterns provided, use first one (one pattern = one strategy)
+        if patterns and len(patterns) > 0:
+            return self.generate_from_pattern(patterns[0])
+
+        # If use_patterns, try to fetch one
+        if use_patterns:
+            fetched_patterns = self._fetch_patterns(timeframe)
+            if fetched_patterns:
+                return self.generate_from_pattern(fetched_patterns[0])
+
+        # Fallback to template-based generation
+        logger.info(f"No patterns available, using template-based generation")
+        if self.template_generator:
+            template = self.template_generator.generate_template(strategy_type, timeframe)
+            if template:
+                variations = self.parametric_generator.generate_variations(template, max_variations=1)
+                if variations:
+                    return self._convert_parametric_strategy(variations[0], template)
+
+        logger.error("No generation method available (no patterns, no template generator)")
+        return None
+
+    def _derive_strategy_type(self, pattern: Pattern) -> StrategyType:
+        """Derive strategy type from pattern characteristics"""
+        # Use pattern's strategy_type if available
+        if pattern.strategy_type:
+            return pattern.strategy_type
+
+        # Derive from target_name if strategy_type not set
+        target = pattern.target_name.lower()
+        if 'despite' in target or 'reversal' in target:
+            return 'REV'
+        elif 'continues' in target or 'trend' in target:
+            return 'TRN'
+        elif 'breakout' in target or 'break' in target:
+            return 'BRE'
+        elif 'volatility' in target or 'squeeze' in target:
+            return 'VOL'
+        else:
+            return 'MOM'  # Default to momentum
 
     def generate_batch(
         self,
         count: int,
         timeframes: Optional[list[str]] = None,
         strategy_types: Optional[list[StrategyType]] = None,
-        pattern_based_pct: float = 0.30
+        existing_templates: Optional[list[StrategyTemplate]] = None
     ) -> list[GeneratedStrategy]:
         """
-        Generate multiple strategies
+        Generate multiple strategies using patterns first, then templates
+
+        Strategy:
+        1. Use all available patterns first (one pattern = one strategy)
+        2. Fall back to template-based generation when patterns are exhausted
 
         Args:
             count: Number of strategies to generate
-            timeframes: List of timeframes to distribute across
-            strategy_types: List of strategy types to use
-            pattern_based_pct: Percentage of pattern-based strategies
+            timeframes: List of timeframes for template strategies
+            strategy_types: List of strategy types for template strategies
+            existing_templates: Existing templates to use (optional)
 
         Returns:
-            List of GeneratedStrategy objects
+            List of GeneratedStrategy objects (valid only, None excluded)
         """
-        timeframes = timeframes or ['5m', '15m', '30m', '1h', '4h', '1d']
-        strategy_types = strategy_types or ['MOM', 'REV', 'TRN', 'BRE']
+        timeframes = timeframes or ['15m', '30m', '1h', '4h', '1d']
+        strategy_types = strategy_types or ['MOM', 'REV', 'TRN', 'BRE', 'VOL']
 
         strategies = []
-        pattern_count = int(count * pattern_based_pct)
+        generated_count = 0
 
-        for i in range(count):
-            # Round-robin distribution
-            tf = timeframes[i % len(timeframes)]
-            st = strategy_types[i % len(strategy_types)]
-            use_patterns = i < pattern_count
+        # Step 1: Fetch all available patterns
+        all_patterns = self._fetch_all_patterns()
+        logger.info(f"Found {len(all_patterns)} patterns available for generation")
 
-            try:
-                strategy = self.generate_strategy(st, tf, use_patterns)
+        # Step 2: Generate from patterns first
+        for pattern in all_patterns:
+            if generated_count >= count:
+                break
+
+            strategy = self.generate_from_pattern(pattern)
+            if strategy is not None:
                 strategies.append(strategy)
+                generated_count += 1
                 logger.info(
-                    f"Generated {i+1}/{count}: {strategy.strategy_id} "
-                    f"(validated: {strategy.validation_passed})"
+                    f"Generated {generated_count}/{count}: {strategy.strategy_id} "
+                    f"(pattern: {pattern.name}, validated: {strategy.validation_passed})"
                 )
-            except Exception as e:
-                logger.error(f"Failed to generate strategy {i+1}/{count}: {e}")
 
-        success_count = sum(1 for s in strategies if s.validation_passed)
+        # Step 3: Fill remaining with template-based generation
+        templates_needed = count - generated_count
+        if templates_needed > 0:
+            logger.info(f"Patterns exhausted, generating {templates_needed} template-based strategies")
+
+            if self.template_generator:
+                # Generate new templates if needed
+                templates_to_generate = (templates_needed // 50) + 1  # ~50 variations per template
+                new_templates = self.template_generator.generate_batch(count=templates_to_generate)
+
+                # Combine with existing templates
+                all_templates = list(existing_templates or []) + new_templates
+
+                # Generate variations until we have enough
+                for template in all_templates:
+                    if generated_count >= count:
+                        break
+
+                    remaining = count - generated_count
+                    variations = self.parametric_generator.generate_variations(
+                        template,
+                        max_variations=remaining
+                    )
+
+                    for ps in variations:
+                        if generated_count >= count:
+                            break
+                        strategy = self._convert_parametric_strategy(ps, template)
+                        strategies.append(strategy)
+                        generated_count += 1
+                        logger.info(
+                            f"Generated {generated_count}/{count}: {strategy.strategy_id} "
+                            f"(template: {template.name}, validated: {strategy.validation_passed})"
+                        )
+            else:
+                logger.warning("Template generator not available, cannot fill remaining count")
+
+        # Summary
+        pattern_count = sum(1 for s in strategies if s.generation_mode == "pattern")
+        template_count = sum(1 for s in strategies if s.generation_mode == "template")
+        validated_count = sum(1 for s in strategies if s.validation_passed)
+
         logger.info(
-            f"Batch generation complete: {success_count}/{len(strategies)} validated"
+            f"Batch generation complete: {len(strategies)} strategies "
+            f"({pattern_count} pattern-based, {template_count} template-based), "
+            f"{validated_count} validated"
         )
 
         return strategies
 
+    # ========== TEMPLATE-BASED GENERATION ==========
+
+    def generate_template_batch(
+        self,
+        count: int = 20
+    ) -> list[StrategyTemplate]:
+        """
+        Generate new AI templates (daily cycle)
+
+        Creates parameterized templates with Jinja2 placeholders
+        that can generate thousands of parameter variations.
+
+        Args:
+            count: Number of templates to generate (default 20)
+
+        Returns:
+            List of generated StrategyTemplate objects
+        """
+        if not self.template_generator:
+            logger.error("Template generator not initialized - AI config required")
+            return []
+
+        logger.info(f"Generating {count} new AI templates")
+        return self.template_generator.generate_batch(count=count)
+
+    def generate_from_templates(
+        self,
+        templates: list[StrategyTemplate],
+        max_variations_per_template: Optional[int] = None
+    ) -> list[GeneratedStrategy]:
+        """
+        Generate strategies from templates using parametric variations
+
+        No AI cost - just Jinja2 rendering with different parameters.
+
+        Args:
+            templates: List of StrategyTemplate objects
+            max_variations_per_template: Limit variations per template (None = all)
+
+        Returns:
+            List of GeneratedStrategy objects
+        """
+        all_strategies = []
+
+        for template in templates:
+            try:
+                # Generate parametric variations
+                parametric_strategies = self.parametric_generator.generate_variations(
+                    template,
+                    max_variations=max_variations_per_template
+                )
+
+                # Convert to GeneratedStrategy format
+                for ps in parametric_strategies:
+                    strategy = self._convert_parametric_strategy(ps, template)
+                    all_strategies.append(strategy)
+
+                logger.info(
+                    f"Generated {len(parametric_strategies)} variations from "
+                    f"template {template.name}"
+                )
+
+            except Exception as e:
+                logger.error(f"Failed to generate from template {template.name}: {e}")
+
+        valid_count = sum(1 for s in all_strategies if s.validation_passed)
+        logger.info(
+            f"Template generation complete: {len(all_strategies)} strategies, "
+            f"{valid_count} validated"
+        )
+
+        return all_strategies
+
+    def _convert_parametric_strategy(
+        self,
+        ps: ParametricStrategy,
+        template: StrategyTemplate
+    ) -> GeneratedStrategy:
+        """Convert ParametricStrategy to GeneratedStrategy format"""
+        return GeneratedStrategy(
+            code=ps.code,
+            strategy_id=ps.strategy_id,
+            strategy_type=ps.strategy_type,
+            timeframe=ps.timeframe,
+            patterns_used=[],
+            ai_provider=template.ai_provider or "template",
+            validation_passed=ps.validation_passed,
+            validation_errors=ps.validation_errors,
+            leverage=1,  # Set from parameters if available
+            pattern_id=None,
+            generation_mode="template",
+            template_id=ps.template_id,
+            parameters=ps.parameters,
+            parameter_hash=ps.parameter_hash
+        )
+
+    def generate_daily_batch(
+        self,
+        new_templates_count: int = 20,
+        existing_templates: Optional[list[StrategyTemplate]] = None,
+        max_variations_per_template: Optional[int] = None
+    ) -> tuple[list[StrategyTemplate], list[GeneratedStrategy]]:
+        """
+        Daily generation cycle: new templates + parametric variations
+
+        This is the main entry point for the template-based pipeline:
+        1. Generate new AI templates (~20/day)
+        2. Generate parametric variations from ALL templates
+        3. Walk-forward validation filters overfitting (done by backtester)
+
+        Args:
+            new_templates_count: Number of new templates to generate
+            existing_templates: Existing templates from database
+            max_variations_per_template: Limit variations (None = all)
+
+        Returns:
+            Tuple of (new_templates, all_strategies)
+        """
+        # Step 1: Generate new AI templates
+        new_templates = []
+        if new_templates_count > 0 and self.template_generator:
+            new_templates = self.generate_template_batch(count=new_templates_count)
+            logger.info(f"Generated {len(new_templates)} new AI templates")
+
+        # Step 2: Combine with existing templates
+        all_templates = list(existing_templates or []) + new_templates
+        logger.info(f"Total templates for variation generation: {len(all_templates)}")
+
+        # Step 3: Generate parametric variations from ALL templates
+        all_strategies = self.generate_from_templates(
+            templates=all_templates,
+            max_variations_per_template=max_variations_per_template
+        )
+
+        # Summary
+        logger.info(
+            f"Daily batch complete: "
+            f"{len(new_templates)} new templates, "
+            f"{len(all_templates)} total templates, "
+            f"{len(all_strategies)} strategies generated"
+        )
+
+        return new_templates, all_strategies
+
+    def estimate_variations(
+        self,
+        templates: list[StrategyTemplate]
+    ) -> int:
+        """Estimate total strategies from a batch of templates"""
+        return self.parametric_generator.estimate_batch_size(templates)
+
+    def _fetch_all_patterns(self) -> list[Pattern]:
+        """Fetch all available patterns from pattern-discovery"""
+        try:
+            min_quality = self.config.get('generation', {}).get('min_quality_score', 0.75)
+            return self.pattern_fetcher.get_tier_1_patterns(
+                limit=100,  # Fetch up to 100 patterns
+                min_quality_score=min_quality
+            )
+        except Exception as e:
+            logger.warning(f"Failed to fetch patterns: {e}")
+            return []
+
     def _fetch_patterns(self, timeframe: str) -> list[Pattern]:
         """Fetch patterns from pattern-discovery"""
         try:
+            min_quality = self.config.get('generation', {}).get('min_quality_score', 0.75)
             return self.pattern_fetcher.get_tier_1_patterns(
                 timeframe=timeframe,
                 limit=10,
-                min_quality_score=self.config['min_quality_score']
+                min_quality_score=min_quality
             )
         except Exception as e:
             logger.warning(f"Failed to fetch patterns: {e}")
@@ -245,68 +563,6 @@ class StrategyBuilder:
         """
         unique_id = str(uuid.uuid4())[:8]
         return f"Strategy_{strategy_type}_{unique_id}"
-
-    def build_from_pattern(self, pattern: dict) -> str:
-        """
-        Build strategy code from a pattern
-
-        Args:
-            pattern: Pattern dictionary from pattern-discovery
-
-        Returns:
-            Generated strategy code
-        """
-        # Generate unique ID
-        pattern_type = pattern.get('type', 'GEN')
-        strategy_id = self.generate_strategy_id(pattern_type)
-
-        # Extract pattern conditions
-        conditions = pattern.get('conditions', {})
-
-        # Build basic strategy code
-        code_parts = [
-            "import pandas as pd",
-            "import talib as ta",
-            "from src.strategies.base import StrategyCore, Signal",
-            "",
-            f"class {strategy_id}(StrategyCore):",
-            '    """',
-            f"    Generated from pattern: {pattern.get('pattern_id', 'UNKNOWN')}",
-            f"    Type: {pattern_type}",
-            f"    Description: {pattern.get('description', 'No description')}",
-            '    """',
-            "",
-            "    def generate_signal(self, df: pd.DataFrame) -> Signal | None:",
-            "        # Minimum data check",
-            "        if len(df) < 50:",
-            "            return None",
-            "",
-        ]
-
-        # Add indicator calculations based on conditions
-        for key, value in conditions.items():
-            if 'period' in key.lower():
-                code_parts.append(f"        {key} = {value}")
-
-        code_parts.extend([
-            "",
-            "        # Calculate indicators",
-        ])
-
-        # Add RSI if mentioned
-        if 'rsi' in str(conditions).lower():
-            rsi_period = conditions.get('rsi_period', 14)
-            code_parts.append(f"        rsi = ta.RSI(df['close'], timeperiod={rsi_period})")
-
-        # Add entry logic
-        code_parts.extend([
-            "",
-            "        # Entry conditions",
-            "        # TODO: Implement pattern logic",
-            "        return None",
-        ])
-
-        return "\n".join(code_parts)
 
     def build_from_template(
         self,
@@ -521,7 +777,7 @@ class {strategy_name}(StrategyCore):
 
         return errors
 
-    def _fix_code(self, code: str, errors: list[str]) -> str:
+    def _fix_code(self, code: str, errors: list[str]) -> Optional[str]:
         """
         Attempt to fix code using AI
 
@@ -530,7 +786,7 @@ class {strategy_name}(StrategyCore):
             errors: List of validation errors
 
         Returns:
-            Fixed code
+            Fixed code if successful, None if all attempts failed
         """
         # Get max attempts from config - if missing, use reasonable default (not critical)
         max_attempts = self.config.get('generation', {}).get('max_fix_attempts', 3)
@@ -543,7 +799,7 @@ class {strategy_name}(StrategyCore):
 
             try:
                 response = self.ai_manager.generate(prompt, max_tokens=4000, temperature=0.3)
-                fixed_code = self._extract_code_block(response.content)
+                fixed_code = self._extract_code_block(response)
 
                 # Validate fixed code
                 validation_passed, new_errors = self._validate_code(fixed_code)
@@ -552,10 +808,12 @@ class {strategy_name}(StrategyCore):
                     logger.info(f"Code fixed successfully on attempt {attempt + 1}")
                     return fixed_code
 
+                # Update code and errors for next attempt
+                code = fixed_code
                 errors = new_errors
 
             except Exception as e:
                 logger.error(f"Code fix attempt {attempt + 1} failed: {e}")
 
-        logger.warning(f"Failed to fix code after {max_attempts} attempts")
-        return code  # Return original if fixing failed
+        logger.warning(f"Failed to fix code after {max_attempts} attempts - returning None")
+        return None  # Return None if fixing failed (do NOT save invalid code)

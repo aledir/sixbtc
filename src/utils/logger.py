@@ -81,8 +81,9 @@ def setup_logging(
         console=console,
         rich_tracebacks=True,
         tracebacks_show_locals=False,
-        show_time=False,  # Time already in file logs
-        show_path=False   # Clean console output
+        show_time=True,   # Show timestamps in console output
+        show_path=False,  # Clean console output
+        log_time_format="%Y-%m-%d %H:%M:%S"  # Custom timestamp format
     )
     console_handler.setLevel(getattr(logging, log_level.upper()))
     root_logger.addHandler(console_handler)

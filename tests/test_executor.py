@@ -121,43 +121,60 @@ class TestHyperliquidClient:
 
     # Enabled
     def test_initialization_fails_without_dry_run(self, mock_config):
-        """Test that live mode is blocked in tests"""
-        config = mock_config['executor'].copy()
-        config['dry_run'] = False
+        """Test that live mode is blocked in tests without credentials"""
+        with patch('src.executor.hyperliquid_client.Info') as mock_info:
+            mock_info_instance = MagicMock()
+            mock_info_instance.meta.return_value = {'universe': []}
+            mock_info.return_value = mock_info_instance
 
-        # Should raise error or log warning
-        with pytest.raises(ValueError, match="Live trading not allowed in tests"):
-            HyperliquidClient(config)
+            # Should raise error when trying live mode without credentials
+            with pytest.raises(ValueError, match="Live trading requires valid private_key and wallet_address"):
+                HyperliquidClient(dry_run=False)
 
     def test_get_account_state(self, mock_config):
         """Test fetching account state in dry-run mode"""
-        client = HyperliquidClient(mock_config['executor'])
+        with patch('src.executor.hyperliquid_client.Info') as mock_info:
+            mock_info_instance = MagicMock()
+            mock_info_instance.meta.return_value = {'universe': []}
+            mock_info_instance.user_state.return_value = {
+                'marginSummary': {'accountValue': '10000.0'},
+                'assetPositions': []
+            }
+            mock_info.return_value = mock_info_instance
 
-        # Dry-run mode returns mock data - default balance is $10,000
-        state = client.get_account_state('0x123')
+            client = HyperliquidClient(mock_config['executor'])
+            state = client.get_account_state('0x123')
 
-        assert state['marginSummary']['accountValue'] == '10000.0'
-        assert 'assetPositions' in state
-        assert isinstance(state['assetPositions'], list)
+            assert state['marginSummary']['accountValue'] == '10000.0'
+            assert 'assetPositions' in state
+            assert isinstance(state['assetPositions'], list)
 
     def test_get_open_positions(self, mock_config):
         """Test getting open positions in dry-run mode"""
-        client = HyperliquidClient(mock_config['executor'])
+        with patch('src.executor.hyperliquid_client.Info') as mock_info:
+            mock_info_instance = MagicMock()
+            mock_info_instance.meta.return_value = {'universe': []}
+            mock_info_instance.user_state.return_value = {
+                'marginSummary': {'accountValue': '10000.0'},
+                'assetPositions': [{
+                    'position': {
+                        'coin': 'BTC',
+                        'szi': '0.01',
+                        'entryPx': '50000.0',
+                        'unrealizedPnl': '0.0'
+                    }
+                }]
+            }
+            mock_info.return_value = mock_info_instance
 
-        # First, place an order to create a position
-        client.place_order(
-            symbol='BTC',
-            side='buy',
-            size=0.01,
-            order_type='market',
-            dry_run=True
-        )
+            client = HyperliquidClient(mock_config['executor'])
+            client.wallet_address = '0x123'  # Set wallet for position queries
 
-        positions = client.get_open_positions('0x123')
+            positions = client.get_open_positions('0x123')
 
-        assert len(positions) == 1
-        assert positions[0]['coin'] == 'BTC'
-        assert float(positions[0]['szi']) == 0.01
+            assert len(positions) == 1
+            assert positions[0]['coin'] == 'BTC'
+            assert float(positions[0]['szi']) == 0.01
 
     # Enabled
     def test_place_order_dry_run(self, mock_config):
@@ -180,30 +197,50 @@ class TestHyperliquidClient:
 
     # Enabled
     def test_place_order_blocks_live_mode(self, mock_config):
-        """Test that live orders are blocked"""
-        client = HyperliquidClient(mock_config['executor'])
+        """Test that live orders fail without exchange client"""
+        with patch('src.executor.hyperliquid_client.Info') as mock_info:
+            mock_info_instance = MagicMock()
+            mock_info_instance.meta.return_value = {'universe': [
+                {'name': 'BTC', 'szDecimals': 5, 'maxLeverage': 40}
+            ]}
+            mock_info_instance.all_mids.return_value = {'BTC': '50000.0'}
+            mock_info.return_value = mock_info_instance
 
-        with pytest.raises(ValueError, match="Live trading disabled"):
-            client.place_order(
+            # Client in dry_run mode has no exchange_client
+            client = HyperliquidClient(mock_config['executor'])
+            assert client.exchange_client is None
+
+            # Attempting live order (dry_run=False) should fail gracefully
+            result = client.place_order(
                 symbol='BTC',
                 side='buy',
                 size=0.01,
                 order_type='market',
-                dry_run=False  # Attempt live order
+                dry_run=False  # Attempt live order without exchange client
             )
 
+            # Should return error (not raise exception for graceful handling)
+            assert result['status'] == 'error'
+
     def test_get_market_data(self, mock_config):
-        """Test fetching market data in dry-run mode"""
-        client = HyperliquidClient(mock_config['executor'])
+        """Test fetching market data"""
+        with patch('src.executor.hyperliquid_client.Info') as mock_info:
+            mock_info_instance = MagicMock()
+            mock_info_instance.meta.return_value = {'universe': []}
+            mock_info_instance.all_mids.return_value = {
+                'BTC': '50000.0',
+                'ETH': '3000.0'
+            }
+            mock_info.return_value = mock_info_instance
 
-        # Dry-run mode returns mock prices
-        prices = client.get_current_prices()
+            client = HyperliquidClient(mock_config['executor'])
+            prices = client.get_current_prices()
 
-        # Verify we get a dict with BTC and ETH prices
-        assert 'BTC' in prices
-        assert 'ETH' in prices
-        assert prices['BTC'] == 50000.0
-        assert prices['ETH'] == 3000.0
+            # Verify we get a dict with BTC and ETH prices
+            assert 'BTC' in prices
+            assert 'ETH' in prices
+            assert prices['BTC'] == 50000.0
+            assert prices['ETH'] == 3000.0
 
 
 class TestSubaccountManager:

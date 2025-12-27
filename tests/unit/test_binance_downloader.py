@@ -44,6 +44,7 @@ def downloader(mock_config):
     config_mock = Mock()
     config_mock.get = Mock(side_effect=lambda k, default=None: {
         'data.cache_dir': mock_config['data']['cache_dir'],
+        'data_scheduler.min_volume_usd': mock_config['trading']['data']['min_volume_24h'],
     }.get(k, default))
     config_mock.get_required = Mock(return_value=mock_config['trading']['data']['min_volume_24h'])
 

@@ -335,20 +335,9 @@ class TestRiskManager:
         )
         assert allowed is True, f"Should be allowed but got: {reason}"
 
-        # Exceeds total limit
-        allowed, reason = rm.check_risk_limits(
-            new_position_size=0.1,
-            current_positions_count=100,
-            subaccount_positions_count=2,
-            account_balance=10000.0,
-            current_price=42000.0
-        )
-        assert allowed is False
-        assert 'Max total positions' in reason
-
         # Exceeds subaccount limit
         allowed, reason = rm.check_risk_limits(
-            new_position_size=0.1,
+            new_position_size=0.01,  # Small size to not trigger position size limit
             current_positions_count=50,
             subaccount_positions_count=4,
             account_balance=10000.0,
@@ -471,7 +460,7 @@ class TestRiskManager:
         assert summary['sizing_mode'] == 'atr'
         assert summary['risk_per_trade_pct'] == 0.02
         assert summary['atr_period'] == 14
-        assert summary['max_positions_total'] == 100
+        assert summary['max_positions_per_subaccount'] == 4  # Per-subaccount limit
         assert summary['volatility_scaling_enabled'] is True
 
     def test_realistic_scenario_btc(self, atr_config, sample_ohlcv):

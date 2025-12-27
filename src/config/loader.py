@@ -234,10 +234,10 @@ def _validate_config(config: Config) -> None:
         )
 
     # Validate execution mode
-    exec_mode = config.get('system.scalability.execution_mode')
+    exec_mode = config.get('system.execution_mode')
     if exec_mode not in ['sync', 'async', 'multiprocess', 'hybrid']:
         raise ValueError(
-            f"system.scalability.execution_mode must be one of "
+            f"system.execution_mode must be one of "
             f"['sync', 'async', 'multiprocess', 'hybrid'], got '{exec_mode}'"
         )
 
@@ -260,8 +260,7 @@ if __name__ == "__main__":
         print(f"\nSystem: {config.get('system.name')} v{config.get('system.version')}")
         print(f"Timeframes: {config.get('trading.timeframes.available')}")
         print(f"Risk sizing: {config.get('risk.sizing_mode')}")
-        print(f"Max strategies: {config.get('system.scalability.max_strategies')}")
-        print(f"Execution mode: {config.get('system.scalability.execution_mode')}")
+        print(f"Execution mode: {config.get('system.execution_mode')}")
         print(f"\nDatabase: {config.get('database.host')}:{config.get('database.port')}")
         print(f"Database name: {config.get('database.database')}")
         print("\n" + "="*60)
