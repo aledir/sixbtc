@@ -126,11 +126,7 @@ class TestConfigValidation:
     def test_validate_valid_config(self):
         """Test validation passes for valid config"""
         config_data = {
-            'trading': {
-                'timeframes': {
-                    'available': ['15m', '30m', '1h']
-                }
-            },
+            'timeframes': ['15m', '30m', '1h'],  # Global timeframes at root level
             'risk': {
                 'sizing_mode': 'atr'
             },
@@ -140,7 +136,7 @@ class TestConfigValidation:
                 'database': 'sixbtc'
             },
             'system': {
-                'execution_mode': 'sync'  # Correct path: system.execution_mode
+                'execution_mode': 'sync'
             }
         }
         config = Config(**config_data)
@@ -151,11 +147,7 @@ class TestConfigValidation:
     def test_validate_invalid_timeframe_raises(self):
         """Test validation fails for invalid timeframe"""
         config_data = {
-            'trading': {
-                'timeframes': {
-                    'available': ['15m', '99m']  # Invalid timeframe
-                }
-            },
+            'timeframes': ['15m', '99m'],  # Invalid timeframe
             'risk': {'sizing_mode': 'atr'},
             'database': {'host': 'localhost', 'port': 5432, 'database': 'sixbtc'},
             'system': {'execution_mode': 'sync'}
@@ -168,11 +160,7 @@ class TestConfigValidation:
     def test_validate_empty_timeframes_raises(self):
         """Test validation fails for empty timeframes"""
         config_data = {
-            'trading': {
-                'timeframes': {
-                    'available': []  # Empty list
-                }
-            },
+            'timeframes': [],  # Empty list
             'risk': {'sizing_mode': 'atr'},
             'database': {'host': 'localhost', 'port': 5432, 'database': 'sixbtc'},
             'system': {'execution_mode': 'sync'}
@@ -185,7 +173,7 @@ class TestConfigValidation:
     def test_validate_invalid_sizing_mode_raises(self):
         """Test validation fails for invalid sizing mode"""
         config_data = {
-            'trading': {'timeframes': {'available': ['15m']}},
+            'timeframes': ['15m'],
             'risk': {'sizing_mode': 'invalid'},  # Invalid mode
             'database': {'host': 'localhost', 'port': 5432, 'database': 'sixbtc'},
             'system': {'execution_mode': 'sync'}
@@ -198,7 +186,7 @@ class TestConfigValidation:
     def test_validate_incomplete_database_raises(self):
         """Test validation fails for incomplete database config"""
         config_data = {
-            'trading': {'timeframes': {'available': ['15m']}},
+            'timeframes': ['15m'],
             'risk': {'sizing_mode': 'atr'},
             'database': {'host': 'localhost'},  # Missing port and database
             'system': {'execution_mode': 'sync'}
@@ -211,7 +199,7 @@ class TestConfigValidation:
     def test_validate_invalid_execution_mode_raises(self):
         """Test validation fails for invalid execution mode"""
         config_data = {
-            'trading': {'timeframes': {'available': ['15m']}},
+            'timeframes': ['15m'],
             'risk': {'sizing_mode': 'atr'},
             'database': {'host': 'localhost', 'port': 5432, 'database': 'sixbtc'},
             'system': {
@@ -236,11 +224,7 @@ class TestLoadConfig:
                 'version': '1.0.0',
                 'execution_mode': 'sync'
             },
-            'trading': {
-                'timeframes': {
-                    'available': ['15m', '30m', '1h']
-                }
-            },
+            'timeframes': ['15m', '30m', '1h'],  # Global timeframes at root
             'risk': {
                 'sizing_mode': 'atr'
             },
@@ -259,7 +243,7 @@ class TestLoadConfig:
         config = load_config(config_file)
 
         assert config.get('system.name') == 'SixBTC'
-        assert config.get('trading.timeframes.available') == ['15m', '30m', '1h']
+        assert config.get('timeframes') == ['15m', '30m', '1h']
         assert config.get('risk.sizing_mode') == 'atr'
 
     def test_load_config_with_env_vars(self, tmp_path):
@@ -272,9 +256,7 @@ system:
   name: SixBTC
   version: 1.0.0
   execution_mode: sync
-trading:
-  timeframes:
-    available: [15m, 30m]
+timeframes: [15m, 30m]
 risk:
   sizing_mode: atr
 database:
@@ -317,11 +299,8 @@ database:
 system:
   name: SixBTC
   version: 1.0.0
-  scalability:
-    execution_mode: sync
-trading:
-  timeframes:
-    available: [15m]
+  execution_mode: sync
+timeframes: [15m]
 risk:
   sizing_mode: atr
 database:

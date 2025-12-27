@@ -53,9 +53,9 @@ class ContinuousValidatorProcess:
         self.shutdown_event = threading.Event()
         self.force_exit = False
 
-        # Process configuration
-        proc_config = self.config.get('processes', {}).get('validator', {})
-        self.parallel_threads = proc_config.get('parallel_threads', 5)
+        # Process configuration (from validation section)
+        validation_config = self.config.get('validation', {})
+        self.parallel_threads = validation_config.get('parallel_threads', 5)
 
         # ThreadPoolExecutor for parallel validation
         self.executor = ThreadPoolExecutor(

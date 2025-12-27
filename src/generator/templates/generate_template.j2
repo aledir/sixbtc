@@ -155,11 +155,12 @@ REQUIRED PARAMETERS (include ALL of these):
 {% if structure.exit_indicator %}
 - {{ "{{ exit_threshold }}" }} - Exit indicator threshold
 {% endif %}
-- {{ "{{ atr_multiplier }}" }} - ATR multiplier for stop loss
+- {{ "{{ atr_multiplier }}" }} - ATR multiplier for stop loss (be creative with values!)
 {% if structure.time_exit %}
 - {{ "{{ exit_bars }}" }} - Number of bars for time-based exit
 {% endif %}
-- {{ "{{ leverage }}" }} - Position leverage
+
+NOTE: Do NOT include "leverage" as a parameter - it will be assigned automatically by the system.
 
 OPTIONAL ADDITIONAL PARAMETERS (choose 1-3 based on your entry logic category):
 
@@ -224,7 +225,7 @@ class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
 {% if structure.time_exit %}
     - exit_bars: Time-based exit after N bars
 {% endif %}
-    - leverage: Position leverage
+    - leverage: Assigned automatically by system (not a template parameter)
 
 {% if structure.entry_long and structure.entry_short %}
     Entry Long: [describe long entry condition]
@@ -244,7 +245,7 @@ class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
 {% endif %}
     """
 
-    leverage = {{ "{{ leverage }}" }}
+    leverage = {{ "__LEVERAGE__" }}  # Will be replaced by system
 
     def __init__(self, params: dict = None):
         super().__init__(params)
@@ -340,22 +341,44 @@ class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
 
 === PARAMETERS SCHEMA ===
 
-After the code, provide a JSON schema with parameter values:
+After the code, provide a JSON schema with parameter values.
+Be CREATIVE with the values - don't just copy the examples below!
 
 ```json
 {
-  "indicator_period": {"type": "int", "values": [7, 14, 21, 28]},
-  "entry_threshold": {"type": "int", "values": [25, 30, 35, 40]},
+  "indicator_period": {"type": "int", "values": [YOUR_CHOICES]},
+  "entry_threshold": {"type": "int_or_float", "values": [YOUR_CHOICES]},
 {% if structure.exit_indicator %}
-  "exit_threshold": {"type": "int", "values": [45, 50, 55, 60]},
+  "exit_threshold": {"type": "int_or_float", "values": [YOUR_CHOICES]},
 {% endif %}
-  "atr_multiplier": {"type": "float", "values": [1.5, 2.0, 2.5, 3.0]},
-{% if structure.time_exit %}
-  "exit_bars": {"type": "int", "values": [10, 20, 30, 50]},
-{% endif %}
-  "leverage": {"type": "int", "values": [3, 5, 10, 15]}
+  "atr_multiplier": {"type": "float", "values": [YOUR_CHOICES]}{% if structure.time_exit %},
+  "exit_bars": {"type": "int", "values": [YOUR_CHOICES]}{% endif %}
+
 }
 ```
+
+GUIDELINES for parameter values:
+- indicator_period: typically 5-50 for oscillators, 10-200 for MAs
+- entry_threshold: depends on indicator (RSI: 20-40, Z-score: 1.5-3.0, etc.)
+- atr_multiplier: typically 1.0-5.0 (tighter = more trades, wider = fewer trades)
+{% if structure.time_exit %}
+- exit_bars: MUST be appropriate for {{ timeframe }} timeframe:
+{% if timeframe == '15m' %}
+  * 15m: use 8-24 bars (2-6 hours holding time)
+{% elif timeframe == '30m' %}
+  * 30m: use 6-16 bars (3-8 hours holding time)
+{% elif timeframe == '1h' %}
+  * 1h: use 4-12 bars (4-12 hours holding time)
+{% elif timeframe == '4h' %}
+  * 4h: use 3-6 bars (12h-1 day holding time)
+{% elif timeframe == '1d' %}
+  * 1d: use 2-5 bars (2-5 days holding time)
+{% else %}
+  * Use reasonable values for {{ timeframe }} (avoid holding more than 1-2 days)
+{% endif %}
+{% endif %}
+- DO NOT include "leverage" - it's assigned by the system
+- Aim for 3-5 values per parameter
 
 === FINAL CHECKLIST ===
 
@@ -384,8 +407,9 @@ Before generating, verify:
 [ ] NO exit_after_bars parameter
 {% endif %}
 [ ] All Jinja2 placeholders use double braces {{ "{{ }}" }}
-[ ] Parameter schema matches placeholders in code
+[ ] Parameter schema matches placeholders in code (NO leverage!)
 [ ] 50-200 total parameter combinations
+[ ] leverage = {{ "__LEVERAGE__" }} is in class body (will be replaced by system)
 
 Generate the complete parameterized template now.
 
@@ -395,3 +419,4 @@ REQUIREMENTS:
 3. In the docstring, specify which ENTRY LOGIC CATEGORY you chose
 4. Parameters schema must match the placeholders in your code
 5. Aim for 50-200 total parameter combinations
+6. Do NOT include leverage in parameters - use {{ "__LEVERAGE__" }} placeholder

@@ -3,19 +3,52 @@ Parametric Generator - Generate Strategy Variations from Templates
 
 Takes a StrategyTemplate with Jinja2 placeholders and generates
 multiple concrete strategies by applying parameter combinations.
+
+Leverage is assigned randomly from the database coins table:
+- min = MIN(coins.max_leverage) from active coins
+- max = MAX(coins.max_leverage) from active coins
+At execution time: actual_leverage = min(strategy.leverage, coin.max_leverage)
 """
 
 import ast
 import hashlib
 import itertools
 import logging
-from typing import Optional
+import random
+from typing import Optional, Tuple
 from dataclasses import dataclass
 from jinja2 import Environment
 
-from src.database.models import StrategyTemplate
+from sqlalchemy import func
+from src.database.models import StrategyTemplate, Coin
+from src.database import get_session
 
 logger = logging.getLogger(__name__)
+
+
+def get_leverage_range_from_db() -> Tuple[int, int]:
+    """
+    Get min/max leverage from active coins in database
+
+    Returns:
+        (min_leverage, max_leverage) tuple
+
+    Raises:
+        ValueError: If no active coins in database
+    """
+    with get_session() as session:
+        result = session.query(
+            func.min(Coin.max_leverage).label('min_lev'),
+            func.max(Coin.max_leverage).label('max_lev')
+        ).filter(Coin.is_active == True).first()
+
+        if result is None or result.min_lev is None or result.max_lev is None:
+            raise ValueError(
+                "No active coins found in database. "
+                "Run pairs_updater.py to populate coins table."
+            )
+
+        return (result.min_lev, result.max_lev)
 
 
 @dataclass
@@ -44,12 +77,20 @@ class ParametricGenerator:
 
     No AI calls - just Jinja2 template rendering with
     different parameter combinations.
+
+    Leverage is assigned randomly based on database coins table:
+    - min = MIN(coins.max_leverage) from active coins
+    - max = MAX(coins.max_leverage) from active coins
+    At execution: actual_leverage = min(strategy.leverage, coin.max_leverage)
     """
 
-    def __init__(self):
-        """Initialize Parametric Generator"""
+    def __init__(self, config: dict = None):
+        """
+        Initialize Parametric Generator
+
+        Reads leverage range from database (coins.max_leverage)
+        """
         # Jinja2 environment for rendering templates
-        # Use different delimiters to avoid conflicts with Python
         self.jinja_env = Environment(
             variable_start_string='{{',
             variable_end_string='}}',
@@ -57,7 +98,13 @@ class ParametricGenerator:
             block_end_string='%}'
         )
 
-        logger.info("ParametricGenerator initialized")
+        # Load leverage range from database
+        self.leverage_min, self.leverage_max = get_leverage_range_from_db()
+
+        logger.info(
+            f"ParametricGenerator initialized with leverage range: "
+            f"{self.leverage_min}x - {self.leverage_max}x (from coins table)"
+        )
 
     def generate_variations(
         self,
@@ -130,9 +177,16 @@ class ParametricGenerator:
             logger.error(f"Template rendering failed: {e}")
             return None
 
-        # Generate unique ID based on template + params
-        strategy_id = self._generate_id(template.name, params)
-        parameter_hash = self._hash_parameters(params)
+        # Assign random leverage (NOT from AI)
+        leverage = random.randint(self.leverage_min, self.leverage_max)
+        code = self._assign_leverage(code, leverage)
+
+        # Add leverage to params for tracking
+        params_with_leverage = {**params, 'leverage': leverage}
+
+        # Generate unique ID based on template + params (including leverage)
+        strategy_id = self._generate_id(template.name, params_with_leverage)
+        parameter_hash = self._hash_parameters(params_with_leverage)
 
         # Update class name in code to match strategy_id
         code = self._update_class_name(code, template.strategy_type, strategy_id)
@@ -147,12 +201,35 @@ class ParametricGenerator:
             timeframe=template.timeframe,
             template_id=str(template.id) if template.id else "",
             template_name=template.name,
-            parameters=params,
+            parameters=params_with_leverage,
             parameter_hash=parameter_hash,
             generation_mode="template",
             validation_passed=validation_passed,
             validation_errors=errors
         )
+
+    def _assign_leverage(self, code: str, leverage: int) -> str:
+        """
+        Replace __LEVERAGE__ placeholder with actual leverage value
+
+        Args:
+            code: Strategy code with placeholder
+            leverage: Leverage value to assign
+
+        Returns:
+            Code with leverage assigned
+        """
+        # Replace the placeholder
+        if '__LEVERAGE__' in code:
+            code = code.replace('__LEVERAGE__', str(leverage))
+        else:
+            # Fallback: try to find and update existing leverage attribute
+            import re
+            pattern = r'leverage\s*=\s*\d+'
+            replacement = f'leverage = {leverage}'
+            code = re.sub(pattern, replacement, code)
+
+        return code
 
     def _generate_combinations(self, schema: dict) -> list[dict]:
         """

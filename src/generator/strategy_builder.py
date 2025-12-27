@@ -99,7 +99,7 @@ class StrategyBuilder:
             self.ai_manager = None
 
         # Get pattern discovery API URL from config (NO default)
-        pattern_api_url = self.config['generation']['pattern_discovery']['api_url']
+        pattern_api_url = self.config['pattern_discovery']['api_url']
         self.pattern_fetcher = PatternFetcher(api_url=pattern_api_url)
 
         # Setup Jinja2 templates
@@ -117,30 +117,22 @@ class StrategyBuilder:
         else:
             self.template_generator = None
 
-        self.parametric_generator = ParametricGenerator()
+        self.parametric_generator = ParametricGenerator(config=self.config)
 
     def _default_config(self) -> dict:
         """Default configuration (for tests only - production must provide full config)"""
         return {
-            'generation': {
-                'pattern_discovery': {
-                    'api_url': 'http://localhost:8001'
-                },
-                'pattern_tier_filter': 1,
-                'min_quality_score': 0.75,
-                'max_fix_attempts': 3,
-                'leverage': {
-                    'min': 3,
-                    'max': 20
-                }
+            'pattern_discovery': {
+                'api_url': 'http://localhost:8001',
+                'tier_filter': 1,
+                'min_quality_score': 0.75
             }
         }
 
     def _get_random_leverage(self) -> int:
-        """Get random leverage within configured range"""
-        lev_config = self.config.get('generation', {}).get('leverage', {})
-        min_lev = lev_config.get('min', 3)
-        max_lev = lev_config.get('max', 20)
+        """Get random leverage from database coin range"""
+        from src.generator.parametric_generator import get_leverage_range_from_db
+        min_lev, max_lev = get_leverage_range_from_db()
         return random.randint(min_lev, max_lev)
 
     def generate_from_pattern(self, pattern: Pattern) -> Optional[GeneratedStrategy]:
@@ -525,7 +517,7 @@ class StrategyBuilder:
     def _fetch_all_patterns(self) -> list[Pattern]:
         """Fetch all available patterns from pattern-discovery"""
         try:
-            min_quality = self.config.get('generation', {}).get('min_quality_score', 0.75)
+            min_quality = self.config.get('pattern_discovery', {}).get('min_quality_score', 0.75)
             return self.pattern_fetcher.get_tier_1_patterns(
                 limit=100,  # Fetch up to 100 patterns
                 min_quality_score=min_quality
@@ -537,7 +529,7 @@ class StrategyBuilder:
     def _fetch_patterns(self, timeframe: str) -> list[Pattern]:
         """Fetch patterns from pattern-discovery"""
         try:
-            min_quality = self.config.get('generation', {}).get('min_quality_score', 0.75)
+            min_quality = self.config.get('pattern_discovery', {}).get('min_quality_score', 0.75)
             return self.pattern_fetcher.get_tier_1_patterns(
                 timeframe=timeframe,
                 limit=10,
@@ -788,8 +780,8 @@ class {strategy_name}(StrategyCore):
         Returns:
             Fixed code if successful, None if all attempts failed
         """
-        # Get max attempts from config - if missing, use reasonable default (not critical)
-        max_attempts = self.config.get('generation', {}).get('max_fix_attempts', 3)
+        # Max attempts for AI code fixing (hardcoded - implementation detail)
+        max_attempts = 3
 
         for attempt in range(max_attempts):
             logger.info(f"Attempting code fix (attempt {attempt + 1}/{max_attempts})")

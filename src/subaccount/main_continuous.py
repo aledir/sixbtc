@@ -43,10 +43,10 @@ class SubaccountManagerProcess:
         self.shutdown_event = threading.Event()
         self.force_exit = False
 
-        # Process configuration
-        proc_config = self.config.get('processes', {}).get('subaccount_manager', {})
-        self.rotation_interval_hours = proc_config.get('rotation_interval_hours', 24)
-        self.rebalance_enabled = proc_config.get('rebalance_enabled', True)
+        # Process configuration (from subaccount_manager section)
+        subaccount_config = self.config.get('subaccount_manager', {})
+        self.rotation_interval_hours = subaccount_config.get('rotation_interval_hours', 24)
+        self.rebalance_enabled = subaccount_config.get('rebalance_enabled', True)
 
         # Retirement thresholds
         risk_config = self.config.get('risk', {})
@@ -55,8 +55,8 @@ class SubaccountManagerProcess:
 
         # Trading configuration
         trading_config = self.config.get('trading', {})
-        proc_config = self.config.get('processes', {}).get('subaccount_manager', {})
-        self.dry_run = proc_config.get('dry_run', True)
+        subaccount_config = self.config.get('subaccount_manager', {})
+        self.dry_run = subaccount_config.get('dry_run', True)
 
         # Hyperliquid client
         self.client = HyperliquidClient(self.config, dry_run=self.dry_run)

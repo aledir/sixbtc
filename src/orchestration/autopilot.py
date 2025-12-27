@@ -138,8 +138,8 @@ class AutoPilot:
 
     def _schedule_jobs(self):
         """Schedule all periodic jobs"""
-        # Generation: every 4 hours
-        gen_hours = self.config.get('generation', {}).get('frequency_hours', 4)
+        # Generation: run every 4 hours (hardcoded - runs templates_per_day across the day)
+        gen_hours = 4
         self.scheduler.add_job(
             self._run_generation_cycle,
             IntervalTrigger(hours=gen_hours),
@@ -205,16 +205,17 @@ class AutoPilot:
             # Initialize builder
             builder = StrategyBuilder(self.config, init_ai=True)
 
-            # Get batch size from config
-            batch_size = self.config.get('generation', {}).get('batch_size', 50)
+            # Get templates per day from config (divide by 6 cycles = every 4 hours)
+            templates_per_day = self.config.get('generation', {}).get('templates_per_day', 20)
+            templates_this_cycle = max(1, templates_per_day // 6)  # 6 cycles per day
 
-            # Determine timeframes
-            timeframes = self.config.get('trading', {}).get('timeframes', {}).get('available', ['15m', '1h', '4h'])
+            # Determine timeframes from global config
+            timeframes = self.config.get('timeframes', ['15m', '1h', '4h'])
             types = ['MOM', 'REV', 'TRN', 'BRE']
 
             generated_count = 0
 
-            for i in range(batch_size):
+            for i in range(templates_this_cycle):
                 if not self.running:
                     break
 

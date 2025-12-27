@@ -7,7 +7,7 @@ Templates contain Jinja2 placeholders for variable parameters.
 Structure-based diversification:
 - 18 safe template structures (3 risky EXIT-only excluded)
 - 6 strategy types (MOM, REV, TRN, BRE, VOL, SCA)
-- 4 timeframes (15m, 30m, 1h, 4h)
+- 5 timeframes from config (15m, 30m, 1h, 4h, 1d)
 - Parametric variations for each template
 
 Excluded risky structures (2, 9, 16):
@@ -128,22 +128,24 @@ class TemplateGenerator:
     Diversification through:
     1. Template structure (18 safe combinations, 3 risky excluded)
     2. Strategy type (6 types)
-    3. Timeframe (4 timeframes)
+    3. Timeframe (from config - default 5 timeframes)
     4. Parametric variations (50-200 per template)
     """
 
     STRATEGY_TYPES = ['MOM', 'REV', 'TRN', 'BRE', 'VOL', 'SCA']
-    TIMEFRAMES = ['15m', '30m', '1h', '4h']
 
     def __init__(self, config: dict):
         """
         Initialize Template Generator
 
         Args:
-            config: Full configuration dict (must contain 'ai' section)
+            config: Full configuration dict (must contain 'ai' and 'timeframes' sections)
         """
         self.config = config
         self.ai_manager = AIManager(config)
+
+        # Load timeframes from config (no fallback - fast fail)
+        self.timeframes = config['timeframes']
 
         # Track which structures have been used (for rotation)
         self._structure_index = 0
@@ -158,7 +160,7 @@ class TemplateGenerator:
 
         logger.info(
             f"TemplateGenerator initialized with {self.ai_manager.get_provider_name()}, "
-            f"{len(VALID_STRUCTURES)} valid structures"
+            f"{len(VALID_STRUCTURES)} valid structures, {len(self.timeframes)} timeframes"
         )
 
     def get_next_structure(self) -> TemplateStructure:
@@ -254,9 +256,9 @@ class TemplateGenerator:
         Generate batch of templates (daily cycle)
 
         Distributes across:
-        - Template structures (21 valid)
+        - Template structures (18 valid)
         - Strategy types (6)
-        - Timeframes (4)
+        - Timeframes (from config)
 
         Args:
             count: Number of templates to generate (default 20)
@@ -269,7 +271,7 @@ class TemplateGenerator:
         for i in range(count):
             # Rotate through types, timeframes, and structures
             st = self.STRATEGY_TYPES[i % len(self.STRATEGY_TYPES)]
-            tf = self.TIMEFRAMES[i % len(self.TIMEFRAMES)]
+            tf = self.timeframes[i % len(self.timeframes)]
             structure = self.get_next_structure()
 
             try:
@@ -316,6 +318,12 @@ class TemplateGenerator:
                     logger.error("Schema is not a dict")
                     return None
 
+                # Remove leverage if AI included it (leverage is assigned by system)
+                if 'leverage' in schema:
+                    logger.info("Removing 'leverage' from schema (assigned by system)")
+                    del schema['leverage']
+
+                # Validate each parameter
                 for param_name, param_def in schema.items():
                     if 'values' not in param_def:
                         logger.error(f"Parameter {param_name} missing 'values'")
@@ -323,6 +331,36 @@ class TemplateGenerator:
                     if not isinstance(param_def['values'], list):
                         logger.error(f"Parameter {param_name} values is not a list")
                         return None
+
+                    values = param_def['values']
+
+                    # Validate values list is not empty
+                    if len(values) == 0:
+                        logger.error(f"Parameter {param_name} has empty values list")
+                        return None
+
+                    # Validate values list length (2-10 values recommended)
+                    if len(values) < 2:
+                        logger.warning(f"Parameter {param_name} has only {len(values)} value (recommend 2+)")
+                    if len(values) > 10:
+                        logger.warning(f"Parameter {param_name} has {len(values)} values (recommend <10)")
+
+                    # Validate values are all same type (int or float)
+                    value_types = set(type(v).__name__ for v in values)
+                    # Allow int/float mix (common in JSON)
+                    numeric_types = {'int', 'float'}
+                    if not value_types.issubset(numeric_types):
+                        logger.warning(
+                            f"Parameter {param_name} has non-numeric values: {value_types}"
+                        )
+
+                    # Validate no duplicate values
+                    if len(values) != len(set(values)):
+                        logger.warning(f"Parameter {param_name} has duplicate values")
+
+                    # Validate values are sorted (helps interpretability)
+                    if values != sorted(values) and values != sorted(values, reverse=True):
+                        logger.debug(f"Parameter {param_name} values not sorted: {values}")
 
                 return schema
 

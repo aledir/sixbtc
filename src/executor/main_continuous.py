@@ -46,9 +46,9 @@ class ContinuousExecutorProcess:
         self.shutdown_event = threading.Event()
         self.force_exit = False
 
-        # Process configuration
-        proc_config = self.config.get('processes', {}).get('executor', {})
-        self.dry_run = proc_config.get('dry_run', True)
+        # Process configuration (from subaccount_manager section for dry_run)
+        subaccount_config = self.config.get('subaccount_manager', {})
+        self.dry_run = subaccount_config.get('dry_run', True)
 
         # Components
         self.client = HyperliquidClient(self.config, dry_run=self.dry_run)

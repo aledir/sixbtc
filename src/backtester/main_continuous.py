@@ -51,9 +51,9 @@ class ContinuousBacktesterProcess:
         self.shutdown_event = threading.Event()
         self.force_exit = False
 
-        # Process configuration
-        proc_config = self.config.get('processes', {}).get('backtester', {})
-        self.parallel_threads = proc_config.get('parallel_threads', 10)
+        # Process configuration (from backtesting section)
+        backtesting_config = self.config.get('backtesting', {})
+        self.parallel_threads = backtesting_config.get('parallel_threads', 10)
 
         # ThreadPoolExecutor for parallel backtesting
         self.executor = ThreadPoolExecutor(

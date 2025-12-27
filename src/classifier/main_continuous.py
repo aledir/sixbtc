@@ -41,9 +41,9 @@ class ContinuousClassifierProcess:
         self.shutdown_event = threading.Event()
         self.force_exit = False
 
-        # Process configuration
-        proc_config = self.config.get('processes', {}).get('classifier', {})
-        self.interval_hours = proc_config.get('interval_hours', 1)
+        # Process configuration (from classification section)
+        classification_config = self.config.get('classification', {})
+        self.interval_hours = classification_config.get('frequency_hours', 1)
 
         # Components
         self.scorer = StrategyScorer(self.config)

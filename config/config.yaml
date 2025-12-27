@@ -14,6 +14,11 @@ system:
   execution_mode: hybrid  # sync, async, multiprocess, hybrid
 
 # ==============================================================================
+# GLOBAL TIMEFRAMES (used by downloader, generator, backtester, executor)
+# ==============================================================================
+timeframes: ['15m', '30m', '1h', '4h', '1d']
+
+# ==============================================================================
 # DIRECTORIES
 # ==============================================================================
 directories:
@@ -59,13 +64,6 @@ hyperliquid:
       capital_per_account: 100
 
 # ==============================================================================
-# TRADING CONFIGURATION
-# ==============================================================================
-trading:
-  timeframes:
-    available: ['15m', '30m', '1h', '4h', '1d']
-
-# ==============================================================================
 # RISK MANAGEMENT
 # ==============================================================================
 risk:
@@ -108,29 +106,29 @@ ai:
     timeout: 120
 
 # ==============================================================================
-# STRATEGY GENERATION
+# GENERATION (AI Templates + Parametric Variations)
 # ==============================================================================
 generation:
-  frequency_hours: 4
-  batch_size: 50
-  min_quality_score: 0.75
-  max_fix_attempts: 3
-  pattern_discovery:
-    api_url: http://localhost:8001
+  templates_per_day: 20        # AI templates to generate per day
+  min_interval_seconds: 0      # Min seconds between AI calls
+  parallel_threads: 1
+  # NOTE: Each template generates ~100 parametric variations (no AI cost)
+  # So 20 templates/day = ~2000 strategies/day
+  # Leverage is read from DB (coins.max_leverage), not configured here
 
-  # Leverage range for generated strategies
-  leverage:
-    min: 3
-    max: 20
+# ==============================================================================
+# PATTERN DISCOVERY (External API)
+# ==============================================================================
+pattern_discovery:
+  api_url: http://localhost:8001
+  tier_filter: 1               # Only use Tier 1 validated patterns
+  min_quality_score: 0.75      # Minimum pattern quality score
 
-  # SL/TP limits (strategy decides, config enforces limits)
-  sl_limits:
-    atr:
-      min_multiplier: 1.0
-      max_multiplier: 4.0
-    percentage:
-      min_pct: 0.005    # 0.5% minimum
-      max_pct: 0.10     # 10% maximum
+# ==============================================================================
+# VALIDATION (Strategy Code Validation)
+# ==============================================================================
+validation:
+  parallel_threads: 5
 
 # ==============================================================================
 # BACKTESTING
@@ -138,6 +136,7 @@ generation:
 backtesting:
   lookback_days: 180
   initial_capital: 10000
+  parallel_threads: 10
 
   # Multi-pair backtesting
   backtest_pairs_count: 100  # Top N pairs by volume from database
@@ -178,29 +177,19 @@ deployment:
     cancel_orders: true
 
 # ==============================================================================
+# SUBACCOUNT MANAGER
+# ==============================================================================
+subaccount_manager:
+  dry_run: true
+  rotation_interval_hours: 24
+  rebalance_enabled: true
+
+# ==============================================================================
 # MONITORING
 # ==============================================================================
 monitoring:
   snapshot_interval_minutes: 15
-
-# ==============================================================================
-# PROCESSES
-# ==============================================================================
-processes:
-  generator:
-    parallel_threads: 1
-    daily_limit: 400
-    min_interval_seconds: 0
-  validator:
-    parallel_threads: 5
-  backtester:
-    parallel_threads: 10
-  classifier:
-    interval_hours: 1
-  subaccount_manager:
-    dry_run: true
-    rotation_interval_hours: 24
-    rebalance_enabled: true
+  check_interval_seconds: 30
 
 # ==============================================================================
 # LOGGING

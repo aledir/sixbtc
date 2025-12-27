@@ -42,9 +42,9 @@ class ContinuousMonitorProcess:
         self.shutdown_event = threading.Event()
         self.force_exit = False
 
-        # Process configuration
-        proc_config = self.config.get('processes', {}).get('monitor', {})
-        self.check_interval_seconds = proc_config.get('check_interval_seconds', 30)
+        # Process configuration (from monitoring section)
+        monitoring_config = self.config.get('monitoring', {})
+        self.check_interval_seconds = monitoring_config.get('check_interval_seconds', 30)
 
         # Emergency thresholds
         risk_config = self.config.get('risk', {}).get('emergency', {})

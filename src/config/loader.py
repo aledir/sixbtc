@@ -42,7 +42,7 @@ class Config(BaseModel):
 
         Example:
             config.get('risk.atr.stop_multiplier')  # Returns 2.0
-            config.get('trading.timeframes.available')  # Returns ['15m', '30m', ...]
+            config.get('timeframes')  # Returns ['15m', '30m', ...]
 
         Args:
             key_path: Dot-separated path to config key
@@ -138,7 +138,7 @@ def load_config(config_path: str | Path = "config/config.yaml") -> Config:
         >>> config = load_config()
         >>> config.get('risk.atr.stop_multiplier')
         2.0
-        >>> config.get('trading.timeframes.available')
+        >>> config.get('timeframes')
         ['15m', '30m', '1h', '4h', '1d']
     """
     # 1. Load .env file (if exists)
@@ -201,18 +201,18 @@ def _validate_config(config: Config) -> None:
     Raises:
         ValueError: If validation fails
     """
-    # Validate timeframes
-    timeframes = config.get('trading.timeframes.available')
+    # Validate global timeframes
+    timeframes = config.get('timeframes')
     if not timeframes or not isinstance(timeframes, list):
         raise ValueError(
-            "trading.timeframes.available must be a non-empty list"
+            "timeframes must be a non-empty list at root level"
         )
 
     valid_timeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '8h', '12h', '1d']
     for tf in timeframes:
         if tf not in valid_timeframes:
             raise ValueError(
-                f"Invalid timeframe '{tf}' in trading.timeframes.available. "
+                f"Invalid timeframe '{tf}' in timeframes. "
                 f"Valid options: {valid_timeframes}"
             )
 
@@ -258,7 +258,7 @@ if __name__ == "__main__":
         print("CONFIGURATION LOADED SUCCESSFULLY")
         print("="*60)
         print(f"\nSystem: {config.get('system.name')} v{config.get('system.version')}")
-        print(f"Timeframes: {config.get('trading.timeframes.available')}")
+        print(f"Timeframes: {config.get('timeframes')}")
         print(f"Risk sizing: {config.get('risk.sizing_mode')}")
         print(f"Execution mode: {config.get('system.execution_mode')}")
         print(f"\nDatabase: {config.get('database.host')}:{config.get('database.port')}")

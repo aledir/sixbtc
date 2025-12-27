@@ -51,11 +51,11 @@ class ContinuousGeneratorProcess:
         self.shutdown_event = threading.Event()
         self.force_exit = False
 
-        # Process configuration
-        proc_config = self.config.get('processes', {}).get('generator', {})
-        self.parallel_threads = proc_config.get('parallel_threads', 1)
-        self.daily_limit = proc_config.get('daily_limit', 50)
-        self.min_interval = proc_config.get('min_interval_seconds', 60)
+        # Process configuration (from generation section)
+        generation_config = self.config.get('generation', {})
+        self.parallel_threads = generation_config.get('parallel_threads', 1)
+        self.daily_limit = generation_config.get('templates_per_day', 20)
+        self.min_interval = generation_config.get('min_interval_seconds', 0)
         self._last_generation_time = datetime.min
 
         # ThreadPoolExecutor for parallel generation
@@ -74,7 +74,7 @@ class ContinuousGeneratorProcess:
         self._strategy_builder: Optional[StrategyBuilder] = None
 
         # Pattern fetcher for checking available patterns
-        pattern_api_url = self.config['generation']['pattern_discovery']['api_url']
+        pattern_api_url = self.config['pattern_discovery']['api_url']
         self.pattern_fetcher = PatternFetcher(api_url=pattern_api_url)
 
         # Strategy processor for database queries
@@ -310,12 +310,10 @@ class ContinuousGeneratorProcess:
             self._last_generation_time = datetime.now()
 
             # Select random strategy type and timeframe
-            gen_config = self.config.get('generation', {})
             # Available strategy types (not from config - these are code categories)
             strategy_types = ['MOM', 'REV', 'TRN', 'BRE', 'VOL', 'SCA']
-            # Get timeframes from trading config
-            trading_config = self.config.get('trading', {})
-            timeframes = trading_config.get('timeframes', {}).get('available', ['15m', '30m', '1h', '4h', '1d'])
+            # Get timeframes from global config
+            timeframes = self.config.get('timeframes', ['15m', '30m', '1h', '4h', '1d'])
 
             strategy_type = random.choice(strategy_types)
             timeframe = random.choice(timeframes)
