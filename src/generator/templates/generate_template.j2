@@ -18,7 +18,13 @@ ENTRY: LONG ONLY (generate ONLY long entries, NO short entries)
 ENTRY: SHORT ONLY (generate ONLY short entries, NO long entries)
 {% endif %}
 
+{% if structure.trailing_stop %}
+STOP LOSS: TRAILING (sl_type=StopLossType.TRAILING)
+- Uses trailing_stop_pct: distance from high water mark
+- Uses trailing_activation_pct: profit threshold before trailing activates
+{% else %}
 STOP LOSS: ALWAYS REQUIRED (use ATR-based or percentage-based)
+{% endif %}
 
 {% if structure.take_profit %}
 TAKE PROFIT: REQUIRED (use ATR, RR_RATIO, or percentage-based)
@@ -155,7 +161,12 @@ REQUIRED PARAMETERS (include ALL of these):
 {% if structure.exit_indicator %}
 - {{ "{{ exit_threshold }}" }} - Exit indicator threshold
 {% endif %}
+{% if structure.trailing_stop %}
+- {{ "{{ trailing_stop_pct }}" }} - Trail distance from high water mark (e.g., 0.02 = 2%)
+- {{ "{{ trailing_activation_pct }}" }} - Profit threshold to activate trailing (e.g., 0.01 = 1%)
+{% else %}
 - {{ "{{ atr_multiplier }}" }} - ATR multiplier for stop loss (be creative with values!)
+{% endif %}
 {% if structure.time_exit %}
 - {{ "{{ exit_bars }}" }} - Number of bars for time-based exit
 {% endif %}
@@ -221,7 +232,12 @@ class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
 {% if structure.exit_indicator %}
     - exit_threshold: Exit trigger level
 {% endif %}
+{% if structure.trailing_stop %}
+    - trailing_stop_pct: Trail distance from high water mark
+    - trailing_activation_pct: Profit threshold to activate trailing
+{% else %}
     - atr_multiplier: Stop loss ATR multiplier
+{% endif %}
 {% if structure.time_exit %}
     - exit_bars: Time-based exit after N bars
 {% endif %}
@@ -303,8 +319,14 @@ class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
             return Signal(
                 direction='long',
                 leverage=self.leverage,
+{% if structure.trailing_stop %}
+                sl_type=StopLossType.TRAILING,
+                trailing_stop_pct={{ "{{ trailing_stop_pct }}" }},
+                trailing_activation_pct={{ "{{ trailing_activation_pct }}" }},
+{% else %}
                 sl_type=StopLossType.ATR,
                 atr_stop_multiplier={{ "{{ atr_multiplier }}" }},
+{% endif %}
 {% if structure.take_profit %}
                 tp_type=TakeProfitType.RR_RATIO,
                 rr_ratio=2.0,
@@ -322,8 +344,14 @@ class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
             return Signal(
                 direction='short',
                 leverage=self.leverage,
+{% if structure.trailing_stop %}
+                sl_type=StopLossType.TRAILING,
+                trailing_stop_pct={{ "{{ trailing_stop_pct }}" }},
+                trailing_activation_pct={{ "{{ trailing_activation_pct }}" }},
+{% else %}
                 sl_type=StopLossType.ATR,
                 atr_stop_multiplier={{ "{{ atr_multiplier }}" }},
+{% endif %}
 {% if structure.take_profit %}
                 tp_type=TakeProfitType.RR_RATIO,
                 rr_ratio=2.0,
@@ -351,8 +379,14 @@ Be CREATIVE with the values - don't just copy the examples below!
 {% if structure.exit_indicator %}
   "exit_threshold": {"type": "int_or_float", "values": [YOUR_CHOICES]},
 {% endif %}
+{% if structure.trailing_stop %}
+  "trailing_stop_pct": {"type": "float", "values": [YOUR_CHOICES]},
+  "trailing_activation_pct": {"type": "float", "values": [YOUR_CHOICES]}{% if structure.time_exit %},
+  "exit_bars": {"type": "int", "values": [YOUR_CHOICES]}{% endif %}
+{% else %}
   "atr_multiplier": {"type": "float", "values": [YOUR_CHOICES]}{% if structure.time_exit %},
   "exit_bars": {"type": "int", "values": [YOUR_CHOICES]}{% endif %}
+{% endif %}
 
 }
 ```
@@ -360,7 +394,17 @@ Be CREATIVE with the values - don't just copy the examples below!
 GUIDELINES for parameter values:
 - indicator_period: typically 5-50 for oscillators, 10-200 for MAs
 - entry_threshold: depends on indicator (RSI: 20-40, Z-score: 1.5-3.0, etc.)
+{% if structure.trailing_stop %}
+- trailing_stop_pct: MUST be 0.02-0.05 (2%-5% trail distance)
+  * WARNING: Values below 2% cause overfitting - great backtest but poor live results!
+  * Reason: Live has spread, slippage, latency that backtest doesn't capture
+  * Recommended: 0.025-0.04 (2.5%-4%) for robust performance
+- trailing_activation_pct: MUST be 0.01-0.03 (1%-3% profit before trailing activates)
+  * WARNING: Values below 1% activate too early before trend is confirmed
+  * Recommended: 0.015-0.025 (1.5%-2.5%) for better trend confirmation
+{% else %}
 - atr_multiplier: typically 1.0-5.0 (tighter = more trades, wider = fewer trades)
+{% endif %}
 {% if structure.time_exit %}
 - exit_bars: MUST be appropriate for {{ timeframe }} timeframe:
 {% if timeframe == '15m' %}
@@ -390,7 +434,11 @@ Before generating, verify:
 {% else %}
 [ ] Both long AND short entries present
 {% endif %}
+{% if structure.trailing_stop %}
+[ ] Stop loss uses sl_type=StopLossType.TRAILING with trailing_stop_pct and trailing_activation_pct
+{% else %}
 [ ] Stop loss is ALWAYS set (sl_type required)
+{% endif %}
 {% if structure.take_profit %}
 [ ] Take profit IS set (tp_type required)
 {% else %}

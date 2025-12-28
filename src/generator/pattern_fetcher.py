@@ -42,6 +42,10 @@ class Pattern:
 
     worst_window: Optional[float] = None  # Minimum edge across windows
 
+    # Executable source code (from new API)
+    formula_source: Optional[str] = None  # Complete Python function code
+    formula_components: Optional[dict] = None  # {category, docstring, return_expression}
+
 
 class PatternFetcher:
     """
@@ -63,22 +67,45 @@ class PatternFetcher:
         self.api_base = f"{self.api_url}/api/v1"
         self._available = self._check_connection()
 
-    def _check_connection(self) -> bool:
-        """Check if pattern-discovery API is accessible"""
-        try:
-            response = requests.get(f"{self.api_url}/health", timeout=5)
-            if response.status_code == 200:
-                logger.info(f"Pattern Discovery API connected: {self.api_url}")
-                return True
-            else:
-                logger.warning(
-                    f"Pattern Discovery API returned status {response.status_code}"
-                )
-                return False
-        except Exception as e:
-            logger.warning(f"Pattern Discovery API not accessible: {e}")
-            logger.warning("Strategy generation will use custom AI logic only")
-            return False
+    def _check_connection(self, max_retries: int = 3) -> bool:
+        """
+        Check if pattern-discovery API is accessible with retries.
+
+        Uses exponential backoff to handle race conditions at startup
+        (e.g., when pattern-discovery is still starting).
+
+        Args:
+            max_retries: Maximum number of connection attempts
+
+        Returns:
+            True if connected, False otherwise
+        """
+        import time
+
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(f"{self.api_url}/health", timeout=5)
+                if response.status_code == 200:
+                    logger.info(f"Pattern Discovery API connected: {self.api_url}")
+                    return True
+                else:
+                    logger.warning(
+                        f"Pattern Discovery API returned status {response.status_code}"
+                    )
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # 1s, 2s, 4s
+                    logger.debug(
+                        f"Pattern Discovery API not accessible (attempt {attempt + 1}/{max_retries}), "
+                        f"retrying in {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.warning(f"Pattern Discovery API not accessible after {max_retries} attempts: {e}")
+                    logger.warning("Strategy generation will use custom AI logic only")
+
+        return False
 
     def is_available(self) -> bool:
         """Check if API is available"""
@@ -248,7 +275,11 @@ class PatternFetcher:
             suggested_rr_ratio=data.get('suggested_rr_ratio'),
             avg_signals_per_month=data.get('avg_signals_per_month'),
 
-            worst_window=data.get('worst_window')
+            worst_window=data.get('worst_window'),
+
+            # Executable source code (new API fields)
+            formula_source=data.get('formula_source'),
+            formula_components=data.get('formula_components'),
         )
 
     def get_stats(self) -> dict:

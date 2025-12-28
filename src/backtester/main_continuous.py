@@ -1,9 +1,10 @@
 """
 Continuous Backtester Process
 
-Backtests validated strategies using VectorBT.
-- Multi-pair backtesting (top 100 coins by volume)
+Backtests validated strategies with portfolio simulation.
+- Multi-pair backtesting (top 30 coins by volume)
 - Timeframe optimization (test all TFs, select optimal)
+- Training/Holdout split for anti-overfitting
 - Uses ThreadPoolExecutor for parallel backtesting
 """
 
@@ -21,7 +22,7 @@ import sys
 
 from src.config import load_config
 from src.database import get_session, Strategy, BacktestResult, StrategyProcessor
-from src.backtester.vectorbt_engine import VectorBTBacktester
+from src.backtester.backtest_engine import BacktestEngine
 from src.backtester.data_loader import BacktestDataLoader
 from src.data.pairs_updater import get_current_pairs
 from src.utils import get_logger, setup_logging
@@ -65,7 +66,7 @@ class ContinuousBacktesterProcess:
         self.active_futures: Dict[Future, str] = {}
 
         # Components
-        self.engine = VectorBTBacktester(self.config)
+        self.engine = BacktestEngine(self.config)
         cache_dir = self.config.get('directories', {}).get('data', 'data')
         self.data_loader = BacktestDataLoader(cache_dir)
         self.processor = StrategyProcessor(process_id=f"backtester-{os.getpid()}")
@@ -85,11 +86,15 @@ class ContinuousBacktesterProcess:
         # Pairs count (from backtesting section, NOT data_scheduler)
         self.pairs_count = bt_config.get('backtest_pairs_count', 100)
 
-        # Dual period configuration
-        self.lookback_days = bt_config.get('lookback_days', 180)
-        self.recent_period_days = bt_config.get('recent_period_days', 60)
-        self.full_period_weight = bt_config.get('full_period_weight', 0.60)
-        self.recent_period_weight = bt_config.get('recent_period_weight', 0.40)
+        # Training/Holdout configuration (unified approach)
+        self.training_days = bt_config.get('training_days', 365)
+        self.holdout_days = bt_config.get('holdout_days', 30)
+
+        # Holdout validation thresholds
+        holdout_config = bt_config.get('holdout', {})
+        self.holdout_max_degradation = holdout_config.get('max_degradation', 0.50)
+        self.holdout_min_sharpe = holdout_config.get('min_sharpe', 0.3)
+        self.holdout_recency_weight = holdout_config.get('recency_weight', 0.60)
 
         # Preloaded data cache: {(symbols_hash, timeframe): data}
         self._data_cache: Dict[str, Dict[str, any]] = {}
@@ -118,77 +123,55 @@ class ContinuousBacktesterProcess:
         logger.info(f"Loaded {len(pairs)} pairs from database")
         return pairs
 
-    def _get_multi_symbol_data(self, pairs: List[str], timeframe: str) -> Dict[str, any]:
-        """
-        Get multi-symbol data (cached)
-
-        Args:
-            pairs: List of symbol names
-            timeframe: Timeframe to load
-
-        Returns:
-            Dict mapping symbol -> DataFrame
-        """
-        cache_key = f"{timeframe}_full"
-
-        if cache_key not in self._data_cache:
-            try:
-                data = self.data_loader.load_multi_symbol(
-                    pairs, timeframe, self.lookback_days
-                )
-                self._data_cache[cache_key] = data
-                logger.info(f"Loaded {len(data)} symbols for {timeframe}")
-            except Exception as e:
-                logger.error(f"Failed to load multi-symbol data for {timeframe}: {e}")
-                return {}
-
-        return self._data_cache.get(cache_key, {})
-
-    def _get_dual_period_data(
+    def _get_training_holdout_data(
         self,
         pairs: List[str],
         timeframe: str
     ) -> Tuple[Dict[str, any], Dict[str, any]]:
         """
-        Get dual-period data (full + recent) for multi-symbol backtesting
+        Get training/holdout data for multi-symbol backtesting
+
+        Data is split into NON-OVERLAPPING periods:
+        - Training: older data for backtest metrics (365 days)
+        - Holdout: recent data for validation (30 days) - NEVER seen during training
 
         Args:
             pairs: List of symbol names
             timeframe: Timeframe to load
 
         Returns:
-            Tuple of (full_data_dict, recent_data_dict)
+            Tuple of (training_data_dict, holdout_data_dict)
         """
-        full_cache_key = f"{timeframe}_full"
-        recent_cache_key = f"{timeframe}_recent"
+        training_cache_key = f"{timeframe}_training"
+        holdout_cache_key = f"{timeframe}_holdout"
 
         # Check if both are cached
-        if full_cache_key in self._data_cache and recent_cache_key in self._data_cache:
+        if training_cache_key in self._data_cache and holdout_cache_key in self._data_cache:
             return (
-                self._data_cache[full_cache_key],
-                self._data_cache[recent_cache_key]
+                self._data_cache[training_cache_key],
+                self._data_cache[holdout_cache_key]
             )
 
         try:
-            full_data, recent_data = self.data_loader.load_multi_symbol_dual_periods(
+            training_data, holdout_data = self.data_loader.load_multi_symbol_training_holdout(
                 symbols=pairs,
                 timeframe=timeframe,
-                full_period_days=self.lookback_days,
-                recent_period_days=self.recent_period_days
+                training_days=self.training_days,
+                holdout_days=self.holdout_days
             )
 
-            self._data_cache[full_cache_key] = full_data
-            self._data_cache[recent_cache_key] = recent_data
+            self._data_cache[training_cache_key] = training_data
+            self._data_cache[holdout_cache_key] = holdout_data
 
             logger.info(
-                f"Loaded dual-period data for {timeframe}: "
-                f"{len(full_data)} symbols (full), {len(recent_data)} symbols (recent)"
+                f"Loaded training/holdout data for {timeframe}: "
+                f"{len(training_data)} symbols ({self.training_days}d training, {self.holdout_days}d holdout)"
             )
 
-            return full_data, recent_data
+            return training_data, holdout_data
 
         except Exception as e:
-            logger.error(f"Failed to load dual-period data for {timeframe}: {e}")
+            logger.error(f"Failed to load training/holdout data for {timeframe}: {e}")
             return {}, {}
 
     async def run_continuous(self):
@@ -243,13 +226,15 @@ class ContinuousBacktesterProcess:
         original_tf: str
     ) -> Tuple[bool, str]:
         """
-        Run dual-period backtest on all timeframes and select optimal TF.
+        Run training/holdout backtest on all timeframes and select optimal TF.
 
-        Dual-period backtesting:
-        1. Backtest on FULL period (e.g., 180 days)
-        2. Backtest on RECENT period (e.g., 60 days)
-        3. Calculate weighted score: 60% full + 40% recent
-        4. Apply recency penalty if recent << full
+        Training/Holdout backtesting (unified approach):
+        1. Backtest on TRAINING period (365 days) - for edge detection
+        2. Backtest on HOLDOUT period (30 days) - NEVER seen during training
+        3. Holdout serves TWO purposes:
+           a) Anti-overfitting: if holdout crashes, strategy is overfitted
+           b) Recency score: good holdout = strategy "in form" now
+        4. Final score weighted: training metrics + holdout performance
 
         Returns:
             (passed, reason) tuple
@@ -272,85 +257,97 @@ class ContinuousBacktesterProcess:
                 self._delete_strategy(strategy_id, "No pairs available")
                 return (False, "No pairs available")
 
-            # Test all timeframes with dual-period backtesting
+            # Test all timeframes with training/holdout backtesting
             tf_results = {}
             tf_backtest_ids = {}
 
             for tf in self.timeframes:
-                logger.info(f"[{strategy_name}] Testing {tf} on {len(pairs)} pairs (dual period)...")
+                logger.info(f"[{strategy_name}] Testing {tf} on {len(pairs)} pairs (training/holdout)...")
 
-                # Load dual-period data
-                full_data, recent_data = self._get_dual_period_data(pairs, tf)
+                # Load training/holdout data (NON-OVERLAPPING)
+                training_data, holdout_data = self._get_training_holdout_data(pairs, tf)
 
-                if not full_data or len(full_data) < 5:
-                    logger.warning(f"Insufficient data for {tf}, skipping")
+                if not training_data or len(training_data) < 5:
+                    logger.warning(f"Insufficient training data for {tf}, skipping")
                     continue
 
-                # Run FULL period backtest
+                # Run TRAINING period backtest
                 try:
-                    full_result = self._run_multi_symbol_backtest(
-                        strategy_instance, full_data, tf
+                    training_result = self._run_multi_symbol_backtest(
+                        strategy_instance, training_data, tf
                     )
                 except Exception as e:
-                    logger.error(f"Full period backtest failed for {tf}: {e}")
+                    logger.error(f"Training backtest failed for {tf}: {e}")
                     continue
 
-                if full_result is None or full_result.get('total_trades', 0) == 0:
-                    logger.warning(f"No trades in full period for {tf}")
+                if training_result is None or training_result.get('total_trades', 0) == 0:
+                    logger.warning(f"No trades in training period for {tf}")
                     continue
 
-                # Run RECENT period backtest
+                # Run HOLDOUT period backtest (validation)
+                holdout_result = None
                 try:
-                    recent_result = self._run_multi_symbol_backtest(
-                        strategy_instance, recent_data, tf
-                    )
+                    if holdout_data and len(holdout_data) >= 5:
+                        holdout_result = self._run_multi_symbol_backtest(
+                            strategy_instance, holdout_data, tf
+                        )
                 except Exception as e:
-                    logger.warning(f"Recent period backtest failed for {tf}: {e}")
-                    recent_result = None
+                    logger.warning(f"Holdout backtest failed for {tf}: {e}")
+                    holdout_result = None
 
-                # Calculate weighted metrics
-                weighted_result = self._calculate_weighted_metrics(
-                    full_result, recent_result
+                # Validate holdout and calculate final metrics
+                validation = self._validate_holdout(training_result, holdout_result)
+
+                if not validation['passed']:
+                    logger.info(
+                        f"[{strategy_name}] {tf}: REJECTED - {validation['reason']}"
+                    )
+                    continue
+
+                # Combine training + holdout into final result
+                final_result = self._calculate_final_metrics(
+                    training_result, holdout_result, validation
                 )
 
-                tf_results[tf] = weighted_result
+                tf_results[tf] = final_result
 
-                # Save both backtest results
-                full_backtest_id = self._save_backtest_result(
-                    strategy_id, full_result, pairs, tf,
+                # Save training backtest result
+                training_backtest_id = self._save_backtest_result(
+                    strategy_id, training_result, pairs, tf,
                     is_optimal=False,
-                    period_type='full',
-                    period_days=self.lookback_days
+                    period_type='training',
+                    period_days=self.training_days
                 )
 
-                recent_backtest_id = None
-                if recent_result and recent_result.get('total_trades', 0) > 0:
-                    recent_backtest_id = self._save_backtest_result(
-                        strategy_id, recent_result, pairs, tf,
+                # Save holdout backtest result
+                holdout_backtest_id = None
+                if holdout_result and holdout_result.get('total_trades', 0) > 0:
+                    holdout_backtest_id = self._save_backtest_result(
+                        strategy_id, holdout_result, pairs, tf,
                         is_optimal=False,
-                        period_type='recent',
-                        period_days=self.recent_period_days
+                        period_type='holdout',
+                        period_days=self.holdout_days
                     )
 
-                    # Update full result with recent_result_id and weighted metrics
-                    self._update_full_result_with_weighted(
-                        full_backtest_id,
-                        recent_backtest_id,
-                        weighted_result
+                    # Link training result to holdout and add validation metrics
+                    self._update_training_with_holdout(
+                        training_backtest_id,
+                        holdout_backtest_id,
+                        final_result
                     )
 
-                tf_backtest_ids[tf] = full_backtest_id
+                tf_backtest_ids[tf] = training_backtest_id
 
                 logger.info(
                     f"[{strategy_name}] {tf}: "
-                    f"Full: {full_result['total_trades']} trades, Sharpe {full_result.get('sharpe_ratio', 0):.2f} | "
-                    f"Recent: {recent_result.get('total_trades', 0) if recent_result else 0} trades | "
-                    f"Weighted Sharpe: {weighted_result.get('weighted_sharpe', 0):.2f}, "
-                    f"Recency Penalty: {weighted_result.get('recency_penalty', 0):.1%}"
+                    f"Training: {training_result['total_trades']} trades, Sharpe {training_result.get('sharpe_ratio', 0):.2f} | "
+                    f"Holdout: {holdout_result.get('total_trades', 0) if holdout_result else 0} trades, "
+                    f"Sharpe {holdout_result.get('sharpe_ratio', 0):.2f if holdout_result else 0} | "
+                    f"Final Score: {final_result.get('final_score', 0):.2f}"
                 )
 
-            # Find optimal timeframe using weighted scores
-            optimal_tf = self._find_optimal_timeframe_dual(tf_results)
+            # Find optimal timeframe using final scores
+            optimal_tf = self._find_optimal_timeframe(tf_results)
 
             if optimal_tf is None:
                 self._delete_strategy(strategy_id, "No TF passed thresholds")
@@ -370,7 +367,7 @@ class ContinuousBacktesterProcess:
             return (
                 True,
                 f"Optimal TF: {optimal_tf}, "
-                f"Weighted Sharpe {optimal_result.get('weighted_sharpe', 0):.2f}, "
+                f"Final Score {optimal_result.get('final_score', 0):.2f}, "
                 f"Trades {optimal_result.get('total_trades', 0)}"
             )
 
@@ -386,7 +383,14 @@ class ContinuousBacktesterProcess:
         timeframe: str
     ) -> Dict:
         """
-        Run backtest across multiple symbols and aggregate results
+        Run portfolio backtest with realistic position limits
+
+        Uses backtest_portfolio which simulates real trading constraints:
+        - Maximum concurrent positions (from config)
+        - Shared capital pool
+        - Position priority based on signal order
+
+        This ensures backtest results match live trading behavior.
 
         Args:
             strategy_instance: StrategyCore instance
@@ -394,221 +398,211 @@ class ContinuousBacktesterProcess:
             timeframe: Timeframe being tested
 
         Returns:
-            Aggregated metrics dictionary
+            Portfolio metrics with position-limited simulation
         """
-        all_metrics = []
-        total_trades = 0
-        total_pnl = 0.0
+        # Filter out empty/insufficient data
+        valid_data = {
+            symbol: df for symbol, df in data.items()
+            if not df.empty and len(df) >= 100
+        }
 
-        for symbol, df in data.items():
-            if df.empty or len(df) < 100:
-                continue
-
-            try:
-                result = self.engine.backtest(strategy_instance, df, symbol)
-                if result and result.get('total_trades', 0) > 0:
-                    all_metrics.append(result)
-                    total_trades += result.get('total_trades', 0)
-                    total_pnl += result.get('total_pnl', 0)
-            except Exception as e:
-                logger.debug(f"Backtest failed for {symbol}: {e}")
-                continue
-
-        if not all_metrics:
+        if not valid_data:
             return {'total_trades': 0}
 
-        # Aggregate metrics (weighted by number of trades)
-        def weighted_avg(key: str) -> float:
-            if total_trades == 0:
-                return 0.0
-            return sum(
-                m.get(key, 0) * m.get('total_trades', 0)
-                for m in all_metrics
-            ) / total_trades
+        # Use backtest_portfolio for realistic position-limited simulation
+        try:
+            result = self.engine.backtest_portfolio(
+                strategy=strategy_instance,
+                data=valid_data,
+                max_positions=None  # Uses config value
+            )
+            return result
+        except Exception as e:
+            logger.error(f"Portfolio backtest failed: {e}")
+            return {'total_trades': 0}
 
-        return {
-            'total_trades': total_trades,
-            'total_pnl': total_pnl,
-            'sharpe_ratio': weighted_avg('sharpe_ratio'),
-            'win_rate': weighted_avg('win_rate'),
-            'expectancy': weighted_avg('expectancy'),
-            'max_drawdown': max(m.get('max_drawdown', 0) for m in all_metrics),
-            'profit_factor': weighted_avg('profit_factor'),
-            'consistency': weighted_avg('consistency'),
-            'symbols_traded': len(all_metrics),
-            'symbol_breakdown': {
-                m.get('symbol', 'unknown'): m for m in all_metrics
-            }
-        }
-
-    def _calculate_weighted_metrics(
+    def _validate_holdout(
         self,
-        full_result: Dict,
-        recent_result: Optional[Dict]
+        training_result: Dict,
+        holdout_result: Optional[Dict]
     ) -> Dict:
         """
-        Calculate weighted metrics from full and recent period results
+        Validate holdout performance for anti-overfitting check
 
-        Formula:
-            weighted_sharpe = full_sharpe * 0.60 + recent_sharpe * 0.40
-            recency_ratio = recent_sharpe / full_sharpe
-            recency_penalty = max(0, 1 - recency_ratio) * 0.20  # up to 20%
-            final_score = weighted_sharpe * (1 - recency_penalty)
+        Holdout validation serves TWO purposes:
+        1. Anti-overfitting: reject if holdout crashes vs training
+        2. Recency: good holdout = strategy in form now
 
         Returns:
-            Dict with weighted metrics
+            Dict with 'passed', 'reason', 'degradation', 'holdout_bonus'
         """
-        full_sharpe = full_result.get('sharpe_ratio', 0)
-        full_win_rate = full_result.get('win_rate', 0)
-        full_expectancy = full_result.get('expectancy', 0)
+        training_sharpe = training_result.get('sharpe_ratio', 0)
 
-        # If no recent data, use full metrics only
-        if recent_result is None or recent_result.get('total_trades', 0) == 0:
+        # If no holdout data, pass but with neutral score
+        if holdout_result is None or holdout_result.get('total_trades', 0) == 0:
             return {
-                **full_result,
-                'weighted_sharpe': full_sharpe,
-                'weighted_win_rate': full_win_rate,
-                'weighted_expectancy': full_expectancy,
-                'recency_ratio': 1.0,
-                'recency_penalty': 0.0,
+                'passed': True,
+                'reason': 'No holdout data (neutral)',
+                'degradation': 0.0,
+                'holdout_bonus': 0.0,
             }
 
-        recent_sharpe = recent_result.get('sharpe_ratio', 0)
-        recent_win_rate = recent_result.get('win_rate', 0)
-        recent_expectancy = recent_result.get('expectancy', 0)
+        holdout_sharpe = holdout_result.get('sharpe_ratio', 0)
 
-        # Calculate weighted metrics
-        weighted_sharpe = (
-            full_sharpe * self.full_period_weight +
-            recent_sharpe * self.recent_period_weight
-        )
-        weighted_win_rate = (
-            full_win_rate * self.full_period_weight +
-            recent_win_rate * self.recent_period_weight
-        )
-        weighted_expectancy = (
-            full_expectancy * self.full_period_weight +
-            recent_expectancy * self.recent_period_weight
-        )
-
-        # Calculate recency ratio (how recent compares to full)
-        if full_sharpe > 0:
-            recency_ratio = recent_sharpe / full_sharpe
+        # Calculate degradation (how much worse is holdout vs training)
+        if training_sharpe > 0:
+            degradation = (training_sharpe - holdout_sharpe) / training_sharpe
         else:
-            recency_ratio = 1.0 if recent_sharpe >= 0 else 0.0
+            degradation = 0.0 if holdout_sharpe >= 0 else 1.0
 
-        # Recency penalty: up to 20% if recent performance is significantly worse
-        recency_penalty = max(0, 1 - recency_ratio) * 0.20
+        # Anti-overfitting check: reject if holdout crashes
+        if degradation > self.holdout_max_degradation:
+            return {
+                'passed': False,
+                'reason': f'Overfitted: holdout {degradation:.0%} worse than training',
+                'degradation': degradation,
+                'holdout_bonus': 0.0,
+            }
 
-        # Combine into result
+        # Check minimum holdout Sharpe
+        if holdout_sharpe < self.holdout_min_sharpe:
+            return {
+                'passed': False,
+                'reason': f'Holdout Sharpe too low: {holdout_sharpe:.2f} < {self.holdout_min_sharpe}',
+                'degradation': degradation,
+                'holdout_bonus': 0.0,
+            }
+
+        # Calculate holdout bonus (good holdout = higher final score)
+        # Bonus is positive if holdout >= training, zero if worse
+        if degradation <= 0:
+            # Holdout better than training = big bonus
+            holdout_bonus = min(0.20, abs(degradation) * 0.5)
+        else:
+            # Holdout worse but within tolerance = small penalty
+            holdout_bonus = -degradation * 0.10
+
         return {
-            **full_result,
-            'weighted_sharpe': weighted_sharpe,
-            'weighted_win_rate': weighted_win_rate,
-            'weighted_expectancy': weighted_expectancy,
-            'recency_ratio': recency_ratio,
-            'recency_penalty': recency_penalty,
-            'recent_trades': recent_result.get('total_trades', 0),
-            'recent_sharpe': recent_sharpe,
-            'recent_win_rate': recent_win_rate,
+            'passed': True,
+            'reason': 'Holdout validated',
+            'degradation': degradation,
+            'holdout_bonus': holdout_bonus,
         }
 
-    def _find_optimal_timeframe_dual(self, tf_results: Dict[str, Dict]) -> Optional[str]:
+    def _calculate_final_metrics(
+        self,
+        training_result: Dict,
+        holdout_result: Optional[Dict],
+        validation: Dict
+    ) -> Dict:
         """
-        Find TF with best weighted performance that passes all thresholds.
+        Calculate final metrics combining training and holdout
 
-        Uses weighted_sharpe with recency penalty for scoring.
+        Final score formula:
+        - Base score from training metrics
+        - Weighted by holdout performance (recency_weight)
+        - Adjusted by holdout bonus/penalty
 
         Returns:
-            Optimal timeframe string or None if none pass
+            Dict with all metrics + final_score
         """
-        best_tf = None
-        best_score = -float('inf')
+        training_sharpe = training_result.get('sharpe_ratio', 0)
+        training_win_rate = training_result.get('win_rate', 0)
+        training_expectancy = training_result.get('expectancy', 0)
 
-        for tf, results in tf_results.items():
-            # Check thresholds using weighted metrics
-            total_trades = results.get('total_trades', 0)
-            weighted_sharpe = results.get('weighted_sharpe', 0)
-            weighted_win_rate = results.get('weighted_win_rate', 0)
-            max_dd = results.get('max_drawdown', 1)
-            weighted_expectancy = results.get('weighted_expectancy', 0)
-            recency_penalty = results.get('recency_penalty', 0)
+        # Calculate training base score
+        training_score = (
+            0.5 * training_sharpe +
+            0.3 * training_expectancy * 100 +
+            0.2 * training_win_rate
+        )
 
-            # Must pass all thresholds
-            if total_trades < self.min_trades:
-                logger.debug(f"{tf}: Failed trades threshold ({total_trades} < {self.min_trades})")
-                continue
-            if weighted_sharpe < self.min_sharpe:
-                logger.debug(f"{tf}: Failed sharpe threshold ({weighted_sharpe:.2f} < {self.min_sharpe})")
-                continue
-            if weighted_win_rate < self.min_win_rate:
-                logger.debug(f"{tf}: Failed win_rate threshold ({weighted_win_rate:.2%} < {self.min_win_rate:.2%})")
-                continue
-            if max_dd > self.max_drawdown:
-                logger.debug(f"{tf}: Failed drawdown threshold ({max_dd:.2%} > {self.max_drawdown:.2%})")
-                continue
-            if weighted_expectancy < self.min_expectancy:
-                logger.debug(f"{tf}: Failed expectancy threshold ({weighted_expectancy:.4f} < {self.min_expectancy})")
-                continue
+        # Get holdout metrics
+        if holdout_result and holdout_result.get('total_trades', 0) > 0:
+            holdout_sharpe = holdout_result.get('sharpe_ratio', 0)
+            holdout_win_rate = holdout_result.get('win_rate', 0)
+            holdout_expectancy = holdout_result.get('expectancy', 0)
 
-            # Calculate final score with recency penalty
-            base_score = (
-                0.5 * weighted_sharpe +
-                0.3 * weighted_expectancy * 100 +
-                0.2 * weighted_win_rate
+            holdout_score = (
+                0.5 * holdout_sharpe +
+                0.3 * holdout_expectancy * 100 +
+                0.2 * holdout_win_rate
             )
-            score = base_score * (1 - recency_penalty)
+        else:
+            holdout_sharpe = 0
+            holdout_win_rate = 0
+            holdout_expectancy = 0
+            holdout_score = training_score  # Neutral if no holdout
 
-            logger.debug(
-                f"{tf}: Score {score:.2f} (base={base_score:.2f}, penalty={recency_penalty:.1%})"
-            )
+        # Calculate weighted final score
+        # Holdout has higher weight because it represents "now"
+        training_weight = 1 - self.holdout_recency_weight
+        final_score = (
+            training_score * training_weight +
+            holdout_score * self.holdout_recency_weight
+        )
 
-            if score > best_score:
-                best_score = score
-                best_tf = tf
+        # Apply holdout bonus/penalty
+        holdout_bonus = validation.get('holdout_bonus', 0)
+        final_score = final_score * (1 + holdout_bonus)
 
-        if best_tf:
-            logger.info(f"Optimal TF: {best_tf} with score {best_score:.2f}")
+        return {
+            **training_result,
+            # Training metrics
+            'training_sharpe': training_sharpe,
+            'training_win_rate': training_win_rate,
+            'training_expectancy': training_expectancy,
+            'training_score': training_score,
+            # Holdout metrics
+            'holdout_sharpe': holdout_sharpe,
+            'holdout_win_rate': holdout_win_rate,
+            'holdout_expectancy': holdout_expectancy,
+            'holdout_score': holdout_score,
+            'holdout_trades': holdout_result.get('total_trades', 0) if holdout_result else 0,
+            # Validation metrics
+            'degradation': validation.get('degradation', 0),
+            'holdout_bonus': holdout_bonus,
+            # Final score
+            'final_score': final_score,
+        }
 
-        return best_tf
-
-    def _update_full_result_with_weighted(
+    def _update_training_with_holdout(
         self,
-        full_backtest_id: str,
-        recent_backtest_id: str,
-        weighted_result: Dict
+        training_backtest_id: str,
+        holdout_backtest_id: str,
+        final_result: Dict
     ):
         """
-        Update full period backtest result with weighted metrics and recent_result_id
+        Update training backtest result with holdout reference and final metrics
         """
-        if not full_backtest_id:
+        if not training_backtest_id:
             return
 
         try:
             with get_session() as session:
                 bt = session.query(BacktestResult).filter(
-                    BacktestResult.id == full_backtest_id
+                    BacktestResult.id == training_backtest_id
                 ).first()
 
                 if bt:
-                    bt.weighted_sharpe = weighted_result.get('weighted_sharpe')
-                    bt.weighted_win_rate = weighted_result.get('weighted_win_rate')
-                    bt.weighted_expectancy = weighted_result.get('weighted_expectancy')
-                    bt.recency_ratio = weighted_result.get('recency_ratio')
-                    bt.recency_penalty = weighted_result.get('recency_penalty')
+                    # Link to holdout result
+                    if holdout_backtest_id:
+                        bt.recent_result_id = holdout_backtest_id
 
-                    if recent_backtest_id:
-                        bt.recent_result_id = recent_backtest_id
+                    # Store final metrics (reuse existing columns)
+                    bt.weighted_sharpe = final_result.get('final_score')
+                    bt.recency_ratio = 1 - final_result.get('degradation', 0)
+                    bt.recency_penalty = -final_result.get('holdout_bonus', 0)
 
                     session.commit()
         except Exception as e:
-            logger.error(f"Failed to update full result with weighted metrics: {e}")
+            logger.error(f"Failed to update training result with holdout: {e}")
 
     def _find_optimal_timeframe(self, tf_results: Dict[str, Dict]) -> Optional[str]:
         """
         Find TF with best performance that passes all thresholds.
 
-        Uses composite score: 0.5*sharpe + 0.3*edge + 0.2*win_rate
+        Uses final_score which combines training + holdout performance.
 
         Returns:
             Optimal timeframe string or None if none pass
@@ -617,45 +611,46 @@ class ContinuousBacktesterProcess:
         best_score = -float('inf')
 
         for tf, results in tf_results.items():
-            # Check thresholds
+            # Check thresholds (based on training metrics)
             total_trades = results.get('total_trades', 0)
-            sharpe = results.get('sharpe_ratio', 0)
-            win_rate = results.get('win_rate', 0)
+            training_sharpe = results.get('training_sharpe', results.get('sharpe_ratio', 0))
+            training_win_rate = results.get('training_win_rate', results.get('win_rate', 0))
             max_dd = results.get('max_drawdown', 1)
-            expectancy = results.get('expectancy', 0)
+            training_expectancy = results.get('training_expectancy', results.get('expectancy', 0))
 
             # Must pass all thresholds
             if total_trades < self.min_trades:
                 logger.debug(f"{tf}: Failed trades threshold ({total_trades} < {self.min_trades})")
                 continue
-            if sharpe < self.min_sharpe:
-                logger.debug(f"{tf}: Failed sharpe threshold ({sharpe:.2f} < {self.min_sharpe})")
+            if training_sharpe < self.min_sharpe:
+                logger.debug(f"{tf}: Failed sharpe threshold ({training_sharpe:.2f} < {self.min_sharpe})")
                 continue
-            if win_rate < self.min_win_rate:
-                logger.debug(f"{tf}: Failed win_rate threshold ({win_rate:.2%} < {self.min_win_rate:.2%})")
+            if training_win_rate < self.min_win_rate:
+                logger.debug(f"{tf}: Failed win_rate threshold ({training_win_rate:.2%} < {self.min_win_rate:.2%})")
                 continue
             if max_dd > self.max_drawdown:
                 logger.debug(f"{tf}: Failed drawdown threshold ({max_dd:.2%} > {self.max_drawdown:.2%})")
                 continue
-            if expectancy < self.min_expectancy:
-                logger.debug(f"{tf}: Failed expectancy threshold ({expectancy:.4f} < {self.min_expectancy})")
+            if training_expectancy < self.min_expectancy:
+                logger.debug(f"{tf}: Failed expectancy threshold ({training_expectancy:.4f} < {self.min_expectancy})")
                 continue
 
-            # Calculate composite score
-            score = (
-                0.5 * sharpe +
-                0.3 * expectancy * 100 +  # Scale expectancy
-                0.2 * win_rate
-            )
+            # Use final_score (combines training + holdout)
+            score = results.get('final_score', 0)
 
-            logger.debug(f"{tf}: Score {score:.2f} (sharpe={sharpe:.2f}, exp={expectancy:.4f}, wr={win_rate:.2%})")
+            logger.debug(
+                f"{tf}: Final Score {score:.2f} "
+                f"(training={results.get('training_score', 0):.2f}, "
+                f"holdout={results.get('holdout_score', 0):.2f}, "
+                f"bonus={results.get('holdout_bonus', 0):.1%})"
+            )
 
             if score > best_score:
                 best_score = score
                 best_tf = tf
 
         if best_tf:
-            logger.info(f"Optimal TF: {best_tf} with score {best_score:.2f}")
+            logger.info(f"Optimal TF: {best_tf} with final score {best_score:.2f}")
 
         return best_tf
 
@@ -666,7 +661,7 @@ class ContinuousBacktesterProcess:
         pairs: List[str],
         timeframe: str,
         is_optimal: bool = False,
-        period_type: str = 'full',
+        period_type: str = 'training',
         period_days: Optional[int] = None
     ) -> Optional[str]:
         """
@@ -678,7 +673,7 @@ class ContinuousBacktesterProcess:
             pairs: List of symbols tested
             timeframe: Timeframe tested
             is_optimal: Whether this is the optimal TF
-            period_type: 'full' or 'recent'
+            period_type: 'training' or 'holdout'
             period_days: Number of days in this period
 
         Returns:
@@ -692,7 +687,7 @@ class ContinuousBacktesterProcess:
 
                 # Determine period_days if not provided
                 if period_days is None:
-                    period_days = self.lookback_days if period_type == 'full' else self.recent_period_days
+                    period_days = self.training_days if period_type == 'training' else self.holdout_days
 
                 bt_result = BacktestResult(
                     strategy_id=strategy_id,

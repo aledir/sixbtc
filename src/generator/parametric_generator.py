@@ -154,6 +154,40 @@ class ParametricGenerator:
 
         return strategies
 
+    def _fix_template_syntax(self, code_template: str) -> str:
+        """
+        Fix common AI-generated template syntax issues
+
+        Common issues:
+        1. Triple braces in f-strings: {{{ var }}} should be {{ var }}
+        2. Escaped braces in f-strings where placeholder should be literal
+
+        Args:
+            code_template: Raw template code from AI
+
+        Returns:
+            Fixed template code
+        """
+        import re
+
+        # Fix triple braces {{{ var }}} -> {{ var }}
+        # This happens when AI puts Jinja2 placeholder inside f-string
+        code_template = re.sub(r'\{\{\{(\s*\w+\s*)\}\}\}', r'{{ \1 }}', code_template)
+
+        # Fix f-string with Jinja2 placeholder in reason strings
+        # Pattern: f"...{{{ var }}}..." -> f"...{var}..." after rendering
+        # We need to replace the placeholder with the rendered value AND escape for f-string
+        # Actually, the issue is that f-string needs {{ }} to produce { }
+        # So f"...{{{ entry_threshold }}}..." is trying to produce {value}
+        # But Jinja2 sees {{{ as {{ + { which is invalid
+
+        # Better approach: convert f"...{{{ var }}}..." to f"...{value}..."
+        # by making it a proper Jinja2 expression that outputs the f-string literal
+        # For now, just fix the triple brace to double brace
+        code_template = re.sub(r'\{\{\{\s*(\w+)\s*\}\}\}', r'{{ \1 }}', code_template)
+
+        return code_template
+
     def _generate_single(
         self,
         template: StrategyTemplate,
@@ -169,9 +203,12 @@ class ParametricGenerator:
         Returns:
             GeneratedStrategy or None if failed
         """
+        # Fix common template syntax issues
+        fixed_template = self._fix_template_syntax(template.code_template)
+
         # Render template with parameters
         try:
-            jinja_template = self.jinja_env.from_string(template.code_template)
+            jinja_template = self.jinja_env.from_string(fixed_template)
             code = jinja_template.render(**params)
         except Exception as e:
             logger.error(f"Template rendering failed: {e}")

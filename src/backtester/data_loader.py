@@ -2,6 +2,12 @@
 Backtest Data Loader
 
 Loads and prepares historical OHLCV data for backtesting.
+Uses BacktestCacheReader - NEVER downloads data.
+
+Design Principles:
+- Read-only: Uses pre-downloaded cache (run data_scheduler first)
+- Fast fail: Crash if data doesn't exist
+- No network: Never calls Binance API
 """
 
 import pandas as pd
@@ -10,7 +16,7 @@ from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 
 from src.utils.logger import get_logger
-from src.data.binance_downloader import BinanceDataDownloader
+from src.backtester.cache_reader import BacktestCacheReader, CacheNotFoundError
 
 logger = get_logger(__name__)
 
@@ -18,6 +24,9 @@ logger = get_logger(__name__)
 class BacktestDataLoader:
     """
     Loads historical data for backtesting
+
+    IMPORTANT: This class reads ONLY from cache.
+    Run data_scheduler to download data before using this.
 
     Supports:
     - Single symbol backtests
@@ -29,8 +38,14 @@ class BacktestDataLoader:
 
     def __init__(self, cache_dir: str = 'data/binance', config: Optional[dict] = None):
         self.cache_dir = Path(cache_dir)
-        self.downloader = BinanceDataDownloader()
         self.config = config
+
+        # Use cache reader (never downloads)
+        try:
+            self.cache_reader = BacktestCacheReader(cache_dir=cache_dir)
+        except CacheNotFoundError as e:
+            logger.error(f"Cache not available: {e}")
+            raise
 
     def load_single_symbol(
         self,
@@ -40,193 +55,198 @@ class BacktestDataLoader:
         end_date: Optional[datetime] = None
     ) -> pd.DataFrame:
         """
-        Load OHLCV data for single symbol
+        Load OHLCV data for single symbol from cache
 
         Args:
             symbol: Trading pair (e.g., 'BTC', 'ETH')
             timeframe: Candle timeframe ('15m', '1h', '4h', '1d')
             days: Number of days to load
-            end_date: End date (default: now)
+            end_date: End date (default: latest in cache)
 
         Returns:
             DataFrame with columns: [timestamp, open, high, low, close, volume]
-        """
-        logger.info(f"Loading {symbol} {timeframe} data ({days} days)")
 
-        # Download from Binance (uses cache if available)
-        df = self.downloader.download_ohlcv(
+        Raises:
+            CacheNotFoundError: If data not in cache
+        """
+        logger.debug(f"Loading {symbol} {timeframe} data ({days} days) from cache")
+
+        df = self.cache_reader.read(
             symbol=symbol,
             timeframe=timeframe,
-            days=days
+            days=days,
+            end_date=end_date
         )
 
-        # Filter by end_date if specified
-        if end_date:
-            df = df[df['timestamp'] <= end_date]
-
-        logger.info(f"Loaded {len(df)} candles from {df['timestamp'].min()} to {df['timestamp'].max()}")
+        if not df.empty:
+            logger.debug(
+                f"Loaded {len(df)} candles from "
+                f"{df['timestamp'].min()} to {df['timestamp'].max()}"
+            )
 
         return df
 
-    def load_dual_periods(
+    def load_training_holdout(
         self,
         symbol: str,
         timeframe: str,
-        full_period_days: int = 180,
-        recent_period_days: int = 60,
+        training_days: int = 365,
+        holdout_days: int = 30,
         end_date: Optional[datetime] = None
     ) -> tuple:
         """
-        Load data for dual-period backtesting
+        Load data split into training and holdout periods
 
-        This method loads data for two periods:
-        1. Full period: entire lookback window (e.g., 180 days)
-        2. Recent period: only recent data (e.g., last 60 days)
+        This method loads data for two NON-OVERLAPPING periods:
+        1. Training period: older data for backtest metrics (e.g., 365 days)
+        2. Holdout period: recent data NEVER seen during selection (e.g., last 30 days)
 
-        The recent period is used to validate that a strategy is "in form"
-        and hasn't degraded in recent market conditions.
+        The holdout serves TWO purposes:
+        - Anti-overfitting: if strategy crashes on holdout, it's overfitted
+        - Recency score: good holdout performance = strategy "in form" now
+
+        Data layout:
+        |---- Training (365 days) ----|---- Holdout (30 days) ----|
+        ^                             ^                           ^
+        start                    split point                     end
 
         Args:
             symbol: Trading pair (e.g., 'BTC', 'ETH')
             timeframe: Candle timeframe ('15m', '1h', '4h', '1d')
-            full_period_days: Total lookback days for full period
-            recent_period_days: Days for recent period (from end)
-            end_date: End date (default: now)
+            training_days: Days for training period
+            holdout_days: Days for holdout period (from end)
+            end_date: End date (default: latest in cache)
 
         Returns:
-            Tuple of (full_period_df, recent_period_df)
+            Tuple of (training_df, holdout_df) - NON-OVERLAPPING
         """
-        logger.info(
-            f"Loading dual periods for {symbol} {timeframe}: "
-            f"full={full_period_days}d, recent={recent_period_days}d"
-        )
+        total_days = training_days + holdout_days
 
-        # Load full period data
-        full_df = self.load_single_symbol(
+        # Load all data
+        df = self.cache_reader.read(
             symbol=symbol,
             timeframe=timeframe,
-            days=full_period_days,
+            days=total_days,
             end_date=end_date
         )
 
-        if full_df.empty:
-            logger.warning(f"No data loaded for {symbol}")
-            return full_df, full_df
+        if df.empty:
+            return pd.DataFrame(), pd.DataFrame()
 
-        # Calculate recent period start
-        # Get end_date from actual data if not specified
-        if 'timestamp' in full_df.columns:
-            data_end = full_df['timestamp'].max()
+        # Calculate split point based on holdout_days from end
+        if 'timestamp' in df.columns:
+            df = df.sort_values('timestamp')
+            end_ts = df['timestamp'].max()
+            split_ts = end_ts - timedelta(days=holdout_days)
+
+            training_df = df[df['timestamp'] < split_ts].copy()
+            holdout_df = df[df['timestamp'] >= split_ts].copy()
         else:
-            data_end = full_df.index.max()
+            # Use index if no timestamp column
+            df = df.sort_index()
+            end_ts = df.index.max()
+            split_ts = end_ts - timedelta(days=holdout_days)
 
-        # Handle timezone-aware vs naive datetime
-        if hasattr(data_end, 'tzinfo') and data_end.tzinfo is not None:
-            # Data is timezone-aware, make recent_start timezone-aware too
-            import pytz
-            recent_start = (data_end - timedelta(days=recent_period_days))
-        else:
-            recent_start = data_end - timedelta(days=recent_period_days)
+            training_df = df[df.index < split_ts].copy()
+            holdout_df = df[df.index >= split_ts].copy()
 
-        # Filter for recent period
-        if 'timestamp' in full_df.columns:
-            recent_df = full_df[full_df['timestamp'] >= recent_start].copy()
-        else:
-            # If timestamp is index
-            recent_df = full_df[full_df.index >= recent_start].copy()
-
-        logger.info(
-            f"Dual periods loaded: full={len(full_df)} candles, "
-            f"recent={len(recent_df)} candles"
+        logger.debug(
+            f"Split {symbol} {timeframe}: "
+            f"training={len(training_df)} candles, holdout={len(holdout_df)} candles"
         )
 
-        return full_df, recent_df
+        return training_df, holdout_df
 
-    def load_multi_symbol_dual_periods(
+    def load_multi_symbol_training_holdout(
         self,
         symbols: List[str],
         timeframe: str,
-        full_period_days: int = 180,
-        recent_period_days: int = 60,
+        training_days: int = 365,
+        holdout_days: int = 30,
         end_date: Optional[datetime] = None,
         target_count: Optional[int] = None,
         min_coverage_pct: float = 0.90
     ) -> tuple:
         """
-        Load dual-period data for multiple symbols with history validation
+        Load training/holdout data for multiple symbols
 
-        Filters out symbols with insufficient history and can fetch additional
-        symbols to reach a target count.
+        Loads NON-OVERLAPPING training and holdout data for portfolio backtesting.
 
         Args:
-            symbols: List of trading pairs (ordered by priority, e.g., volume)
+            symbols: List of trading pairs (ordered by priority)
             timeframe: Candle timeframe
-            full_period_days: Total lookback days (minimum required history)
-            recent_period_days: Recent period days
-            end_date: End date (default: now)
-            target_count: Target number of symbols to return
-            min_coverage_pct: Minimum data coverage required (0.90 = 90%)
+            training_days: Days for training period
+            holdout_days: Days for holdout period
+            end_date: End date
+            target_count: Target number of symbols (uses all if None)
+            min_coverage_pct: Minimum data coverage required
 
         Returns:
-            Tuple of (full_data_dict, recent_data_dict)
-            Each dict maps symbol -> DataFrame (only symbols with sufficient history)
+            Tuple of (training_data_dict, holdout_data_dict) - NON-OVERLAPPING
         """
-        target = target_count or len(symbols)
-        logger.info(
-            f"Loading multi-symbol dual periods: {len(symbols)} candidates, "
-            f"target={target}, {timeframe}, full={full_period_days}d, recent={recent_period_days}d"
-        )
+        total_days = training_days + holdout_days
 
-        full_data = {}
-        recent_data = {}
-        skipped = []
+        # Limit symbols if target_count specified
+        if target_count:
+            symbols = symbols[:target_count * 2]  # Get extra in case some fail
+
+        training_data = {}
+        holdout_data = {}
+        loaded = 0
 
         for symbol in symbols:
-            if len(full_data) >= target:
+            if target_count and loaded >= target_count:
                 break
 
             try:
-                full_df, recent_df = self.load_dual_periods(
+                training_df, holdout_df = self.load_training_holdout(
                     symbol=symbol,
                     timeframe=timeframe,
-                    full_period_days=full_period_days,
-                    recent_period_days=recent_period_days,
+                    training_days=training_days,
+                    holdout_days=holdout_days,
                     end_date=end_date
                 )
 
-                if full_df.empty:
-                    skipped.append((symbol, "empty"))
+                # Check coverage
+                if training_df.empty or holdout_df.empty:
                     continue
 
-                # Validate history coverage
-                actual_days = self._calculate_data_days(full_df, timeframe)
-                coverage = actual_days / full_period_days if full_period_days > 0 else 0
+                # Calculate expected candles
+                tf_minutes = self._timeframe_to_minutes(timeframe)
+                expected_training = (training_days * 24 * 60) / tf_minutes
+                expected_holdout = (holdout_days * 24 * 60) / tf_minutes
 
-                if coverage < min_coverage_pct:
-                    skipped.append((symbol, f"{actual_days}d < {full_period_days}d ({coverage:.0%})"))
+                training_coverage = len(training_df) / expected_training
+                holdout_coverage = len(holdout_df) / expected_holdout
+
+                if training_coverage < min_coverage_pct or holdout_coverage < min_coverage_pct:
                     logger.debug(
-                        f"Skipping {symbol}: insufficient history "
-                        f"({actual_days} days, need {full_period_days})"
+                        f"Skipping {symbol}: coverage too low "
+                        f"(training={training_coverage:.1%}, holdout={holdout_coverage:.1%})"
                     )
                     continue
 
-                full_data[symbol] = full_df
-                recent_data[symbol] = recent_df
+                training_data[symbol] = training_df
+                holdout_data[symbol] = holdout_df
+                loaded += 1
 
             except Exception as e:
-                skipped.append((symbol, str(e)))
-                logger.error(f"Failed to load dual periods for {symbol}: {e}")
+                logger.debug(f"Failed to load {symbol}: {e}")
                 continue
 
-        if skipped:
-            logger.info(f"Skipped {len(skipped)} symbols with insufficient history")
-
         logger.info(
-            f"Loaded {len(full_data)}/{target} symbols "
-            f"(from {len(symbols)} candidates)"
+            f"Loaded training/holdout data for {len(training_data)} symbols "
+            f"({timeframe}, {training_days}d/{holdout_days}d)"
         )
 
-        return full_data, recent_data
+        return training_data, holdout_data
+
+    def _timeframe_to_minutes(self, timeframe: str) -> int:
+        """Convert timeframe string to minutes"""
+        multipliers = {'m': 1, 'h': 60, 'd': 1440}
+        unit = timeframe[-1]
+        value = int(timeframe[:-1])
+        return value * multipliers.get(unit, 1)
 
     def load_multi_symbol(
         self,
@@ -238,82 +258,40 @@ class BacktestDataLoader:
         min_coverage_pct: float = 0.90
     ) -> Dict[str, pd.DataFrame]:
         """
-        Load OHLCV data for multiple symbols with history validation
-
-        Filters out symbols with insufficient history and can fetch additional
-        symbols to reach a target count.
+        Load OHLCV data for multiple symbols
 
         Args:
-            symbols: List of trading pairs (ordered by priority, e.g., volume)
+            symbols: List of trading pairs
             timeframe: Candle timeframe
-            days: Number of days to load (minimum required history)
-            end_date: End date (default: now)
-            target_count: Target number of symbols to return (fetches more if needed)
-            min_coverage_pct: Minimum data coverage required (0.90 = 90% of days)
+            days: Number of days to load
+            end_date: End date
+            target_count: Target number of symbols
+            min_coverage_pct: Minimum data coverage required
 
         Returns:
-            Dict mapping symbol → DataFrame (only symbols with sufficient history)
+            Dict mapping symbol -> DataFrame
         """
-        target = target_count or len(symbols)
-        logger.info(
-            f"Loading multi-symbol data: {len(symbols)} candidates, "
-            f"target={target}, {timeframe}, {days} days"
+        # Limit symbols if target_count specified
+        if target_count:
+            symbols = symbols[:target_count * 2]
+
+        data = self.cache_reader.read_multi_symbol(
+            symbols=symbols,
+            timeframe=timeframe,
+            days=days,
+            end_date=end_date,
+            min_coverage_pct=min_coverage_pct
         )
 
-        data = {}
-        skipped = []
-
-        for symbol in symbols:
-            if len(data) >= target:
-                break
-
-            try:
-                df = self.load_single_symbol(symbol, timeframe, days, end_date)
-
-                # Validate history coverage
-                if df.empty:
-                    skipped.append((symbol, "empty"))
-                    continue
-
-                actual_days = self._calculate_data_days(df, timeframe)
-                coverage = actual_days / days if days > 0 else 0
-
-                if coverage < min_coverage_pct:
-                    skipped.append((symbol, f"{actual_days}d < {days}d ({coverage:.0%})"))
-                    logger.debug(
-                        f"Skipping {symbol}: insufficient history "
-                        f"({actual_days} days, need {days})"
-                    )
-                    continue
-
-                data[symbol] = df
-
-            except Exception as e:
-                skipped.append((symbol, str(e)))
-                logger.error(f"Failed to load {symbol}: {e}")
-                continue
-
-        if skipped:
-            logger.info(f"Skipped {len(skipped)} symbols with insufficient history")
-
-        logger.info(
-            f"Loaded {len(data)}/{target} symbols "
-            f"(from {len(symbols)} candidates)"
-        )
+        # Trim to target_count if needed
+        if target_count and len(data) > target_count:
+            symbols_to_keep = list(data.keys())[:target_count]
+            data = {s: data[s] for s in symbols_to_keep}
 
         return data
 
     def _calculate_data_days(self, df: pd.DataFrame, timeframe: str) -> int:
-        """
-        Calculate actual number of days covered by data
-
-        Args:
-            df: DataFrame with timestamp column
-            timeframe: Timeframe string (e.g., '15m', '1h', '1d')
-
-        Returns:
-            Number of days covered
-        """
+        """Calculate actual number of days covered by data"""
         if df.empty:
             return 0
 
@@ -324,13 +302,7 @@ class BacktestDataLoader:
             first_ts = df.index.min()
             last_ts = df.index.max()
 
-        # Handle timezone
-        if hasattr(first_ts, 'tzinfo') and first_ts.tzinfo is not None:
-            delta = last_ts - first_ts
-        else:
-            delta = last_ts - first_ts
-
-        return delta.days
+        return (last_ts - first_ts).days
 
     def prepare_vectorbt_format(
         self,
@@ -344,7 +316,7 @@ class BacktestDataLoader:
         - Columns: MultiIndex (symbol, ohlcv_field)
 
         Args:
-            data: Dict mapping symbol → DataFrame
+            data: Dict mapping symbol -> DataFrame
 
         Returns:
             Multi-index DataFrame ready for VectorBT
@@ -365,7 +337,7 @@ class BacktestDataLoader:
             raise ValueError("No common timestamps across symbols")
 
         timestamps = sorted(timestamps)
-        logger.info(f"Common timestamp range: {len(timestamps)} candles")
+        logger.debug(f"Common timestamp range: {len(timestamps)} candles")
 
         # Build multi-index DataFrame
         dfs = {}
@@ -386,7 +358,7 @@ class BacktestDataLoader:
             names=['symbol', 'ohlcv']
         )
 
-        logger.info(f"Prepared VectorBT data: {len(result)} rows × {len(result.columns)} columns")
+        logger.debug(f"Prepared VectorBT data: {len(result)} rows x {len(result.columns)} columns")
 
         return result
 
@@ -399,17 +371,10 @@ class BacktestDataLoader:
         """
         Create walk-forward validation windows
 
-        Example with 4 windows (75/25 split):
-
-        Window 1: Train [0:75%]  → Test [75%:100%]
-        Window 2: Train [0:80%]  → Test [80%:100%]
-        Window 3: Train [0:85%]  → Test [85%:100%]
-        Window 4: Train [0:90%]  → Test [90%:100%]
-
         Args:
             df: Input DataFrame
             n_windows: Number of expanding windows
-            train_pct: Initial train/test split (0.75 = 75% train)
+            train_pct: Initial train/test split
 
         Returns:
             List of (train_df, test_df) tuples
@@ -418,11 +383,9 @@ class BacktestDataLoader:
         windows = []
 
         for i in range(n_windows):
-            # Expanding train set
             train_end_pct = train_pct + (i * (1 - train_pct) / n_windows)
             train_end = int(total_len * train_end_pct)
 
-            # Test set follows train
             test_end_pct = train_end_pct + ((1 - train_pct) / n_windows)
             test_end = int(total_len * test_end_pct)
 
@@ -430,7 +393,7 @@ class BacktestDataLoader:
             test_df = df.iloc[train_end:test_end]
 
             logger.debug(
-                f"Window {i+1}: Train {len(train_df)} candles → Test {len(test_df)} candles"
+                f"Window {i+1}: Train {len(train_df)} -> Test {len(test_df)} candles"
             )
 
             windows.append((train_df, test_df))
@@ -438,29 +401,19 @@ class BacktestDataLoader:
         return windows
 
     def get_available_symbols(self) -> List[str]:
-        """
-        Get list of symbols available in cache
+        """Get list of symbols available in cache"""
+        return self.cache_reader.list_cached_symbols()
 
-        Returns:
-            List of symbol names
-        """
-        if not self.cache_dir.exists():
-            return []
-
-        symbols = set()
-        for file in self.cache_dir.glob('*.parquet'):
-            # Parse filename: BTC_15m.parquet → BTC
-            symbol = file.stem.split('_')[0]
-            symbols.add(symbol)
-
-        return sorted(symbols)
+    def get_available_timeframes(self, symbol: str) -> List[str]:
+        """Get list of timeframes available for a symbol"""
+        return self.cache_reader.list_cached_timeframes(symbol)
 
 
 class BinanceDataLoader:
     """
-    Binance data loader (alias for BacktestDataLoader for compatibility)
+    Binance data loader (alias for BacktestDataLoader)
 
-    Loads OHLCV data from Binance for backtesting strategies.
+    Loads OHLCV data from cache for backtesting.
     """
 
     def __init__(self):
@@ -491,9 +444,9 @@ class BinanceDataLoader:
         elif start_date:
             days = (datetime.now() - start_date).days
         else:
-            days = 180  # Default 6 months
+            days = 180
 
-        # Convert symbol format: BTC/USDT → BTC
+        # Convert symbol format: BTC/USDT -> BTC
         symbol_clean = symbol.split('/')[0]
 
         df = self.loader.load_single_symbol(
@@ -504,39 +457,25 @@ class BinanceDataLoader:
         )
 
         # Filter by start_date if specified
-        if start_date:
+        if start_date and not df.empty:
             df = df[df['timestamp'] >= start_date]
 
         return df
 
     def validate_data(self, df: pd.DataFrame) -> bool:
-        """
-        Validate OHLCV data integrity
-
-        Args:
-            df: DataFrame to validate
-
-        Returns:
-            True if data is valid, False otherwise
-        """
-        # Check required columns
+        """Validate OHLCV data integrity"""
         required_cols = ['open', 'high', 'low', 'close', 'volume']
+
         if not all(col in df.columns for col in required_cols):
             logger.error("Missing required columns")
             return False
 
-        # Check for NaN values
         if df[required_cols].isna().any().any():
             logger.error("Found NaN values in OHLCV data")
             return False
 
-        # Check OHLC relationships (high >= low is the main constraint)
-        # In real trading, open/close can be outside high/low in rare cases due to gaps
-        # but high must always be >= low
-        invalid_ohlc = (df['high'] < df['low'])
-
-        if invalid_ohlc.any():
-            logger.error(f"Invalid OHLC relationships detected: {invalid_ohlc.sum()} bars with high < low")
+        if (df['high'] < df['low']).any():
+            logger.error("Invalid OHLC: high < low detected")
             return False
 
         return True

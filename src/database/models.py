@@ -161,6 +161,22 @@ class Strategy(Base):
     backtest_pairs = Column(JSON)  # Audit trail: ["BTC", "ETH", ...]
     backtest_date = Column(DateTime)  # Date of backtest
 
+    # Backtest score (from BacktestResult, cached for ranking)
+    score_backtest = Column(Float)  # Composite score 0-100
+
+    # Live performance metrics (calculated from Trade records)
+    score_live = Column(Float)  # Composite score 0-100
+    win_rate_live = Column(Float)  # Win rate from live trades
+    expectancy_live = Column(Float)  # Avg profit per trade (%)
+    sharpe_live = Column(Float)  # Sharpe ratio from live returns
+    max_drawdown_live = Column(Float)  # Max drawdown from live equity curve
+    total_trades_live = Column(Integer, default=0)  # Number of closed live trades
+    total_pnl_live = Column(Float, default=0.0)  # Total PnL in USD
+    last_live_update = Column(DateTime)  # Last time live metrics were updated
+
+    # Backtest vs Live comparison
+    live_degradation_pct = Column(Float)  # (backtest_score - live_score) / backtest_score
+
     # Relationships
     backtest_results = relationship("BacktestResult", back_populates="strategy")
     trades = relationship("Trade", back_populates="strategy")
@@ -299,11 +315,22 @@ class Trade(Base):
     atr_at_entry = Column(Float)  # ATR value at entry
 
     # Results
-    pnl_usd = Column(Float)  # Profit/loss in USD
+    pnl_usd = Column(Float)  # Profit/loss in USD (net after fees)
     pnl_pct = Column(Float)  # Profit/loss as % of position
     return_pct = Column(Float)  # Return on capital risked
     fees_usd = Column(Float)  # Total fees paid
     slippage_usd = Column(Float)  # Estimated slippage
+
+    # Hyperliquid sync fields
+    position_id = Column(String(255), index=True)  # Hyperliquid exit_tid for dedup
+    leverage = Column(Integer, default=1)  # Actual leverage used (1-50x)
+    entry_fee_usd = Column(Float)  # Fee on entry side
+    exit_fee_usd = Column(Float)  # Fee on exit side
+    duration_minutes = Column(Integer)  # Trade duration in minutes
+
+    # Iteration tracking
+    iteration = Column(Integer)  # Monitor iteration when trade closed
+    entry_iteration = Column(Integer)  # Monitor iteration when trade opened
 
     # Metadata
     signal_reason = Column(Text)  # Why strategy entered trade

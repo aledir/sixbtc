@@ -264,7 +264,7 @@ class AutoPilot:
         logger.info("[CYCLE] Starting backtesting...")
 
         try:
-            from src.backtester.vectorbt_engine import VectorBTEngine
+            from src.backtester.backtest_engine import VectorBTEngine
             from src.backtester.data_loader import BacktestDataLoader
             from src.backtester.validator import LookaheadValidator
             import importlib.util

@@ -142,7 +142,7 @@ def test_lifecycle():
     console.print("\n[bold]FASE 3: Backtesting con VectorBT[/bold]")
 
     try:
-        from src.backtester.vectorbt_engine import VectorBTEngine
+        from src.backtester.backtest_engine import VectorBTEngine
 
         # Create sample OHLCV data with realistic price action
         # that will trigger RSI signals (trends + reversals)

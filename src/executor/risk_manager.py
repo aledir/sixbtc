@@ -1,19 +1,24 @@
 """
 Risk Manager - Position Sizing and Risk Management
 
-Implements ATR-based position sizing and risk management rules.
+Implements position sizing and risk management for all SL/TP types.
 
 Key Features:
 - ATR-based position sizing (adaptive to volatility)
-- Fixed fractional fallback
+- Percentage-based SL/TP
+- Structure-based SL (swing lows/highs)
+- Volatility-based SL (standard deviation)
+- Trailing stop support
+- RR ratio-based TP
 - Risk limits enforcement
-- Volatility scaling
 """
 
 import logging
 from typing import Optional, Tuple, Dict, Any
 import pandas as pd
 import numpy as np
+
+from src.strategies.base import StopLossType, TakeProfitType
 
 logger = logging.getLogger(__name__)
 
@@ -152,9 +157,10 @@ class RiskManager:
         potential_loss = current_price - stop_loss
         risk_reward = potential_profit / potential_loss
 
-        if risk_reward < self.min_risk_reward:
-            logger.warning(
-                f"Risk/Reward ratio {risk_reward:.2f} below minimum {self.min_risk_reward}"
+        # Only warn and adjust if R:R is actually below minimum (not equal)
+        if risk_reward < self.min_risk_reward - 0.001:  # Small tolerance for floating point
+            logger.debug(
+                f"Adjusting R:R ratio {risk_reward:.2f} to minimum {self.min_risk_reward}"
             )
             # Adjust take profit to meet minimum R:R
             take_profit = current_price + (stop_distance * self.min_risk_reward)
@@ -230,23 +236,36 @@ class RiskManager:
         signal_atr_take_mult: Optional[float] = None
     ) -> Tuple[float, float, float]:
         """
-        Calculate position size (auto-selects method based on config)
+        Calculate position size using signal's sl_type and tp_type
+
+        Dispatches to appropriate SL/TP calculation based on signal type.
+        Supports all StopLossType and TakeProfitType values.
 
         Args:
-            signal: Signal object (test-compatible interface)
+            signal: Signal object with sl_type, tp_type and related params
             account_balance: Account balance in USD
             current_price: Current market price
-            atr: ATR value (optional, for ATR mode)
-            df: OHLCV DataFrame (required for ATR mode if atr not provided)
-            signal_stop_loss: Fixed stop loss from signal (optional)
-            signal_take_profit: Fixed take profit from signal (optional)
-            signal_atr_stop_mult: ATR stop multiplier from signal (optional)
-            signal_atr_take_mult: ATR take profit multiplier from signal (optional)
+            atr: ATR value (required for ATR-based calculations)
+            df: OHLCV DataFrame (required for VOLATILITY type)
+            signal_stop_loss: Fixed stop loss (legacy, deprecated)
+            signal_take_profit: Fixed take profit (legacy, deprecated)
+            signal_atr_stop_mult: ATR stop multiplier (legacy, deprecated)
+            signal_atr_take_mult: ATR take multiplier (legacy, deprecated)
 
         Returns:
             Tuple of (position_size, stop_loss, take_profit)
         """
-        # Handle Signal object interface
+        # If signal object provided, use new dispatcher-based calculation
+        if signal is not None and hasattr(signal, 'sl_type'):
+            return self._calculate_position_size_with_dispatchers(
+                signal=signal,
+                account_balance=account_balance,
+                current_price=current_price,
+                atr=atr,
+                df=df
+            )
+
+        # Legacy path: backward compatibility for old interface
         if signal is not None:
             signal_stop_loss = getattr(signal, 'stop_loss', None)
             signal_take_profit = getattr(signal, 'take_profit', None)
@@ -294,6 +313,89 @@ class RiskManager:
 
             return size, signal_stop_loss, signal_take_profit or current_price * 1.05
 
+    def _calculate_position_size_with_dispatchers(
+        self,
+        signal,
+        account_balance: float,
+        current_price: float,
+        atr: float,
+        df: Optional[pd.DataFrame] = None
+    ) -> Tuple[float, float, float]:
+        """
+        Calculate position size using sl_type and tp_type dispatchers
+
+        This is the new unified calculation path that supports all SL/TP types.
+
+        Args:
+            signal: Signal object with sl_type, tp_type and related params
+            account_balance: Account balance in USD
+            current_price: Current market price
+            atr: Current ATR value
+            df: OHLCV DataFrame (for VOLATILITY type)
+
+        Returns:
+            Tuple of (position_size, stop_loss, take_profit)
+        """
+        # Ensure we have ATR (required for fallbacks)
+        if atr is None or atr == 0:
+            if df is not None:
+                atr = self._calculate_atr(df)
+            if atr is None or atr == 0:
+                logger.error("ATR is zero or unavailable, cannot calculate position size")
+                return 0.0, 0.0, 0.0
+
+        # 1. Calculate stop loss using dispatcher
+        stop_loss = self._calculate_stop_loss(signal, current_price, atr, df)
+
+        # 2. Calculate position size based on risk
+        stop_distance = abs(current_price - stop_loss)
+        if stop_distance == 0:
+            logger.error("Stop distance is zero, cannot calculate position size")
+            return 0.0, 0.0, 0.0
+
+        risk_dollars = account_balance * self.risk_per_trade_pct
+
+        # Apply volatility scaling if enabled
+        if self.scaling_enabled:
+            atr_pct = atr / current_price
+            if atr_pct < self.low_vol_threshold:
+                risk_dollars *= (1 + self.scaling_factor)
+            elif atr_pct > self.high_vol_threshold:
+                risk_dollars *= (1 - self.scaling_factor)
+
+        position_size = risk_dollars / stop_distance
+
+        # 3. Calculate take profit using dispatcher
+        take_profit = self._calculate_take_profit(signal, current_price, stop_loss, atr)
+
+        # 4. Validate and enforce minimum R:R ratio
+        if take_profit is not None:
+            potential_profit = abs(take_profit - current_price)
+            risk_reward = potential_profit / stop_distance
+
+            if risk_reward < self.min_risk_reward - 0.001:
+                logger.debug(
+                    f"Adjusting R:R ratio {risk_reward:.2f} to minimum {self.min_risk_reward}"
+                )
+                # Adjust take profit to meet minimum R:R
+                if signal.direction == 'long':
+                    take_profit = current_price + (stop_distance * self.min_risk_reward)
+                else:
+                    take_profit = current_price - (stop_distance * self.min_risk_reward)
+
+        # 5. Apply max position size cap
+        max_notional = account_balance * self.max_position_size_pct
+        max_position_size = max_notional / current_price
+        position_size = min(position_size, max_position_size)
+
+        logger.debug(
+            f"Position sizing: sl_type={getattr(signal, 'sl_type', 'ATR')}, "
+            f"tp_type={getattr(signal, 'tp_type', None)}, "
+            f"size={position_size:.6f}, SL={stop_loss:.2f}, TP={take_profit}"
+        )
+
+        return position_size, stop_loss, take_profit
+
     def _calculate_atr(self, df: pd.DataFrame) -> float:
         """
         Calculate ATR from OHLCV data
@@ -325,6 +427,140 @@ class RiskManager:
         atr = tr.ewm(span=self.atr_period, adjust=False).mean().iloc[-1]
 
         return float(atr)
+
+    def _calculate_stop_loss(
+        self,
+        signal,
+        current_price: float,
+        atr: float,
+        df: Optional[pd.DataFrame] = None
+    ) -> float:
+        """
+        Calculate stop loss based on signal's sl_type
+
+        Supports all StopLossType values:
+        - ATR: Dynamic based on ATR multiplier
+        - PERCENTAGE: Fixed percentage from entry
+        - STRUCTURE: Absolute price (swing low/high)
+        - VOLATILITY: Based on standard deviation
+        - TRAILING: Initial trailing distance
+
+        Args:
+            signal: Signal object with sl_type and related params
+            current_price: Current market price
+            atr: Current ATR value
+            df: OHLCV DataFrame (required for VOLATILITY type)
+
+        Returns:
+            Stop loss price
+        """
+        sl_type = getattr(signal, 'sl_type', StopLossType.ATR)
+        direction = signal.direction
+
+        if sl_type == StopLossType.ATR:
+            mult = getattr(signal, 'atr_stop_multiplier', None) or self.atr_stop_multiplier
+            distance = atr * mult
+
+        elif sl_type == StopLossType.PERCENTAGE:
+            sl_pct = getattr(signal, 'sl_pct', 0.02)  # Default 2%
+            distance = current_price * sl_pct
+
+        elif sl_type == StopLossType.STRUCTURE:
+            # sl_price is calculated by strategy (swing low/high)
+            sl_price = getattr(signal, 'sl_price', None)
+            if sl_price is not None:
+                return sl_price
+            # Fallback to ATR if no sl_price
+            logger.warning("STRUCTURE SL type but no sl_price, falling back to ATR")
+            distance = atr * self.atr_stop_multiplier
+
+        elif sl_type == StopLossType.VOLATILITY:
+            # Use standard deviation
+            if df is not None and len(df) >= 20:
+                std = df['close'].rolling(20).std().iloc[-1]
+                mult = getattr(signal, 'sl_std_multiplier', 2.0)
+                distance = std * mult
+            else:
+                logger.warning("VOLATILITY SL type but no df, falling back to ATR")
+                distance = atr * self.atr_stop_multiplier
+
+        elif sl_type == StopLossType.TRAILING:
+            # Initial trailing stop distance
+            trail_pct = getattr(signal, 'trailing_stop_pct', 0.02)
+            distance = current_price * trail_pct
+
+        else:
+            # Unknown type, use ATR default
+            logger.warning(f"Unknown sl_type {sl_type}, using ATR default")
+            distance = atr * self.atr_stop_multiplier
+
+        # Apply direction
+        if direction == 'long':
+            return current_price - distance
+        else:  # short
+            return current_price + distance
+
+    def _calculate_take_profit(
+        self,
+        signal,
+        current_price: float,
+        stop_loss: float,
+        atr: float
+    ) -> Optional[float]:
+        """
+        Calculate take profit based on signal's tp_type
+
+        Supports all TakeProfitType values:
+        - ATR: Dynamic based on ATR multiplier
+        - RR_RATIO: Based on risk/reward ratio from SL distance
+        - PERCENTAGE: Fixed percentage from entry
+        - TRAILING: Initial trailing TP distance
+
+        Args:
+            signal: Signal object with tp_type and related params
+            current_price: Current market price
+            stop_loss: Calculated stop loss price
+            atr: Current ATR value
+
+        Returns:
+            Take profit price, or None if exit via indicator
+        """
+        tp_type = getattr(signal, 'tp_type', None)
+        direction = signal.direction
+
+        # No TP type = exit via indicator (direction='close')
+        if tp_type is None:
+            return None
+
+        if tp_type == TakeProfitType.ATR:
+            mult = getattr(signal, 'atr_take_multiplier', None) or self.atr_take_profit_multiplier
+            distance = atr * mult
+
+        elif tp_type == TakeProfitType.RR_RATIO:
+            # TP = SL distance × RR ratio
+            rr_ratio = getattr(signal, 'rr_ratio', 2.0)
+            risk_distance = abs(current_price - stop_loss)
+            distance = risk_distance * rr_ratio
+
+        elif tp_type == TakeProfitType.PERCENTAGE:
+            tp_pct = getattr(signal, 'tp_pct', 0.05)  # Default 5%
+            distance = current_price * tp_pct
+
+        elif tp_type == TakeProfitType.TRAILING:
+            # Initial trailing TP distance
+            trail_pct = getattr(signal, 'trailing_tp_pct', 0.05)
+            distance = current_price * trail_pct
+
+        else:
+            # Unknown type, use ATR default
+            logger.warning(f"Unknown tp_type {tp_type}, using ATR default")
+            distance = atr * self.atr_take_profit_multiplier
+
+        # Apply direction
+        if direction == 'long':
+            return current_price + distance
+        else:  # short
+            return current_price - distance
 
     def check_risk_limits(
         self,

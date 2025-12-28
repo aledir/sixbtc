@@ -255,6 +255,9 @@ class BinanceDataDownloader:
 
             if not needs_backfill and not needs_update:
                 logger.info(f"{symbol} {timeframe}: Using cached data (complete)")
+                # Filter to requested period
+                if days is not None:
+                    df = df[df['timestamp'] >= required_start].reset_index(drop=True)
                 return df
 
             if needs_backfill:
@@ -332,6 +335,10 @@ class BinanceDataDownloader:
                 )
             else:
                 logger.warning(f"{symbol} {timeframe}: No new data available")
+
+            # Filter to requested period before returning
+            if days is not None:
+                df = df[df['timestamp'] >= required_start].reset_index(drop=True)
 
             return df
 

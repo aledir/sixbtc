@@ -20,7 +20,9 @@ from src.config import load_config
 from src.database import get_session, Strategy, Subaccount, Trade, Coin
 from src.executor.hyperliquid_client import HyperliquidClient
 from src.executor.risk_manager import RiskManager
-from src.strategies.base import StrategyCore, Signal
+from src.executor.trailing_service import TrailingService
+from src.data.pairs_updater import get_tradable_pairs_for_strategy
+from src.strategies.base import StrategyCore, Signal, StopLossType, ExitType
 from src.utils import get_logger, setup_logging
 
 # Initialize logging at module load
@@ -53,6 +55,7 @@ class ContinuousExecutorProcess:
         # Components
         self.client = HyperliquidClient(self.config, dry_run=self.dry_run)
         self.risk_manager = RiskManager(self.config)
+        self.trailing_service = TrailingService(self.client, self.config)
 
         # Load trading pairs (multi-coin support)
         self.trading_pairs = self._load_trading_pairs()
@@ -60,6 +63,10 @@ class ContinuousExecutorProcess:
         # Strategy cache
         self._strategy_cache: Dict[str, StrategyCore] = {}
         self._data_cache: Dict[str, any] = {}
+
+        # Track open trade metadata for TIME_BASED exits
+        # key = "symbol:subaccount_id" -> {'entry_time': datetime, 'exit_after_bars': int, 'timeframe': str}
+        self._time_exit_tracking: Dict[str, Dict] = {}
 
         # Check interval
         self.check_interval_seconds = 15  # Check every 15 seconds
@@ -88,6 +95,9 @@ class ContinuousExecutorProcess:
         """Main continuous execution loop"""
         logger.info("Starting continuous execution loop")
 
+        # Start trailing service
+        await self.trailing_service.start()
+
         while not self.shutdown_event.is_set() and not self.force_exit:
             try:
                 # Get active subaccounts with LIVE strategies
@@ -96,6 +106,12 @@ class ContinuousExecutorProcess:
                 if not active_subaccounts:
                     await asyncio.sleep(self.check_interval_seconds)
                     continue
+
+                # Update trailing stops with current prices
+                await self._update_trailing_prices()
+
+                # Check TIME_BASED exits
+                await self._check_time_based_exits(active_subaccounts)
 
                 # Process each subaccount
                 for subaccount in active_subaccounts:
@@ -106,6 +122,8 @@ class ContinuousExecutorProcess:
 
             await asyncio.sleep(self.check_interval_seconds)
 
+        # Stop trailing service
+        await self.trailing_service.stop()
         logger.info("Execution loop ended")
 
     def _get_active_subaccounts(self) -> List[Dict]:
@@ -130,17 +148,23 @@ class ContinuousExecutorProcess:
                     'strategy_name': strategy.name,
                     'strategy_code': strategy.code,
                     'timeframe': strategy.timeframe,
-                    'allocated_capital': subaccount.allocated_capital
+                    'allocated_capital': subaccount.allocated_capital,
+                    'backtest_pairs': strategy.backtest_pairs or []
                 })
 
         return subaccounts
 
     async def _process_subaccount(self, subaccount: Dict):
         """
-        Process a single subaccount - scan all coins for signals
+        Process a single subaccount - scan tradable coins for signals
 
-        Like Freqtrade: 1 strategy → N coins
-        Each strategy scans all coins and generates signals where it finds opportunities.
+        Tradable pairs = intersection of:
+        - Pairs the strategy was backtested on (backtest_pairs)
+        - Currently active coins with volume >= min_volume_24h
+
+        This ensures we only trade pairs that:
+        1. Were validated in backtest (no blind trading)
+        2. Are currently liquid enough for live trading
         """
         try:
             strategy_id = subaccount['strategy_id']
@@ -158,8 +182,33 @@ class ContinuousExecutorProcess:
                 logger.warning(f"Could not load strategy {strategy_name}")
                 return
 
-            # Scan all coins for signals
-            for symbol in self.trading_pairs:
+            # Get tradable pairs for this strategy (intersection logic)
+            backtest_pairs = subaccount.get('backtest_pairs', [])
+            trading_pairs = get_tradable_pairs_for_strategy(backtest_pairs)
+
+            if not trading_pairs:
+                # Fallback to global pairs if strategy has no backtest_pairs recorded
+                if not backtest_pairs:
+                    logger.debug(
+                        f"Strategy {strategy_name} has no backtest_pairs recorded, "
+                        f"using global trading pairs"
+                    )
+                    trading_pairs = self.trading_pairs
+                else:
+                    logger.warning(
+                        f"Strategy {strategy_name} has no tradable pairs "
+                        f"(backtest_pairs={len(backtest_pairs)}, intersection=0)"
+                    )
+                    return
+
+            if len(trading_pairs) < 5:
+                logger.warning(
+                    f"Strategy {strategy_name} has only {len(trading_pairs)} tradable pairs "
+                    f"(backtest_pairs={len(backtest_pairs)})"
+                )
+
+            # Scan tradable coins for signals
+            for symbol in trading_pairs:
                 try:
                     await self._process_coin(
                         subaccount=subaccount,
@@ -187,36 +236,57 @@ class ContinuousExecutorProcess:
         """
         Process a single coin for a strategy
 
+        Handles both entry signals (long/short) and exit signals (close).
+        - Entry: only if no open position and within position limits
+        - Exit: only if there is an open position
+
         Args:
             subaccount: Subaccount info dict
             strategy: Strategy instance
             symbol: Trading pair (e.g., 'BTC', 'ETH')
             timeframe: Candle timeframe
         """
-        # Check if we already have a position for this symbol on this subaccount
-        if self._has_open_position(subaccount['id'], symbol):
-            return
-
-        # Check if we've hit max positions for this subaccount
-        if self._is_at_max_positions(subaccount['id']):
-            return
-
         # Get market data for this coin
         data = await self._get_market_data(symbol, timeframe)
 
         if data is None or len(data) < 50:
             return
 
+        # Check for open position
+        open_trade = self._get_open_trade(subaccount['id'], symbol)
+
         # Generate signal (pass symbol for per-coin leverage)
         signal = strategy.generate_signal(data, symbol)
 
-        if signal and signal.direction in ['long', 'short']:
+        if signal is None:
+            return
+
+        # CASE 1: Exit signal + open position -> close it
+        if signal.direction == 'close' and open_trade:
+            current_price = data['close'].iloc[-1]
+            await self._close_position(subaccount, open_trade, signal, current_price)
+            return
+
+        # CASE 2: Entry signal + no position -> open it
+        if signal.direction in ['long', 'short'] and not open_trade:
+            # Check max positions limit
+            if self._is_at_max_positions(subaccount['id']):
+                return
             await self._execute_signal(subaccount, signal, data, symbol)
 
-    def _has_open_position(self, subaccount_id: int, symbol: str) -> bool:
-        """Check if subaccount has an open position for this symbol"""
+    def _get_open_trade(self, subaccount_id: int, symbol: str) -> Optional[Dict]:
+        """
+        Get open trade record for this symbol (if exists)
+
+        Args:
+            subaccount_id: Subaccount ID
+            symbol: Trading pair
+
+        Returns:
+            Dict with trade info or None if no open position
+        """
         with get_session() as session:
-            open_trade = (
+            trade = (
                 session.query(Trade)
                 .filter(
                     Trade.subaccount_id == subaccount_id,
@@ -225,7 +295,19 @@ class ContinuousExecutorProcess:
                 )
                 .first()
             )
-            return open_trade is not None
+            if trade:
+                return {
+                    'id': str(trade.id),
+                    'symbol': trade.symbol,
+                    'direction': trade.direction,
+                    'entry_price': trade.entry_price,
+                    'entry_size': trade.entry_size,
+                }
+            return None
+
+    def _has_open_position(self, subaccount_id: int, symbol: str) -> bool:
+        """Check if subaccount has an open position for this symbol"""
+        return self._get_open_trade(subaccount_id, symbol) is not None
 
     def _is_at_max_positions(self, subaccount_id: int) -> bool:
         """Check if subaccount has reached max position limit"""
@@ -417,6 +499,36 @@ class ContinuousExecutorProcess:
                     subaccount, signal, symbol, size, current_price, stop_loss, take_profit
                 )
 
+                # Register with trailing service if sl_type=TRAILING
+                sl_type = getattr(signal, 'sl_type', StopLossType.ATR)
+                if sl_type == StopLossType.TRAILING:
+                    sl_oid = order_result.get('stop_loss', {}).get('order_id')
+                    self.trailing_service.register_trailing_position(
+                        coin=symbol,
+                        subaccount_id=subaccount['id'],
+                        side=signal.direction,
+                        entry_price=current_price,
+                        position_size=size,
+                        current_sl_price=stop_loss,
+                        current_sl_oid=sl_oid,
+                        trailing_stop_pct=getattr(signal, 'trailing_stop_pct', 0.02),
+                        trailing_activation_pct=getattr(signal, 'trailing_activation_pct', 0.01),
+                    )
+
+                # Register TIME_BASED exit tracking if applicable
+                exit_type = getattr(signal, 'exit_type', None)
+                if exit_type == ExitType.TIME_BASED:
+                    exit_after_bars = getattr(signal, 'exit_after_bars', 20)
+                    key = f"{symbol}:{subaccount['id']}"
+                    self._time_exit_tracking[key] = {
+                        'entry_time': datetime.utcnow(),
+                        'exit_after_bars': exit_after_bars,
+                        'timeframe': subaccount.get('timeframe', '15m'),
+                    }
+                    logger.info(
+                        f"TIME_BASED exit registered: {symbol} will exit after {exit_after_bars} bars"
+                    )
+
         except Exception as e:
             logger.error(f"Failed to execute signal: {e}", exc_info=True)
 
@@ -467,6 +579,205 @@ class ContinuousExecutorProcess:
                 signal_reason=signal.reason
             )
             session.add(trade)
+
+    async def _close_position(
+        self,
+        subaccount: Dict,
+        open_trade: Dict,
+        signal: Signal,
+        current_price: float
+    ):
+        """
+        Close an open position based on indicator signal
+
+        Args:
+            subaccount: Subaccount info dict
+            open_trade: Open trade record dict
+            signal: Close signal
+            current_price: Current market price
+        """
+        symbol = open_trade['symbol']
+        exit_reason = signal.reason or "signal"
+
+        logger.info(
+            f"Closing position {symbol} for subaccount {subaccount['id']}: "
+            f"reason={exit_reason}"
+        )
+
+        if self.dry_run:
+            logger.info(
+                f"[DRY RUN] Would close position {symbol}: "
+                f"entry={open_trade['entry_price']:.2f}, exit={current_price:.2f}"
+            )
+            return
+
+        # Close on exchange
+        success = self.client.close_position(symbol, reason=exit_reason)
+
+        if success:
+            # Update trade record with exit data
+            self._record_exit(open_trade, current_price, exit_reason)
+
+    def _record_exit(
+        self,
+        open_trade: Dict,
+        exit_price: float,
+        exit_reason: str
+    ):
+        """
+        Record exit in database
+
+        Args:
+            open_trade: Open trade record dict
+            exit_price: Exit price
+            exit_reason: Reason for exit
+        """
+        with get_session() as session:
+            trade = session.query(Trade).filter(
+                Trade.id == open_trade['id']
+            ).first()
+
+            if trade:
+                trade.exit_time = datetime.utcnow()
+                trade.exit_price = exit_price
+                trade.exit_reason = exit_reason
+
+                # Calculate PnL
+                if trade.direction == 'LONG':
+                    pnl_pct = (exit_price - trade.entry_price) / trade.entry_price
+                else:
+                    pnl_pct = (trade.entry_price - exit_price) / trade.entry_price
+
+                trade.pnl_pct = pnl_pct
+                trade.pnl_usd = pnl_pct * trade.entry_price * trade.entry_size
+
+                logger.info(
+                    f"Trade closed: {trade.symbol} PnL={trade.pnl_usd:.2f} USD "
+                    f"({pnl_pct:.2%})"
+                )
+
+        # Clean up time exit tracking
+        key = f"{open_trade['symbol']}:{open_trade.get('subaccount_id', 0)}"
+        self._time_exit_tracking.pop(key, None)
+
+        # Unregister from trailing service
+        self.trailing_service.unregister_position(
+            open_trade['symbol'],
+            open_trade.get('subaccount_id', 0)
+        )
+
+    async def _update_trailing_prices(self):
+        """Update trailing service with current prices for all coins with trailing stops"""
+        if not self.trailing_service.enabled:
+            return
+
+        for symbol in self.trading_pairs:
+            try:
+                price = self.client.get_current_price(symbol)
+                if price and price > 0:
+                    await self.trailing_service.on_price_update(symbol, price)
+            except Exception as e:
+                logger.debug(f"Failed to update trailing price for {symbol}: {e}")
+
+    async def _check_time_based_exits(self, active_subaccounts: List[Dict]):
+        """
+        Check and execute TIME_BASED exits for all tracked positions.
+
+        TIME_BASED exit closes a position after N bars have elapsed since entry.
+        """
+        if not self._time_exit_tracking:
+            return
+
+        now = datetime.utcnow()
+
+        for key, tracking_info in list(self._time_exit_tracking.items()):
+            try:
+                symbol, subaccount_id_str = key.split(':')
+                subaccount_id = int(subaccount_id_str)
+
+                entry_time = tracking_info['entry_time']
+                exit_after_bars = tracking_info['exit_after_bars']
+                timeframe = tracking_info['timeframe']
+
+                # Calculate bars elapsed since entry
+                bars_elapsed = self._calculate_bars_since_entry(entry_time, timeframe, now)
+
+                if bars_elapsed >= exit_after_bars:
+                    # Find the subaccount info
+                    subaccount = next(
+                        (s for s in active_subaccounts if s['id'] == subaccount_id),
+                        None
+                    )
+
+                    if not subaccount:
+                        continue
+
+                    # Get open trade
+                    open_trade = self._get_open_trade(subaccount_id, symbol)
+                    if not open_trade:
+                        # Position already closed, clean up tracking
+                        del self._time_exit_tracking[key]
+                        continue
+
+                    # Get current price
+                    data = await self._get_market_data(symbol, timeframe)
+                    if data is None or len(data) == 0:
+                        continue
+
+                    current_price = data['close'].iloc[-1]
+
+                    # Create close signal
+                    close_signal = Signal(
+                        direction='close',
+                        reason=f'time_exit: {bars_elapsed}/{exit_after_bars} bars'
+                    )
+
+                    logger.info(
+                        f"TIME_BASED exit triggered: {symbol} after {bars_elapsed} bars "
+                        f"(target: {exit_after_bars})"
+                    )
+
+                    # Close the position
+                    open_trade['subaccount_id'] = subaccount_id
+                    await self._close_position(subaccount, open_trade, close_signal, current_price)
+
+            except Exception as e:
+                logger.error(f"Error checking time-based exit for {key}: {e}")
+
+    def _calculate_bars_since_entry(
+        self,
+        entry_time: datetime,
+        timeframe: str,
+        current_time: datetime
+    ) -> int:
+        """
+        Calculate how many bars have elapsed since entry.
+
+        Args:
+            entry_time: When the position was opened
+            timeframe: Candle timeframe (e.g., '15m', '1h', '4h')
+            current_time: Current time
+
+        Returns:
+            Number of complete bars since entry
+        """
+        # Parse timeframe to minutes
+        tf_minutes = self._timeframe_to_minutes(timeframe)
+
+        # Calculate elapsed time in minutes
+        elapsed_seconds = (current_time - entry_time).total_seconds()
+        elapsed_minutes = elapsed_seconds / 60
+
+        return int(elapsed_minutes / tf_minutes)
+
+    def _timeframe_to_minutes(self, timeframe: str) -> int:
+        """Convert timeframe string to minutes"""
+        tf_map = {
+            '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30,
+            '1h': 60, '2h': 120, '4h': 240, '6h': 360, '8h': 480,
+            '12h': 720, '1d': 1440,
+        }
+        return tf_map.get(timeframe, 15)  # Default to 15m
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""

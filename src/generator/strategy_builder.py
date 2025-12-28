@@ -35,6 +35,8 @@ from src.generator.parametric_generator import (
     ParametricGenerator,
     GeneratedStrategy as ParametricStrategy
 )
+from src.generator.direct_generator import DirectPatternGenerator
+from src.generator.helper_fetcher import HelperFetcher
 from src.database.models import StrategyTemplate
 
 logger = logging.getLogger(__name__)
@@ -119,6 +121,12 @@ class StrategyBuilder:
 
         self.parametric_generator = ParametricGenerator(config=self.config)
 
+        # Initialize direct pattern generator (Mode A - zero AI cost)
+        self.direct_generator = DirectPatternGenerator(self.config)
+
+        # Initialize helper fetcher for Mode B (AI wrapping with provided code)
+        self.helper_fetcher = HelperFetcher(pattern_api_url)
+
     def _default_config(self) -> dict:
         """Default configuration (for tests only - production must provide full config)"""
         return {
@@ -135,40 +143,125 @@ class StrategyBuilder:
         min_lev, max_lev = get_leverage_range_from_db()
         return random.randint(min_lev, max_lev)
 
-    def generate_from_pattern(self, pattern: Pattern) -> Optional[GeneratedStrategy]:
+    def generate_from_pattern(
+        self,
+        pattern: Pattern,
+        mode: str = "auto"
+    ) -> Optional[GeneratedStrategy]:
         """
         Generate strategy from a single validated pattern
 
-        One pattern = one strategy. Direction is forced from pattern.
+        Three modes available:
+        - "auto": Try direct embedding first (Mode A), fallback to AI (Mode B)
+        - "direct": Direct embedding only (Mode A) - zero AI cost
+        - "ai": AI wrapping only (Mode B) - uses provided code in prompt
 
         Args:
             pattern: Validated pattern from pattern-discovery API
+            mode: Generation mode ("auto", "direct", "ai")
 
         Returns:
             GeneratedStrategy object or None if generation failed
         """
-        strategy_id = self._generate_id()
         leverage = self._get_random_leverage()
 
-        # Use pattern's strategy_type if available, otherwise derive from name
+        # Mode A: Direct embedding (preferred when formula_source available)
+        if mode in ("auto", "direct") and pattern.formula_source:
+            result = self.direct_generator.generate(pattern, leverage)
+            if result and result.validation_passed:
+                logger.info(
+                    f"Generated {pattern.name} via Direct Embedding (Mode A) "
+                    f"-> Strategy_{result.strategy_type}_{result.strategy_id}"
+                )
+                # Convert DirectGeneratedStrategy to GeneratedStrategy
+                return GeneratedStrategy(
+                    code=result.code,
+                    strategy_id=result.strategy_id,
+                    strategy_type=result.strategy_type,
+                    timeframe=result.timeframe,
+                    patterns_used=result.patterns_used,
+                    ai_provider="direct",
+                    validation_passed=result.validation_passed,
+                    validation_errors=result.validation_errors,
+                    leverage=result.leverage,
+                    pattern_id=result.pattern_id,
+                    generation_mode="direct"
+                )
+            elif mode == "direct":
+                # Direct-only mode requested but failed
+                logger.error(
+                    f"Direct generation failed for {pattern.name}: "
+                    f"{result.validation_errors if result else 'no formula_source'}"
+                )
+                return None
+            else:
+                # Auto mode: fallback to AI
+                logger.warning(
+                    f"Direct generation failed for {pattern.name}, "
+                    "falling back to AI (Mode B)"
+                )
+
+        # Mode B: AI wrapping (uses provided code in prompt)
+        return self._generate_pattern_ai(pattern, leverage)
+
+    def _generate_pattern_ai(
+        self,
+        pattern: Pattern,
+        leverage: int
+    ) -> Optional[GeneratedStrategy]:
+        """
+        Generate strategy using AI (Mode B) with provided code
+
+        If pattern has formula_source, uses the new template (generate_from_pattern_v2.j2)
+        that provides the exact code to the AI. Otherwise, falls back to original
+        template that asks AI to translate the formula.
+
+        Args:
+            pattern: Validated pattern from pattern-discovery API
+            leverage: Leverage to use
+
+        Returns:
+            GeneratedStrategy object or None if generation failed
+        """
+        if not self.ai_manager:
+            logger.error("AI Manager not available for pattern generation")
+            return None
+
+        strategy_id = self._generate_id()
         strategy_type = pattern.strategy_type or self._derive_strategy_type(pattern)
 
         logger.info(
-            f"Generating pattern-based {strategy_type} strategy for {pattern.timeframe} "
+            f"Generating pattern-based {strategy_type} strategy via AI (Mode B) "
             f"(ID: {strategy_id}, pattern: {pattern.name})"
         )
 
-        # Build prompt using pattern template
-        template = self.template_env.get_template('generate_from_pattern.j2')
-        prompt = template.render(
-            pattern=pattern,
-            strategy_id=strategy_id,
-            leverage=leverage
-        )
+        # Select template based on formula_source availability
+        if pattern.formula_source:
+            # New template: provides exact code to AI
+            template_name = 'generate_from_pattern_v2.j2'
+            helpers_context = self.helper_fetcher.get_helpers(pattern.timeframe)
+
+            template = self.template_env.get_template(template_name)
+            prompt = template.render(
+                pattern=pattern,
+                strategy_id=strategy_id,
+                leverage=leverage,
+                helpers=helpers_context.helper_functions if helpers_context else {},
+                timeframe_bars=helpers_context.timeframe_bars if helpers_context else {}
+            )
+        else:
+            # Original template: AI must translate formula
+            template_name = 'generate_from_pattern.j2'
+            template = self.template_env.get_template(template_name)
+            prompt = template.render(
+                pattern=pattern,
+                strategy_id=strategy_id,
+                leverage=leverage
+            )
 
         # Generate code with AI
         try:
-            response = self.ai_manager.generate(prompt, max_tokens=4000, temperature=0.5)
+            response = self.ai_manager.generate(prompt, max_tokens=4000, temperature=0.3)
             code = self._extract_code_block(response)
 
             # Validate
@@ -194,11 +287,11 @@ class StrategyBuilder:
                 validation_errors=errors,
                 leverage=leverage,
                 pattern_id=pattern.id,
-                generation_mode="pattern"
+                generation_mode="ai_pattern"
             )
 
         except Exception as e:
-            logger.error(f"Pattern-based generation failed for {pattern.name}: {e}")
+            logger.error(f"AI pattern generation failed for {pattern.name}: {e}")
             return None
 
     def generate_strategy(
@@ -240,12 +333,63 @@ class StrategyBuilder:
         if self.template_generator:
             template = self.template_generator.generate_template(strategy_type, timeframe)
             if template:
-                variations = self.parametric_generator.generate_variations(template, max_variations=1)
+                # Generate ALL variations (no artificial limit)
+                variations = self.parametric_generator.generate_variations(template)
                 if variations:
+                    # Return first for backward compatibility
                     return self._convert_parametric_strategy(variations[0], template)
 
         logger.error("No generation method available (no patterns, no template generator)")
         return None
+
+    def generate_strategies(
+        self,
+        strategy_type: StrategyType,
+        timeframe: str,
+        use_patterns: bool = True,
+        patterns: Optional[list] = None
+    ) -> list[GeneratedStrategy]:
+        """
+        Generate ALL strategy variations from a template
+
+        Unlike generate_strategy() which returns a single strategy,
+        this method returns ALL parametric variations.
+
+        Args:
+            strategy_type: Type of strategy (MOM, REV, TRN, etc.)
+            timeframe: Target timeframe ('5m', '15m', '1h', etc.)
+            use_patterns: Whether to use pattern-discovery patterns
+            patterns: Pre-selected patterns (if provided, uses first one)
+
+        Returns:
+            List of GeneratedStrategy objects
+        """
+        # If patterns provided, use first one (one pattern = one strategy)
+        if patterns and len(patterns) > 0:
+            result = self.generate_from_pattern(patterns[0])
+            return [result] if result else []
+
+        # If use_patterns, try to fetch one
+        if use_patterns:
+            fetched_patterns = self._fetch_patterns(timeframe)
+            if fetched_patterns:
+                result = self.generate_from_pattern(fetched_patterns[0])
+                return [result] if result else []
+
+        # Template-based generation: return ALL variations
+        logger.info(f"No patterns available, using template-based generation")
+        if self.template_generator:
+            template = self.template_generator.generate_template(strategy_type, timeframe)
+            if template:
+                variations = self.parametric_generator.generate_variations(template)
+                return [
+                    self._convert_parametric_strategy(v, template)
+                    for v in variations
+                    if v.validation_passed
+                ]
+
+        logger.error("No generation method available (no patterns, no template generator)")
+        return []
 
     def _derive_strategy_type(self, pattern: Pattern) -> StrategyType:
         """Derive strategy type from pattern characteristics"""

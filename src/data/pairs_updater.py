@@ -49,7 +49,13 @@ class PairsUpdater:
 
         # Configuration
         self.top_pairs_count = self.config.get('data_scheduler.top_pairs_count', 50)
-        self.min_volume_usd = self.config.get('data_scheduler.min_volume_usd', 5_000_000)
+
+        # Use trading.min_volume_24h as primary source (for live trading filter)
+        # Fall back to data_scheduler.min_volume_usd for backwards compatibility
+        self.min_volume_usd = self.config.get(
+            'trading.min_volume_24h',
+            self.config.get('data_scheduler.min_volume_usd', 1_000_000)
+        )
 
         # Binance downloader for symbol intersection
         self._binance_downloader: Optional[BinanceDataDownloader] = None
@@ -353,3 +359,43 @@ def get_coin_max_leverage(symbol: str) -> int:
     """
     updater = PairsUpdater()
     return updater.get_coin_max_leverage(symbol)
+
+
+def get_tradable_pairs_for_strategy(strategy_backtest_pairs: List[str]) -> List[str]:
+    """
+    Get pairs tradable for a strategy.
+
+    Returns intersection of:
+    - Pairs the strategy was backtested on
+    - Currently active coins with volume >= min_volume_24h
+
+    This ensures:
+    1. We only trade pairs that were tested (no blind trading)
+    2. We skip pairs that became illiquid or were delisted
+
+    Args:
+        strategy_backtest_pairs: List from Strategy.backtest_pairs
+
+    Returns:
+        List of tradable symbols
+    """
+    config = load_config()
+    min_volume = config.get('trading.min_volume_24h', 1_000_000)
+
+    with get_session() as session:
+        liquid_coins = session.query(Coin.symbol).filter(
+            Coin.is_active == True,
+            Coin.volume_24h >= min_volume
+        ).all()
+
+    active_liquid = {c.symbol for c in liquid_coins}
+    backtest_set = set(strategy_backtest_pairs or [])
+
+    tradable = list(backtest_set & active_liquid)
+
+    logger.info(
+        f"Tradable pairs: {len(tradable)} "
+        f"(backtest={len(backtest_set)}, active_liquid={len(active_liquid)})"
+    )
+
+    return tradable

@@ -1,0 +1,167 @@
+You are an expert quantitative trader. Create a StrategyCore class that uses the provided pattern function.
+
+=== PATTERN INFORMATION ===
+
+Name: {{ pattern.name }}
+Direction: {{ pattern.target_direction | upper }} ONLY
+Timeframe: {{ pattern.timeframe }}
+Holding Period: {{ pattern.holding_period or "4h" }}
+
+Performance:
+  - Edge: {{ "%.2f"|format(pattern.test_edge * 100) }}%
+  - Win Rate: {{ "%.1f"|format(pattern.test_win_rate * 100) }}%
+  - Quality Score: {{ "%.2f"|format(pattern.quality_score) }}
+
+{% if pattern.formula_readable %}
+Pattern Logic: {{ pattern.formula_readable }}
+{% endif %}
+
+=== EXECUTABLE SOURCE CODE (USE THIS EXACTLY) ===
+
+The pattern-discovery API provides the EXACT Python code. DO NOT modify the logic.
+
+```python
+{{ pattern.formula_source }}
+```
+
+{% if pattern.formula_components %}
+Return Expression: {{ pattern.formula_components.get('return_expression', 'N/A') }}
+Category: {{ pattern.formula_components.get('category', 'N/A') }}
+{% endif %}
+
+=== TIMEFRAME BAR MAPPINGS (for {{ pattern.timeframe }}) ===
+
+Use these EXACT values for bars_*() functions:
+
+```python
+{% for period, bars in timeframe_bars.items() %}
+def bars_{{ period }}(): return {{ bars }}
+{% endfor %}
+```
+
+{% if helpers %}
+=== HELPER FUNCTIONS (from API) ===
+
+These helper functions may be required by the pattern:
+
+{% for name, code in helpers.items() %}
+```python
+{{ code }}
+```
+
+{% endfor %}
+{% endif %}
+
+=== TRADING PARAMETERS ===
+
+{% if pattern.suggested_sl_type %}
+Stop Loss: {{ pattern.suggested_sl_type }} (multiplier: {{ pattern.suggested_sl_multiplier or 2.0 }})
+{% else %}
+Stop Loss: ATR-based with multiplier 2.0
+{% endif %}
+
+{% if pattern.suggested_rr_ratio %}
+Risk/Reward: {{ pattern.suggested_rr_ratio }}
+{% else %}
+Risk/Reward: 2.0
+{% endif %}
+
+=== STRICT REQUIREMENTS ===
+
+1. DIRECTION: Generate signals ONLY for {{ pattern.target_direction | upper }}
+2. LEVERAGE: Use leverage = {{ leverage }}
+3. PATTERN CODE: Use the EXACT formula_source code provided above
+4. HELPERS: Include the bars_*() functions before the pattern function
+5. NO MODIFICATIONS: Do NOT change the pattern logic - it was validated with this exact code
+
+=== OUTPUT FORMAT ===
+
+Generate ONLY the Python code block. No explanations.
+
+```python
+import pandas as pd
+import numpy as np
+import talib as ta
+from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType
+
+# =============================================================================
+# TIMEFRAME BAR MAPPINGS (precomputed for {{ pattern.timeframe }})
+# =============================================================================
+{% for period, bars in timeframe_bars.items() %}
+def bars_{{ period }}(): return {{ bars }}
+{% endfor %}
+
+{% if helpers %}
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+{% for name, code in helpers.items() %}
+{{ code }}
+
+{% endfor %}
+{% endif %}
+
+# =============================================================================
+# PATTERN FUNCTION: {{ pattern.name }}
+# {{ pattern.formula_readable or '' }}
+# =============================================================================
+{{ pattern.formula_source }}
+
+
+class Strategy_{{ pattern.strategy_type or "GEN" }}_{{ strategy_id }}(StrategyCore):
+    """
+    Pattern-based strategy: {{ pattern.name }}
+    Direction: {{ pattern.target_direction | upper }} only
+    Timeframe: {{ pattern.timeframe }}
+
+    Pattern Edge: {{ "%.2f"|format(pattern.test_edge * 100) }}%
+    Pattern Win Rate: {{ "%.1f"|format(pattern.test_win_rate * 100) }}%
+    """
+
+    leverage = {{ leverage }}
+
+    def __init__(self, params: dict = None):
+        super().__init__(params)
+
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
+        """Generate {{ pattern.target_direction }} signal using pattern: {{ pattern.name }}"""
+        min_bars = 100
+        if len(df) < min_bars:
+            return None
+
+        current_price = df['close'].iloc[-1]
+
+        # ATR for stops
+        atr = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+        current_atr = atr.iloc[-1]
+
+        if pd.isna(current_atr) or current_atr <= 0:
+            return None
+
+        # Call pattern function
+        try:
+            pattern_result = {{ pattern.name.split('.')[-1] }}(df)
+
+            # Extract current bar signal
+            if isinstance(pattern_result, pd.Series):
+                entry_condition = bool(pattern_result.iloc[-1]) if len(pattern_result) > 0 else False
+            else:
+                entry_condition = bool(pattern_result)
+        except Exception:
+            return None
+
+        if entry_condition:
+            return Signal(
+                direction='{{ pattern.target_direction }}',
+                leverage=self.leverage,
+                sl_type=StopLossType.{{ pattern.suggested_sl_type or "ATR" }},
+                atr_stop_multiplier={{ pattern.suggested_sl_multiplier or 2.0 }},
+                tp_type=TakeProfitType.RR_RATIO,
+                rr_ratio={{ pattern.suggested_rr_ratio or 2.0 }},
+                reason="Pattern {{ pattern.name }}: {{ pattern.formula_readable or 'condition met' }}"
+            )
+
+        return None
+```
+
+Generate the complete code now. Keep the pattern function EXACTLY as provided.

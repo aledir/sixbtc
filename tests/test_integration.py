@@ -17,7 +17,7 @@ import pandas as pd
 import numpy as np
 
 from src.generator.strategy_builder import StrategyBuilder
-from src.backtester.vectorbt_engine import VectorBTEngine
+from src.backtester.backtest_engine import VectorBTEngine
 from src.classifier.scorer import StrategyScorer
 from src.classifier.portfolio_builder import PortfolioBuilder
 from src.executor.subaccount_manager import SubaccountManager

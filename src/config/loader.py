@@ -85,6 +85,11 @@ def _interpolate_env_vars(config_str: str) -> str:
     """
     Replace ${VAR_NAME} placeholders with environment variables
 
+    Supports:
+    - ${VAR_NAME} - Required, crashes if missing
+    - ${VAR_NAME:-} - Optional, empty string if missing
+    - ${VAR_NAME:-default} - Optional, uses default if missing
+
     Args:
         config_str: YAML config as string
 
@@ -94,33 +99,45 @@ def _interpolate_env_vars(config_str: str) -> str:
     Raises:
         ValueError: If required env var is missing
     """
-    pattern = re.compile(r'\$\{(\w+)\}')
+    # Pattern matches: ${VAR} or ${VAR:-} or ${VAR:-default}
+    pattern = re.compile(r'\$\{(\w+)(:-([^}]*))?\}')
 
     def replacer(match):
         var_name = match.group(1)
+        has_default = match.group(2) is not None
+        default_value = match.group(3) if match.group(3) else ""
+
         value = os.getenv(var_name)
 
         if value is None:
-            raise ValueError(
-                f"Environment variable '{var_name}' is required but not set. "
-                f"Check your .env file or environment."
-            )
+            if has_default:
+                return default_value
+            else:
+                raise ValueError(
+                    f"Environment variable '{var_name}' is required but not set. "
+                    f"Check your .env file or environment."
+                )
 
         return value
 
     return pattern.sub(replacer, config_str)
 
 
+# Global config cache to avoid duplicate loads and prints
+_cached_config: Config | None = None
+
+
 def load_config(config_path: str | Path = "config/config.yaml") -> Config:
     """
-    Load SixBTC configuration from YAML file
+    Load SixBTC configuration from YAML file (cached)
 
     Process:
-    1. Load .env file (if exists)
-    2. Read YAML config
-    3. Interpolate environment variables (${VAR})
-    4. Parse and validate YAML
-    5. Return Config object
+    1. Return cached config if available
+    2. Load .env file (if exists)
+    3. Read YAML config
+    4. Interpolate environment variables (${VAR})
+    5. Parse and validate YAML
+    6. Cache and return Config object
 
     Args:
         config_path: Path to YAML config file
@@ -141,6 +158,12 @@ def load_config(config_path: str | Path = "config/config.yaml") -> Config:
         >>> config.get('timeframes')
         ['15m', '30m', '1h', '4h', '1d']
     """
+    global _cached_config
+
+    # Return cached config if available
+    if _cached_config is not None:
+        return _cached_config
+
     # 1. Load .env file (if exists)
     env_path = Path(".env")
     if env_path.exists():
@@ -184,6 +207,9 @@ def load_config(config_path: str | Path = "config/config.yaml") -> Config:
 
     # 6. Validate critical settings (Fast Fail)
     _validate_config(config)
+
+    # 7. Cache for future calls
+    _cached_config = config
 
     return config
 

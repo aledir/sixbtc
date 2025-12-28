@@ -5,10 +5,15 @@ Generates parameterized StrategyCore templates using AI.
 Templates contain Jinja2 placeholders for variable parameters.
 
 Structure-based diversification:
-- 18 safe template structures (3 risky EXIT-only excluded)
+- 24 safe template structures (18 base + 6 trailing, 3 risky EXIT-only excluded)
 - 6 strategy types (MOM, REV, TRN, BRE, VOL, SCA)
 - 5 timeframes from config (15m, 30m, 1h, 4h, 1d)
 - Parametric variations for each template
+
+Trailing stop structures (22-27):
+- Use SL_TRAILING instead of fixed SL
+- Locks in gains by following price as profit increases
+- Activates after configurable profit threshold
 
 Excluded risky structures (2, 9, 16):
 - EXIT-only without TP backup = guaranteed loss if indicator fails
@@ -45,6 +50,7 @@ class TemplateStructure:
     take_profit: bool
     exit_indicator: bool  # Indicator-based exit (RSI reversal, MA cross, etc.)
     time_exit: bool  # Exit after N bars
+    trailing_stop: bool = False  # Use trailing stop instead of fixed SL
 
     @property
     def name(self) -> str:
@@ -64,6 +70,8 @@ class TemplateStructure:
             exits.append("EXIT")
         if self.time_exit:
             exits.append("TIME")
+        if self.trailing_stop:
+            exits.append("TRAIL")
 
         parts.append("+".join(exits))
         return "_".join(parts)
@@ -75,8 +83,9 @@ class TemplateStructure:
         return has_entry and has_exit
 
 
-# All 21 valid template structures (for reference)
-# Entry (3 options) × Exit combinations (7 valid) = 21
+# All template structures
+# Entry (3 options) × Exit combinations (7 valid) = 21 base structures
+# Plus 6 trailing stop structures (22-27)
 ALL_STRUCTURES = [
     # Long only structures (7)
     TemplateStructure(1,  True, False, True,  False, False),  # LONG_TP
@@ -104,6 +113,16 @@ ALL_STRUCTURES = [
     TemplateStructure(19, True, True, True,  False, True),    # BIDIR_TP+TIME
     TemplateStructure(20, True, True, False, True,  True),    # BIDIR_EXIT+TIME
     TemplateStructure(21, True, True, True,  True,  True),    # BIDIR_TP+EXIT+TIME
+
+    # Trailing stop structures (6) - NEW
+    # Trailing + TP: locks in gains via trailing, protects via TP
+    TemplateStructure(22, True,  False, True,  False, False, True),  # LONG_TP+TRAIL
+    TemplateStructure(23, False, True,  True,  False, False, True),  # SHORT_TP+TRAIL
+    TemplateStructure(24, True,  True,  True,  False, False, True),  # BIDIR_TP+TRAIL
+    # Trailing + TIME: trailing stop + time-based exit
+    TemplateStructure(25, True,  False, False, False, True,  True),  # LONG_TIME+TRAIL
+    TemplateStructure(26, False, True,  False, False, True,  True),  # SHORT_TIME+TRAIL
+    TemplateStructure(27, True,  True,  False, False, True,  True),  # BIDIR_TIME+TRAIL
 ]
 
 # Risky structures excluded from generation:
@@ -114,7 +133,7 @@ ALL_STRUCTURES = [
 # If the indicator fails to generate exit signal, position runs until SL hit.
 EXCLUDED_STRUCTURE_IDS = {2, 9, 16}
 
-# Structures used for generation (18 safe structures)
+# Structures used for generation (24 safe structures: 18 base + 6 trailing)
 VALID_STRUCTURES = [s for s in ALL_STRUCTURES if s.id not in EXCLUDED_STRUCTURE_IDS]
 
 
@@ -126,7 +145,7 @@ class TemplateGenerator:
     fills with different parameter combinations.
 
     Diversification through:
-    1. Template structure (18 safe combinations, 3 risky excluded)
+    1. Template structure (24 safe combinations: 18 base + 6 trailing, 3 risky excluded)
     2. Strategy type (6 types)
     3. Timeframe (from config - default 5 timeframes)
     4. Parametric variations (50-200 per template)
@@ -354,6 +373,30 @@ class TemplateGenerator:
                             f"Parameter {param_name} has non-numeric values: {value_types}"
                         )
 
+                    # Validate trailing stop parameters are not too tight
+                    # Tight values cause overfitting: great backtest, poor live
+                    if param_name == 'trailing_stop_pct':
+                        min_val = min(values)
+                        if min_val < 0.02:
+                            logger.warning(
+                                f"trailing_stop_pct has values below 2% ({min_val}). "
+                                "This causes overfitting - filtering out values < 0.02"
+                            )
+                            param_def['values'] = [v for v in values if v >= 0.02]
+                            if not param_def['values']:
+                                param_def['values'] = [0.02, 0.03, 0.04]
+
+                    if param_name == 'trailing_activation_pct':
+                        min_val = min(values)
+                        if min_val < 0.01:
+                            logger.warning(
+                                f"trailing_activation_pct has values below 1% ({min_val}). "
+                                "This activates trailing too early - filtering out values < 0.01"
+                            )
+                            param_def['values'] = [v for v in values if v >= 0.01]
+                            if not param_def['values']:
+                                param_def['values'] = [0.01, 0.015, 0.02]
+
                     # Validate no duplicate values
                     if len(values) != len(set(values)):
                         logger.warning(f"Parameter {param_name} has duplicate values")
@@ -420,21 +463,29 @@ class TemplateGenerator:
         if structure.time_exit and 'exit_after_bars' not in code_template:
             warnings.append("Structure requires time_exit but exit_after_bars not found")
 
+        # Validate trailing stop compliance
+        if structure.trailing_stop:
+            if 'StopLossType.TRAILING' not in code_template:
+                warnings.append("Structure requires trailing_stop but StopLossType.TRAILING not found")
+            if 'trailing_stop_pct' not in code_template:
+                warnings.append("Structure requires trailing_stop but trailing_stop_pct not found")
+            if 'trailing_activation_pct' not in code_template:
+                warnings.append("Structure requires trailing_stop but trailing_activation_pct not found")
+
         # Check parameter count
         if len(parameters_schema) < 2:
             warnings.append("Too few parameters (minimum 2)")
         if len(parameters_schema) > 8:
             warnings.append("Too many parameters (maximum 8)")
 
-        # Estimate total combinations
+        # Estimate total combinations (informational only, no limit)
         total_combinations = 1
         for param_def in parameters_schema.values():
             total_combinations *= len(param_def.get('values', [1]))
 
         if total_combinations < 20:
             warnings.append(f"Too few combinations ({total_combinations}), aim for 50+")
-        if total_combinations > 500:
-            warnings.append(f"Too many combinations ({total_combinations}), aim for <200")
+        # No upper limit warning - we generate all variations, flow control is via backpressure
 
         return warnings
 

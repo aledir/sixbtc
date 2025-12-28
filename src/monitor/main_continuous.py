@@ -6,6 +6,9 @@ Monitors system health and performance:
 2. Strategy processing pipeline health
 3. Live trading performance
 4. Emergency stop conditions
+5. Trade synchronization from Hyperliquid
+
+Runs every 15-30 seconds to track system health and sync closed trades.
 """
 
 import asyncio
@@ -17,6 +20,8 @@ from typing import Dict, Optional
 
 from src.config import load_config
 from src.database import get_session, Strategy, Subaccount, Trade, PerformanceSnapshot, StrategyProcessor
+from src.data.hyperliquid_websocket import HyperliquidDataProvider, get_data_provider
+from src.executor.trade_sync import TradeSync
 from src.utils import get_logger, setup_logging
 
 # Initialize logging at module load
@@ -54,22 +59,51 @@ class ContinuousMonitorProcess:
         # Processor for checking pipeline health
         self.processor = StrategyProcessor(process_id=f"monitor-{os.getpid()}")
 
+        # Trade sync (for closing trades from Hyperliquid)
+        self.trade_sync: Optional[TradeSync] = None
+        self.data_provider: Optional[HyperliquidDataProvider] = None
+        self._iteration = 0
+
+        # Check if trade sync is enabled
+        trade_sync_config = self.config.get('hyperliquid', {}).get('trade_sync', {})
+        self.trade_sync_enabled = trade_sync_config.get('enabled', False)
+        user_address = self.config.get('hyperliquid', {}).get('user_address')
+
+        if self.trade_sync_enabled and user_address:
+            self.trade_sync = TradeSync(config=self.config)
+            logger.info("Trade sync enabled")
+        else:
+            if not user_address:
+                logger.info("Trade sync disabled (no user_address configured)")
+            else:
+                logger.info("Trade sync disabled in config")
+
         logger.info(
             f"ContinuousMonitorProcess initialized: "
-            f"interval={self.check_interval_seconds}s"
+            f"interval={self.check_interval_seconds}s, trade_sync={self.trade_sync_enabled}"
         )
 
     async def run_continuous(self):
         """Main continuous monitoring loop"""
         logger.info("Starting continuous monitoring loop")
 
+        # Initialize data provider for trade sync if enabled
+        if self.trade_sync_enabled and self.trade_sync:
+            await self._initialize_data_provider()
+
         while not self.shutdown_event.is_set() and not self.force_exit:
             try:
+                self._iteration += 1
+
                 # Run health checks
                 health = await self._run_health_checks()
 
                 # Check for emergency conditions
                 await self._check_emergency_conditions()
+
+                # Sync closed trades from Hyperliquid
+                if self.trade_sync and self.data_provider:
+                    await self.trade_sync.sync_cycle(self._iteration)
 
                 # Record health snapshot
                 self._record_health_snapshot(health)
@@ -80,6 +114,31 @@ class ContinuousMonitorProcess:
             await asyncio.sleep(self.check_interval_seconds)
 
         logger.info("Monitoring loop ended")
+
+    async def _initialize_data_provider(self):
+        """Initialize WebSocket data provider for trade sync."""
+        try:
+            # Get singleton data provider
+            self.data_provider = get_data_provider(config=self.config)
+
+            # Connect and subscribe to user data
+            if not self.data_provider.running:
+                # Start WebSocket in background task
+                asyncio.create_task(self.data_provider.start())
+                # Wait a moment for connection
+                await asyncio.sleep(2)
+
+            # Subscribe to user data channels
+            if self.data_provider.ws and self.data_provider.user_address:
+                await self.data_provider.subscribe_user_data()
+                logger.info("Data provider initialized for trade sync")
+
+            # Set data provider on trade sync
+            self.trade_sync.set_data_provider(self.data_provider)
+
+        except Exception as e:
+            logger.error(f"Failed to initialize data provider: {e}", exc_info=True)
+            self.trade_sync_enabled = False
 
     async def _run_health_checks(self) -> Dict:
         """Run all health checks"""

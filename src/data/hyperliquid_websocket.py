@@ -58,9 +58,54 @@ class MidPrice:
     timestamp: datetime
 
 
+@dataclass
+class UserPosition:
+    """
+    User position with Rizzo parity fields.
+
+    Rizzo parity = True Net PnL accounting for all fees and funding.
+    """
+    coin: str
+    side: str  # 'long' or 'short'
+    size: float
+    entry_price: float
+    leverage: int
+    margin_used: float
+    unrealized_pnl: float
+    liquidation_price: float
+    funding_since_open: float = 0.0
+    true_net_pnl: float = 0.0
+    timestamp: datetime = None
+
+
+@dataclass
+class AccountState:
+    """Complete account state from webData2"""
+    account_value: float
+    total_margin_used: float
+    withdrawable: float
+    positions: List['UserPosition']
+    timestamp: datetime
+
+
+@dataclass
+class UserFill:
+    """Trade execution record from userFills"""
+    tid: str
+    oid: str
+    coin: str
+    side: str
+    price: float
+    size: float
+    fee: float
+    closed_pnl: float  # Non-zero only for closing fills
+    direction: str  # "Open Long", "Close Short", etc.
+    timestamp: datetime
+
+
 class HyperliquidDataProvider:
     """
-    Singleton WebSocket data provider for real-time OHLCV
+    Singleton WebSocket data provider for real-time OHLCV and User Data
 
     Features:
     - HTTP Bootstrap: Load historical candles before WebSocket
@@ -68,6 +113,7 @@ class HyperliquidDataProvider:
     - Thread-safe caching with asyncio locks
     - Real-time candle updates
     - Real-time mid prices via allMids
+    - User data channels: webData2, userFills, orderUpdates
     - Automatic reconnection with exponential backoff
     - Multi-symbol, multi-timeframe support
     """
@@ -84,6 +130,10 @@ class HyperliquidDataProvider:
 
     # Bootstrap configuration
     BOOTSTRAP_RATE_LIMIT_MS = 500  # 500ms between HTTP requests
+
+    # User data sync configuration
+    WEBDATA2_SILENCE_THRESHOLD = 120  # Force HTTP sync if silent for 120s
+    HTTP_SYNC_INTERVAL = 60  # Validate WebSocket vs HTTP every 60s
 
     def __new__(cls, *args, **kwargs):
         """Singleton pattern - only one instance"""
@@ -128,6 +178,24 @@ class HyperliquidDataProvider:
         # Mid prices: {coin: MidPrice}
         self.mid_prices: Dict[str, MidPrice] = {}
 
+        # =====================================================================
+        # USER DATA (private subscriptions for TradeSync)
+        # =====================================================================
+        # User address for private WebSocket channels
+        self.user_address: Optional[str] = self.config.get(
+            'hyperliquid.user_address', None
+        )
+
+        # Account state from webData2
+        self.account_state: Optional[AccountState] = None
+
+        # User fills for trade reconstruction
+        self.user_fills: Deque[UserFill] = deque(maxlen=1000)
+
+        # WebSocket health monitoring
+        self.last_webdata2_update: Optional[datetime] = None
+        self._sync_task: Optional[asyncio.Task] = None
+
         # Async lock for thread-safe access
         self.async_lock = asyncio.Lock()
 
@@ -135,7 +203,11 @@ class HyperliquidDataProvider:
         self.symbols: List[str] = []
         self.timeframes: List[str] = []
 
-        logger.info("HyperliquidDataProvider initialized (Singleton)")
+        if self.user_address:
+            masked = f"{self.user_address[:6]}...{self.user_address[-4:]}"
+            logger.info(f"HyperliquidDataProvider initialized with user: {masked}")
+        else:
+            logger.info("HyperliquidDataProvider initialized (no user data)")
 
     def _get_ccxt_client(self):
         """Get or create CCXT client for HTTP bootstrap"""
@@ -306,6 +378,132 @@ class HyperliquidDataProvider:
 
         logger.info("All subscriptions established")
 
+    async def subscribe_user_data(self):
+        """
+        Subscribe to user data channels (requires user_address in config).
+
+        Channels:
+        - webData2: Account state and positions
+        - userFills: Trade executions
+        - orderUpdates: Order status changes
+
+        Note: After WebSocket subscription, we fetch HTTP snapshot because
+        Hyperliquid WebSocket sends only updates, not initial state.
+        """
+        if not self.user_address:
+            logger.warning("Cannot subscribe to user data - no user_address in config")
+            return
+
+        # webData2: Account state and positions
+        await self.ws.send(json.dumps({
+            "method": "subscribe",
+            "subscription": {"type": "webData2", "user": self.user_address},
+        }))
+        logger.info("Subscribed to webData2 (account state)")
+
+        # userFills: Trade executions
+        await self.ws.send(json.dumps({
+            "method": "subscribe",
+            "subscription": {"type": "userFills", "user": self.user_address},
+        }))
+        logger.info("Subscribed to userFills")
+
+        # orderUpdates: Order status changes
+        await self.ws.send(json.dumps({
+            "method": "subscribe",
+            "subscription": {"type": "orderUpdates", "user": self.user_address},
+        }))
+        logger.info("Subscribed to orderUpdates")
+
+        # Fetch initial snapshot via HTTP (WebSocket only sends updates)
+        await self._fetch_initial_account_state_snapshot()
+
+    async def _fetch_initial_account_state_snapshot(self):
+        """
+        Fetch initial account state via HTTP API.
+
+        CRITICAL: Hyperliquid WebSocket sends ONLY updates, not initial snapshot.
+        We must fetch the current state via HTTP after subscribing.
+        """
+        if not self.user_address:
+            return
+
+        try:
+            logger.info("Fetching initial account state via HTTP API...")
+
+            client = self._get_ccxt_client()
+
+            # Run sync call in executor to avoid blocking
+            # CCXT requires user address in params for Hyperliquid
+            loop = asyncio.get_event_loop()
+            balance = await loop.run_in_executor(
+                None,
+                lambda: client.fetch_balance(params={'user': self.user_address})
+            )
+
+            if not balance:
+                logger.warning("Empty balance response from HTTP API")
+                return
+
+            # Parse positions from balance response
+            positions = []
+            # CCXT returns positions in balance['info'] for derivatives
+            if 'info' in balance:
+                info = balance['info']
+                if isinstance(info, dict):
+                    positions_data = info.get('assetPositions', [])
+                    for pos_data in positions_data:
+                        if pos_data.get('type') != 'oneWay':
+                            continue
+                        pos = pos_data.get('position', {})
+                        if not pos:
+                            continue
+
+                        size_str = pos.get('szi', '0')
+                        size = float(size_str)
+                        if size == 0:
+                            continue
+
+                        side = 'long' if size > 0 else 'short'
+
+                        position = UserPosition(
+                            coin=pos.get('coin', ''),
+                            side=side,
+                            size=abs(size),
+                            entry_price=float(pos.get('entryPx', 0)),
+                            leverage=int(pos.get('leverage', {}).get('value', 1) if isinstance(pos.get('leverage'), dict) else 1),
+                            margin_used=float(pos.get('marginUsed', 0)),
+                            unrealized_pnl=float(pos.get('unrealizedPnl', 0)),
+                            liquidation_price=float(pos.get('liquidationPx', 0)),
+                            funding_since_open=float(pos.get('cumFunding', {}).get('sinceOpen', 0)),
+                            timestamp=datetime.now(),
+                        )
+                        positions.append(position)
+
+            # Get account value from balance
+            account_value = float(balance.get('total', {}).get('USDC', 0))
+            withdrawable = float(balance.get('free', {}).get('USDC', 0))
+
+            state = AccountState(
+                account_value=account_value,
+                total_margin_used=sum(p.margin_used for p in positions),
+                withdrawable=withdrawable,
+                positions=positions,
+                timestamp=datetime.now(),
+            )
+
+            async with self.async_lock:
+                self.account_state = state
+                self.last_webdata2_update = datetime.now()
+
+            logger.info(
+                f"Initial snapshot: ${account_value:.2f}, "
+                f"{len(positions)} positions"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to fetch initial account state: {e}", exc_info=True)
+
     async def _handle_candle(self, data: Dict):
         """Handle candle update message"""
         try:
@@ -365,6 +563,133 @@ class HyperliquidDataProvider:
         except Exception as e:
             logger.error(f"Error handling allMids: {e}")
 
+    async def _handle_web_data2(self, data: Dict):
+        """
+        Handle user account state (webData2) and positions.
+
+        Parses clearinghouseState.assetPositions from Hyperliquid.
+        """
+        try:
+            self.last_webdata2_update = datetime.now()
+
+            user_data = data["data"]
+            clearinghouse = user_data.get("clearinghouseState", {})
+            margin_summary = clearinghouse.get("marginSummary", {})
+
+            # Parse positions from assetPositions
+            asset_positions = clearinghouse.get("assetPositions", [])
+            positions = []
+
+            for asset_pos in asset_positions:
+                if asset_pos.get("type") != "oneWay":
+                    continue
+
+                pos_data = asset_pos.get("position", {})
+                if not pos_data:
+                    continue
+
+                # Determine side from size
+                size_str = pos_data.get("szi", "0")
+                size = float(size_str)
+                if size == 0:
+                    continue
+
+                side = "long" if size > 0 else "short"
+                size = abs(size)
+
+                # Parse leverage
+                leverage_data = pos_data.get("leverage", {})
+                leverage_value = leverage_data.get("value", 1) if isinstance(leverage_data, dict) else 1
+
+                # Calculate margin_used if not provided
+                entry_price = float(pos_data.get("entryPx", 0))
+                margin_used_raw = float(pos_data.get("marginUsed", 0))
+
+                if margin_used_raw == 0 and entry_price > 0 and leverage_value > 0:
+                    notional = size * entry_price
+                    margin_used = notional / leverage_value
+                else:
+                    margin_used = margin_used_raw
+
+                # Rizzo parity: cumFunding.sinceOpen
+                cum_funding_data = pos_data.get("cumFunding", {})
+                funding_since_open = float(cum_funding_data.get("sinceOpen", 0))
+
+                position = UserPosition(
+                    coin=pos_data.get("coin", ""),
+                    side=side,
+                    size=size,
+                    entry_price=entry_price,
+                    leverage=int(leverage_value),
+                    margin_used=margin_used,
+                    unrealized_pnl=float(pos_data.get("unrealizedPnl", 0)),
+                    liquidation_price=float(pos_data.get("liquidationPx", 0)),
+                    funding_since_open=funding_since_open,
+                    timestamp=datetime.now(),
+                )
+                positions.append(position)
+
+            # Calculate total margin from positions (more reliable than API value)
+            total_margin_used = sum(pos.margin_used for pos in positions)
+
+            state = AccountState(
+                account_value=float(margin_summary.get("accountValue", 0)),
+                total_margin_used=total_margin_used,
+                withdrawable=float(clearinghouse.get("withdrawable", 0)),
+                positions=positions,
+                timestamp=datetime.now(),
+            )
+
+            async with self.async_lock:
+                self.account_state = state
+
+            logger.debug(
+                f"webData2: ${state.account_value:.2f}, "
+                f"{len(positions)} positions"
+            )
+
+        except Exception as e:
+            logger.error(f"Error handling webData2: {e}", exc_info=True)
+
+    async def _handle_user_fills(self, data: Dict):
+        """
+        Handle user fills (trade executions).
+
+        Stores fills for trade reconstruction by TradeSync.
+        """
+        try:
+            fills_data = data["data"]
+
+            # Skip subscription confirmations
+            if isinstance(fills_data, str) or not isinstance(fills_data, list):
+                logger.debug("userFills: skipping subscription confirmation")
+                return
+
+            for fill_data in fills_data:
+                fill = UserFill(
+                    tid=fill_data.get("tid", ""),
+                    oid=fill_data.get("oid", ""),
+                    coin=fill_data["coin"],
+                    side=fill_data["side"],
+                    price=float(fill_data["px"]),
+                    size=float(fill_data["sz"]),
+                    fee=float(fill_data.get("fee", 0)),
+                    closed_pnl=float(fill_data.get("closedPnl", 0)),
+                    direction=fill_data.get("dir", ""),
+                    timestamp=datetime.fromtimestamp(fill_data["time"] / 1000),
+                )
+
+                async with self.async_lock:
+                    self.user_fills.append(fill)
+
+                logger.debug(
+                    f"userFill: {fill.coin} {fill.direction} "
+                    f"${fill.price:.2f} x {fill.size}"
+                )
+
+        except Exception as e:
+            logger.error(f"Error handling user fills: {e}", exc_info=True)
+
     async def _message_handler(self):
         """Main message processing loop"""
         try:
@@ -382,6 +707,16 @@ class HyperliquidDataProvider:
 
                 elif channel == "allMids":
                     await self._handle_all_mids(data)
+
+                elif channel == "webData2":
+                    await self._handle_web_data2(data)
+
+                elif channel == "userFills":
+                    await self._handle_user_fills(data)
+
+                elif channel == "orderUpdates":
+                    # Not used by TradeSync, but log for debugging
+                    logger.debug(f"orderUpdates received")
 
                 elif channel == "subscriptionResponse":
                     sub_data = data.get('data', {})
@@ -436,6 +771,10 @@ class HyperliquidDataProvider:
 
                 # Subscribe to all channels
                 await self.subscribe_all(self.symbols, self.timeframes)
+
+                # Subscribe to user data channels (if user_address configured)
+                if self.user_address:
+                    await self.subscribe_user_data()
 
                 logger.info("WebSocket started - message handler running...")
 
@@ -667,7 +1006,88 @@ class HyperliquidDataProvider:
             'cached_candles': sum(
                 len(tf_data) for s_data in self.candles.values() for tf_data in s_data.values()
             ),
+            'user_data_enabled': self.user_address is not None,
+            'positions_count': len(self.account_state.positions) if self.account_state else 0,
+            'fills_count': len(self.user_fills),
         }
+
+    # =========================================================================
+    # USER DATA ACCESS METHODS (for TradeSync)
+    # =========================================================================
+
+    def get_account_state_sync(self) -> Optional[AccountState]:
+        """
+        Get current account state (sync version).
+
+        Returns:
+            AccountState or None if not available
+        """
+        return self.account_state
+
+    def get_positions_sync(self) -> List[UserPosition]:
+        """
+        Get current open positions (sync version).
+
+        Returns:
+            List of UserPosition objects
+        """
+        if self.account_state:
+            return self.account_state.positions
+        return []
+
+    def get_user_fills_sync(self, limit: int = 100) -> List[UserFill]:
+        """
+        Get recent user fills from WebSocket cache (sync version).
+
+        Args:
+            limit: Maximum number of fills to return
+
+        Returns:
+            List of UserFill objects (most recent first)
+        """
+        fills = list(self.user_fills)
+        fills.reverse()  # Most recent first
+        return fills[:limit]
+
+    async def fetch_fills_http(self, limit: int = 500) -> List[Dict]:
+        """
+        Fetch user fills via HTTP API (for trade reconstruction).
+
+        This fetches fills directly from Hyperliquid API, bypassing WebSocket.
+        Used by TradeSync when reconstructing closed trades.
+
+        Args:
+            limit: Maximum number of fills to fetch
+
+        Returns:
+            List of fill dicts from HTTP API
+        """
+        if not self.user_address:
+            logger.warning("Cannot fetch fills - no user_address configured")
+            return []
+
+        try:
+            import aiohttp
+
+            url = "https://api.hyperliquid.xyz/info"
+            payload = {
+                "type": "userFills",
+                "user": self.user_address,
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status != 200:
+                        logger.error(f"HTTP fetch fills failed: {response.status}")
+                        return []
+
+                    fills = await response.json()
+                    logger.debug(f"Fetched {len(fills)} fills via HTTP")
+                    return fills[:limit]
+
+        except Exception as e:
+            logger.error(f"Failed to fetch fills via HTTP: {e}", exc_info=True)
+            return []
 
 
 # =============================================================================

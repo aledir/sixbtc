@@ -48,6 +48,11 @@ hyperliquid:
   private_key: ${HL_PRIVATE_KEY}
   vault_address: ${HL_VAULT_ADDRESS}
 
+  # User address for WebSocket private channels (webData2, userFills)
+  # Required for trade sync and live performance tracking
+  # Optional - if not set, trade sync will be disabled
+  user_address: "${HL_USER_ADDRESS:-}"
+
   # Fees for backtesting (taker fee = market orders)
   fee_rate: 0.00045  # 0.045% taker fee
   slippage: 0.0005   # 0.05% estimated slippage
@@ -55,6 +60,12 @@ hyperliquid:
   websocket:
     ping_interval: 30
     ping_timeout: 10
+
+  # Trade sync configuration
+  # Synchronizes closed trades from Hyperliquid to database
+  trade_sync:
+    enabled: true
+    fills_lookback_days: 7  # How far back to look for fills
 
   subaccounts:
     total: 10
@@ -85,13 +96,20 @@ risk:
       scaling_factor: 0.5
 
   limits:
-    max_open_positions_per_subaccount: 4
+    max_open_positions_per_subaccount: 10  # Increased from 6
 
   emergency:
     max_portfolio_drawdown: 0.30
     max_daily_loss: 0.10
     max_subaccount_drawdown: 0.25
     max_consecutive_losses: 5
+
+  # Trailing stop configuration
+  trailing:
+    enabled: true                    # Enable trailing stop service
+    min_adjustment_pct: 0.005        # Min 0.5% improvement to update SL
+    update_cooldown_sec: 10          # Min seconds between SL updates
+    breakeven_buffer_pct: 0.002      # 0.2% buffer above breakeven
 
 # ==============================================================================
 # AI CONFIGURATION
@@ -109,11 +127,13 @@ ai:
 # GENERATION (AI Templates + Parametric Variations)
 # ==============================================================================
 generation:
-  templates_per_day: 20        # AI templates to generate per day
   min_interval_seconds: 0      # Min seconds between AI calls
   parallel_threads: 1
-  # NOTE: Each template generates ~100 parametric variations (no AI cost)
-  # So 20 templates/day = ~2000 strategies/day
+  # Backpressure: pause generation when pending queue exceeds this limit
+  max_pending_queue: 500       # Pause if >500 strategies waiting for backtest
+  backpressure_check_interval: 60  # Seconds between backpressure checks
+  # NOTE: Each template generates ALL parametric variations (no AI cost)
+  # Flow control is handled by backpressure, not daily limits
   # Leverage is read from DB (coins.max_leverage), not configured here
 
 # ==============================================================================
@@ -134,35 +154,70 @@ validation:
 # BACKTESTING
 # ==============================================================================
 backtesting:
-  lookback_days: 180
   initial_capital: 10000
   parallel_threads: 10
 
   # Multi-pair backtesting
-  backtest_pairs_count: 100  # Top N pairs by volume from database
+  backtest_pairs_count: 30   # Top N pairs by volume (reduced from 100)
 
-  # Dual-period backtesting (full + recent)
-  recent_period_days: 60     # Recent period for "in-form" validation
-  full_period_weight: 0.60   # Weight for full period score
-  recent_period_weight: 0.40 # Weight for recent period score
+  # Training/Holdout split (unified approach)
+  # Total period = training_days + holdout_days = 395 days
+  training_days: 365         # 1 year for training (edge detection)
+  holdout_days: 30           # Last 30 days for validation (anti-overfitting + recency)
 
+  # Holdout validation thresholds
+  holdout:
+    max_degradation: 0.50    # Max 50% worse than training = overfitted
+    min_sharpe: 0.3          # Minimum Sharpe on holdout (can be lower than training)
+    recency_weight: 0.60     # Weight for holdout score in final ranking
+
+  # Minimum thresholds (gate check - classifier does the real ranking)
   thresholds:
-    min_sharpe: 1.0
-    min_win_rate: 0.55
-    min_total_trades: 100
-    min_expectancy: 0.02
-    max_drawdown: 0.30
+    min_sharpe: 0.5          # Relaxed from 1.0 (classifier ranks properly)
+    min_win_rate: 0.40       # Relaxed from 0.55
+    min_total_trades: 20     # Relaxed from 100 (30 pairs = fewer trades)
+    min_expectancy: 0.01     # Relaxed from 0.02
+    max_drawdown: 0.40       # Relaxed from 0.30
+
+  # NOTE: realistic_mode and max_concurrent_positions removed
+  # Backtest uses risk.limits.max_open_positions_per_subaccount for position limits
+
+# ==============================================================================
+# TRADING (Live Execution Policy)
+# ==============================================================================
+trading:
+  min_volume_24h: 1000000      # $1M min volume for live trading (liquidity filter)
+  pairs_mode: strict           # strict, adaptive, intersection
+  require_backtest: true       # Only trade pairs that were backtested
 
 # ==============================================================================
 # CLASSIFICATION & SELECTION
 # ==============================================================================
 classification:
   frequency_hours: 1
+
+  # Backtest scoring weights (expectancy is dominant)
   score_weights:
-    edge: 0.40
-    sharpe: 0.30
-    consistency: 0.20
-    stability: 0.10
+    edge: 0.50        # Expectancy - most important metric
+    sharpe: 0.25      # Risk-adjusted return
+    consistency: 0.15 # Win rate / time-in-profit
+    stability: 0.10   # Walk-forward stability
+
+  # Live ranking configuration
+  live_ranking:
+    enabled: true
+    min_trades_live: 10          # Minimum trades before calculating live metrics
+    retire_score_threshold: 30   # Score < 30 = retire
+    max_degradation_pct: 0.50    # 50% worse than backtest = retire
+    max_drawdown_live: 0.30      # 30% live drawdown = retire
+
+  # Selection configuration
+  selection:
+    top_n: 10                    # Max strategies to select
+    max_per_type: 3              # Max strategies per type (MOM, REV, etc.)
+    max_per_timeframe: 3         # Max strategies per timeframe
+
+  # Diversification (deprecated, use selection above)
   diversification:
     max_same_type: 3
     max_same_timeframe: 5

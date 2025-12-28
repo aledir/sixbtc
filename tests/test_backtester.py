@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch, MagicMock
 
 from src.backtester.data_loader import BacktestDataLoader
-from src.backtester.vectorbt_engine import VectorBTBacktester
+from src.backtester.backtest_engine import VectorBTBacktester
 from src.backtester.validator import LookaheadValidator
 from src.backtester.optimizer import WalkForwardOptimizer
 from src.strategies.base import StrategyCore, Signal
@@ -131,25 +131,36 @@ class TestBacktestDataLoader:
 class TestVectorBTBacktester:
     """Test VectorBT backtest execution"""
 
+    @patch('src.database.connection.get_session')
     @patch('src.config.loader.load_config')
-    def test_backtest_execution(self, mock_config, sample_ohlcv_data):
-        """Test backtest execution"""
+    def test_backtest_execution(self, mock_config, mock_session, sample_ohlcv_data):
+        """Test backtest execution with portfolio method"""
         # Mock config
         mock_config.return_value = Mock(
             get=lambda key, default=None: {
                 'hyperliquid.fee_rate': 0.0004,
                 'hyperliquid.slippage': 0.0002,
                 'backtesting.initial_capital': 10000,
-            }.get(key, default)
+                'risk.limits.max_open_positions_per_subaccount': 10,
+            }.get(key, default),
+            _raw_config={}
         )
+
+        # Mock database session for leverage lookup
+        mock_session.return_value.__enter__ = Mock(return_value=Mock(
+            query=Mock(return_value=Mock(filter=Mock(return_value=Mock(first=Mock(return_value=None)))))
+        ))
+        mock_session.return_value.__exit__ = Mock(return_value=None)
 
         strategy = MockStrategy()
         backtester = VectorBTBacktester()
 
+        # backtest() now requires Dict[str, pd.DataFrame]
+        data = {'BTC': sample_ohlcv_data}
         results = backtester.backtest(
             strategy=strategy,
-            data=sample_ohlcv_data,
-            symbol='BTC'
+            data=data,
+            max_positions=4
         )
 
         # Validate results structure
@@ -157,6 +168,7 @@ class TestVectorBTBacktester:
         assert 'max_drawdown' in results
         assert 'win_rate' in results
         assert 'total_trades' in results
+        assert 'avg_leverage' in results
 
         # Validate metrics ranges
         assert results['max_drawdown'] <= 1.0
@@ -165,8 +177,9 @@ class TestVectorBTBacktester:
             assert 0 <= results['win_rate'] <= 1.0
         assert results['total_trades'] >= 0
 
+    @patch('src.database.connection.get_session')
     @patch('src.config.loader.load_config')
-    def test_backtest_multi_symbol(self, mock_config, sample_ohlcv_data):
+    def test_backtest_multi_symbol(self, mock_config, mock_session, sample_ohlcv_data):
         """Test multi-symbol backtest"""
         # Mock config
         mock_config.return_value = Mock(
@@ -174,8 +187,16 @@ class TestVectorBTBacktester:
                 'hyperliquid.fee_rate': 0.0004,
                 'hyperliquid.slippage': 0.0002,
                 'backtesting.initial_capital': 10000,
-            }.get(key, default)
+                'risk.limits.max_open_positions_per_subaccount': 10,
+            }.get(key, default),
+            _raw_config={}
         )
+
+        # Mock database session for leverage lookup
+        mock_session.return_value.__enter__ = Mock(return_value=Mock(
+            query=Mock(return_value=Mock(filter=Mock(return_value=Mock(first=Mock(return_value=None)))))
+        ))
+        mock_session.return_value.__exit__ = Mock(return_value=None)
 
         strategy = MockStrategy()
         backtester = VectorBTBacktester()
@@ -185,7 +206,7 @@ class TestVectorBTBacktester:
             'ETH': sample_ohlcv_data.copy()
         }
 
-        results = backtester.backtest_multi_symbol(
+        results = backtester.backtest(
             strategy=strategy,
             data=data
         )
@@ -194,6 +215,7 @@ class TestVectorBTBacktester:
         assert isinstance(results, dict)
         assert 'sharpe_ratio' in results
         assert 'total_trades' in results
+        assert 'avg_leverage' in results
 
 
 class TestLookaheadValidator:
@@ -296,12 +318,14 @@ class TestWalkForwardOptimizer:
 class TestBacktesterIntegration:
     """Integration tests for full backtest workflow"""
 
+    @patch('src.database.connection.get_session')
     @patch('src.data.binance_downloader.BinanceDataDownloader')
     @patch('src.config.loader.load_config')
     def test_full_backtest_workflow(
         self,
         mock_config,
         mock_downloader_class,
+        mock_session,
         sample_ohlcv_data
     ):
         """Test complete backtest workflow"""
@@ -311,11 +335,13 @@ class TestBacktesterIntegration:
                 'hyperliquid.fee_rate': 0.0004,
                 'hyperliquid.slippage': 0.0002,
                 'backtesting.initial_capital': 10000,
+                'risk.limits.max_open_positions_per_subaccount': 10,
                 'data.cache_dir': 'data/binance',
             }.get(key, default),
             get_required=lambda key: {
                 'trading.data.min_volume_24h': 1000000,
-            }.get(key)
+            }.get(key),
+            _raw_config={}
         )
 
         # Mock downloader
@@ -323,19 +349,26 @@ class TestBacktesterIntegration:
         mock_downloader.download_ohlcv.return_value = sample_ohlcv_data
         mock_downloader_class.return_value = mock_downloader
 
+        # Mock database session for leverage lookup
+        mock_session.return_value.__enter__ = Mock(return_value=Mock(
+            query=Mock(return_value=Mock(filter=Mock(return_value=Mock(first=Mock(return_value=None)))))
+        ))
+        mock_session.return_value.__exit__ = Mock(return_value=None)
+
         # 1. Load data
         loader = BacktestDataLoader()
         data = loader.load_single_symbol('BTC', '15m', days=100)
 
-        # 2. Run backtest
+        # 2. Run backtest (now uses Dict format)
         strategy = MockStrategy()
         backtester = VectorBTBacktester()
-        results = backtester.backtest(strategy, data, symbol='BTC')
+        results = backtester.backtest(strategy, {'BTC': data})
 
         # 3. Validate
         assert 'sharpe_ratio' in results
         assert 'total_trades' in results
         assert 'win_rate' in results
+        assert 'avg_leverage' in results
 
         # 4. Check lookahead
         validator = LookaheadValidator()

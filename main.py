@@ -292,7 +292,7 @@ def backtest(ctx, backtest_all, strategy, symbol, timeframe, lookback_days, work
     console.print(f"Lookback: {lookback_days} days\n")
 
     try:
-        from src.backtester.vectorbt_engine import VectorBTEngine
+        from src.backtester.backtest_engine import VectorBTEngine
         from src.backtester.data_loader import BacktestDataLoader
         from src.backtester.validator import LookaheadValidator
         import importlib.util

@@ -790,10 +790,11 @@ risk:
     min_risk_reward: 1.5
 
   limits:
-    max_open_positions_total: 100  # Portfolio-wide
-    max_open_positions_per_subaccount: 4
-    max_leverage: 10
-    max_correlated_positions: 5
+    # See config/config.yaml for actual values
+    max_open_positions_total: ...
+    max_open_positions_per_subaccount: ...
+    max_leverage: ...
+    max_correlated_positions: ...
 
   emergency:
     max_portfolio_drawdown: 0.30  # 30% total DD

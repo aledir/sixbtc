@@ -1078,6 +1078,94 @@ class HyperliquidClient:
             reduce_only=True
         )
 
+    def update_sl_atomic(
+        self,
+        symbol: str,
+        new_stop_loss: float,
+        old_order_id: Optional[str] = None,
+        size: Optional[float] = None,
+        max_retries: int = 3
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Update stop loss using SAFE ATOMIC pattern: place new FIRST, then cancel old.
+
+        This is safer than update_stop_loss because:
+        - If new placement fails: old SL still active (position protected)
+        - If cancel fails: 2 SLs temporarily (safe, will be cleaned up)
+        - Never leaves position unprotected
+
+        Args:
+            symbol: Trading pair
+            new_stop_loss: New stop loss price
+            old_order_id: Existing SL order to cancel (optional)
+            size: Position size (required if no position exists)
+            max_retries: Max retry attempts for placement
+
+        Returns:
+            New order details or None if failed
+        """
+        base_symbol = symbol.split("/")[0].split("-")[0]
+
+        if self.dry_run:
+            logger.info(
+                f"[DRY RUN] Would atomic update SL for {base_symbol}: ${new_stop_loss:.2f}"
+            )
+            return {"status": "simulated", "trigger_price": new_stop_loss, "order_id": "dry_run"}
+
+        # Get position to determine side and size
+        position = self.get_position(base_symbol)
+        if not position:
+            logger.error(f"No position found for {base_symbol}")
+            return None
+
+        sl_side = "sell" if position.side == "long" else "buy"
+        order_size = size or position.size
+
+        # PHASE 1: Place new SL order FIRST (with retry)
+        new_sl_result = None
+        for attempt in range(max_retries):
+            logger.info(f"Atomic SL update: placing new SL @ ${new_stop_loss:.2f} (attempt {attempt + 1}/{max_retries})")
+
+            new_sl_result = self.place_trigger_order(
+                symbol=base_symbol,
+                side=sl_side,
+                size=order_size,
+                trigger_price=new_stop_loss,
+                order_type="sl",
+                is_market=True,
+                reduce_only=True
+            )
+
+            if new_sl_result and new_sl_result.get("order_id"):
+                logger.info(f"Atomic SL update: new SL placed successfully, order_id={new_sl_result.get('order_id')}")
+                break
+
+            logger.warning(f"Atomic SL update: placement failed, attempt {attempt + 1}/{max_retries}")
+            if attempt < max_retries - 1:
+                time.sleep(1.0)
+
+        if not new_sl_result or not new_sl_result.get("order_id"):
+            logger.error(f"Atomic SL update FAILED: could not place new SL after {max_retries} attempts")
+            logger.info(f"Old SL {old_order_id} is still active - position remains protected")
+            return None
+
+        # PHASE 2: Cancel old SL order (if provided)
+        if old_order_id:
+            logger.info(f"Atomic SL update: cancelling old SL order {old_order_id}")
+            cancelled = self.cancel_order(base_symbol, old_order_id)
+
+            if not cancelled:
+                # Not critical - old SL will trigger if price goes there
+                # New SL is already in place, so position is protected
+                logger.warning(
+                    f"Atomic SL update: failed to cancel old SL {old_order_id}. "
+                    f"Position has 2 SL orders temporarily (safe, new SL is active)"
+                )
+            else:
+                logger.info(f"Atomic SL update: old SL {old_order_id} cancelled")
+
+        return new_sl_result
+
     def place_order_with_sl_tp(
         self,
         symbol: str,
