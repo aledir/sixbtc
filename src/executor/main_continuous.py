@@ -28,7 +28,7 @@ from src.utils import get_logger, setup_logging
 # Initialize logging at module load
 _config = load_config()._raw_config
 setup_logging(
-    log_file=_config.get('logging', {}).get('file', 'logs/sixbtc.log'),
+    log_file='logs/executor.log',
     log_level=_config.get('logging', {}).get('level', 'INFO'),
 )
 
@@ -63,6 +63,7 @@ class ContinuousExecutorProcess:
         # Strategy cache
         self._strategy_cache: Dict[str, StrategyCore] = {}
         self._data_cache: Dict[str, any] = {}
+        self._indicators_cache: Dict[str, any] = {}  # Cache for pre-calculated indicators
 
         # Track open trade metadata for TIME_BASED exits
         # key = "symbol:subaccount_id" -> {'entry_time': datetime, 'exit_after_bars': int, 'timeframe': str}
@@ -149,7 +150,8 @@ class ContinuousExecutorProcess:
                     'strategy_code': strategy.code,
                     'timeframe': strategy.timeframe,
                     'allocated_capital': subaccount.allocated_capital,
-                    'backtest_pairs': strategy.backtest_pairs or []
+                    'backtest_pairs': strategy.backtest_pairs or [],
+                    'pattern_coins': strategy.pattern_coins
                 })
 
         return subaccounts
@@ -182,9 +184,13 @@ class ContinuousExecutorProcess:
                 logger.warning(f"Could not load strategy {strategy_name}")
                 return
 
-            # Get tradable pairs for this strategy (intersection logic)
+            # Get tradable pairs for this strategy (pattern-aware)
             backtest_pairs = subaccount.get('backtest_pairs', [])
-            trading_pairs = get_tradable_pairs_for_strategy(backtest_pairs)
+            pattern_coins = subaccount.get('pattern_coins')
+            trading_pairs = get_tradable_pairs_for_strategy(
+                backtest_pairs,
+                pattern_coins=pattern_coins
+            )
 
             if not trading_pairs:
                 # Fallback to global pairs if strategy has no backtest_pairs recorded
@@ -234,7 +240,11 @@ class ContinuousExecutorProcess:
         timeframe: str
     ):
         """
-        Process a single coin for a strategy
+        Process a single coin for a strategy using two-phase approach
+
+        TWO-PHASE APPROACH:
+        1. calculate_indicators(df) - Called once per data update (cached)
+        2. generate_signal(df_with_indicators) - Called to generate signal
 
         Handles both entry signals (long/short) and exit signals (close).
         - Entry: only if no open position and within position limits
@@ -252,18 +262,39 @@ class ContinuousExecutorProcess:
         if data is None or len(data) < 50:
             return
 
+        # PHASE 1: Calculate indicators (cached per strategy/symbol/timeframe)
+        # Cache key includes data length to invalidate when new data arrives
+        strategy_id = subaccount['strategy_id']
+        cache_key = f"{strategy_id}:{symbol}:{timeframe}:{len(data)}"
+
+        if cache_key in self._indicators_cache:
+            df_with_indicators = self._indicators_cache[cache_key]
+        else:
+            try:
+                df_with_indicators = strategy.calculate_indicators(data)
+                # Keep only last 10 entries to avoid memory bloat
+                if len(self._indicators_cache) > 100:
+                    # Remove oldest entries
+                    keys_to_remove = list(self._indicators_cache.keys())[:50]
+                    for k in keys_to_remove:
+                        del self._indicators_cache[k]
+                self._indicators_cache[cache_key] = df_with_indicators
+            except Exception as e:
+                logger.warning(f"calculate_indicators() failed for {symbol}: {e}")
+                df_with_indicators = data
+
         # Check for open position
         open_trade = self._get_open_trade(subaccount['id'], symbol)
 
-        # Generate signal (pass symbol for per-coin leverage)
-        signal = strategy.generate_signal(data, symbol)
+        # PHASE 2: Generate signal from pre-calculated indicators
+        signal = strategy.generate_signal(df_with_indicators, symbol)
 
         if signal is None:
             return
 
         # CASE 1: Exit signal + open position -> close it
         if signal.direction == 'close' and open_trade:
-            current_price = data['close'].iloc[-1]
+            current_price = df_with_indicators['close'].iloc[-1]
             await self._close_position(subaccount, open_trade, signal, current_price)
             return
 
@@ -272,7 +303,7 @@ class ContinuousExecutorProcess:
             # Check max positions limit
             if self._is_at_max_positions(subaccount['id']):
                 return
-            await self._execute_signal(subaccount, signal, data, symbol)
+            await self._execute_signal(subaccount, signal, df_with_indicators, symbol)
 
     def _get_open_trade(self, subaccount_id: int, symbol: str) -> Optional[Dict]:
         """
@@ -339,9 +370,11 @@ class ContinuousExecutorProcess:
             if coin:
                 return coin.max_leverage
 
-        # Default fallback
-        logger.warning(f"Coin {symbol} not found in DB, using default max_leverage=10")
-        return 10
+        # No fallback in live trading - coin must be in DB
+        raise ValueError(
+            f"Coin {symbol} not found in DB - cannot determine max_leverage. "
+            "Run pairs_updater to sync coins from Hyperliquid."
+        )
 
     def _get_strategy(
         self,

@@ -12,7 +12,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 import random
 
@@ -25,7 +24,7 @@ from src.utils import get_logger, setup_logging
 # Initialize logging at module load
 _config = load_config()._raw_config
 setup_logging(
-    log_file=_config.get('logging', {}).get('file', 'logs/sixbtc.log'),
+    log_file='logs/generator.log',
     log_level=_config.get('logging', {}).get('level', 'INFO'),
 )
 
@@ -55,9 +54,19 @@ class ContinuousGeneratorProcess:
         self.min_interval = generation_config.get('min_interval_seconds', 0)
         self._last_generation_time = datetime.min
 
-        # Backpressure configuration
-        self.max_pending_queue = generation_config.get('max_pending_queue', 500)
-        self.backpressure_check_interval = generation_config.get('backpressure_check_interval', 60)
+        # Pipeline backpressure configuration (new multi-level system)
+        pipeline_config = self.config.get('pipeline', {})
+        queue_limits = pipeline_config.get('queue_limits', {})
+        backpressure_config = pipeline_config.get('backpressure', {})
+        monitoring_config = pipeline_config.get('monitoring', {})
+
+        self.generated_limit = queue_limits.get('generated', 100)
+        self.check_interval = backpressure_config.get('check_interval', 10)
+        self.base_cooldown = backpressure_config.get('base_cooldown', 30)
+        self.max_cooldown = backpressure_config.get('max_cooldown', 120)
+        self.cooldown_increment = backpressure_config.get('cooldown_increment', 2)
+        self.log_interval = monitoring_config.get('log_interval', 30)
+        self._last_log_time = datetime.min
 
         # ThreadPoolExecutor for parallel generation
         self.executor = ThreadPoolExecutor(
@@ -83,13 +92,9 @@ class ContinuousGeneratorProcess:
         self._cache_refresh_interval = 300  # 5 minutes
         self._last_cache_refresh = datetime.min
 
-        # Paths
-        self.pending_dir = Path(self.config['directories']['strategies']) / 'pending'
-        self.pending_dir.mkdir(parents=True, exist_ok=True)
-
         logger.info(
             f"ContinuousGeneratorProcess initialized: "
-            f"{self.parallel_threads} threads, backpressure at {self.max_pending_queue} pending"
+            f"{self.parallel_threads} threads, backpressure at {self.generated_limit} GENERATED"
         )
 
     @property
@@ -99,36 +104,76 @@ class ContinuousGeneratorProcess:
             self._strategy_builder = StrategyBuilder(self.config)
         return self._strategy_builder
 
-    def _check_backpressure(self) -> Tuple[bool, int]:
+    def _check_backpressure(self) -> Tuple[bool, int, int]:
         """
-        Check if we should pause generation due to queue buildup.
+        Check if we should pause generation due to GENERATED queue buildup.
+
+        Only checks GENERATED queue - validator handles VALIDATED queue.
+        Uses progressive cooldown based on how much over limit.
 
         Returns:
-            (should_pause, pending_count) tuple
+            (should_pause, generated_count, cooldown_seconds) tuple
         """
         try:
-            with get_session() as session:
-                pending_count = session.query(Strategy).filter(
-                    Strategy.status.in_(["GENERATED", "VALIDATED"])
-                ).count()
+            generated_count = self.strategy_processor.count_available("GENERATED")
 
-            if pending_count >= self.max_pending_queue:
-                return (True, pending_count)
-            return (False, pending_count)
+            if generated_count >= self.generated_limit:
+                cooldown = self.strategy_processor.calculate_backpressure_cooldown(
+                    generated_count,
+                    self.generated_limit,
+                    self.base_cooldown,
+                    self.cooldown_increment,
+                    self.max_cooldown
+                )
+                return (True, generated_count, cooldown)
+
+            return (False, generated_count, 0)
 
         except Exception as e:
             logger.error(f"Failed to check backpressure: {e}")
-            return (False, 0)
+            return (False, 0, 0)
+
+    def _log_pipeline_status(self):
+        """Log pipeline status periodically for monitoring"""
+        now = datetime.now()
+        if (now - self._last_log_time).total_seconds() < self.log_interval:
+            return
+
+        try:
+            depths = self.strategy_processor.get_queue_depths()
+            logger.info(
+                f"Pipeline: GEN={depths.get('GENERATED', 0)}/{self.generated_limit} "
+                f"VAL={depths.get('VALIDATED', 0)} TST={depths.get('TESTED', 0)} "
+                f"LIVE={depths.get('LIVE', 0)}"
+            )
+            self._last_log_time = now
+        except Exception as e:
+            logger.debug(f"Failed to log pipeline status: {e}")
 
     def _fetch_unused_patterns(self) -> List:
         """
         Fetch all Tier 1 patterns that haven't been used yet.
 
+        Uses multi-target expansion to create virtual patterns for each
+        Tier 1 target (e.g., one pattern with 3 targets -> 3 virtual patterns).
+
         Returns:
-            List of unused Pattern objects
+            List of unused Pattern objects (including virtual patterns)
         """
         try:
-            all_patterns = self.pattern_fetcher.get_tier_1_patterns(limit=100)
+            # Get multi-target config
+            multi_target_config = self.config.get('pattern_discovery', {}).get('multi_target', {})
+            expand_enabled = multi_target_config.get('enabled', True)
+            min_edge = multi_target_config.get('min_edge_for_expansion', 0.05)
+            max_targets = multi_target_config.get('max_targets_per_pattern', 5)
+
+            # Fetch patterns with multi-target expansion
+            all_patterns = self.pattern_fetcher.get_tier_1_patterns_expanded(
+                limit=100,
+                expand_multi_target=expand_enabled,
+                min_edge_for_expansion=min_edge,
+                max_targets_per_pattern=max_targets
+            )
 
             if not all_patterns:
                 logger.debug("No patterns available from pattern-discovery")
@@ -137,9 +182,13 @@ class ContinuousGeneratorProcess:
             used_ids = self.strategy_processor.get_used_pattern_ids()
             unused = [p for p in all_patterns if p.id not in used_ids]
 
+            # Log expansion stats
+            base_count = len([p for p in all_patterns if not p.is_virtual])
+            virtual_count = len([p for p in all_patterns if p.is_virtual])
+
             logger.info(
                 f"Found {len(unused)} unused patterns "
-                f"(out of {len(all_patterns)} total Tier 1)"
+                f"(out of {len(all_patterns)} total: {base_count} base + {virtual_count} virtual)"
             )
 
             return unused
@@ -187,19 +236,22 @@ class ContinuousGeneratorProcess:
             return (False, [])
 
     async def run_continuous(self):
-        """Main continuous generation loop with backpressure"""
-        logger.info("Starting continuous generation loop (backpressure-based)")
+        """Main continuous generation loop with multi-level backpressure"""
+        logger.info("Starting continuous generation loop (multi-level backpressure)")
 
         while not self.shutdown_event.is_set() and not self.force_exit:
-            # Check backpressure before generating
-            should_pause, pending_count = self._check_backpressure()
+            # Log pipeline status periodically
+            self._log_pipeline_status()
+
+            # Check backpressure with progressive cooldown
+            should_pause, generated_count, cooldown = self._check_backpressure()
 
             if should_pause:
                 logger.info(
-                    f"Backpressure: {pending_count} strategies pending "
-                    f"(max {self.max_pending_queue}), pausing generation"
+                    f"Backpressure: {generated_count} GENERATED "
+                    f"(limit {self.generated_limit}), cooling down {cooldown}s"
                 )
-                await asyncio.sleep(self.backpressure_check_interval)
+                await asyncio.sleep(cooldown)
                 continue
 
             # Start generation tasks up to parallel_threads
@@ -291,11 +343,9 @@ class ContinuousGeneratorProcess:
                 if not result.validation_passed:
                     continue
 
-                strategy_name = f"Strategy_{strategy_type}_{result.strategy_id}"
-                file_path = self.pending_dir / f"{strategy_name}.py"
-
-                with open(file_path, 'w') as f:
-                    f.write(result.code)
+                # Use different prefix for pattern-based vs template-based strategies
+                prefix = "PatStrat" if use_patterns else "Strategy"
+                strategy_name = f"{prefix}_{strategy_type}_{result.strategy_id}"
 
                 self._save_to_database(
                     name=strategy_name,
@@ -306,7 +356,8 @@ class ContinuousGeneratorProcess:
                     pattern_based=use_patterns,
                     pattern_ids=result.patterns_used,
                     template_id=result.template_id,
-                    parameters=result.parameters
+                    parameters=result.parameters,
+                    pattern_coins=getattr(result, 'pattern_coins', None)
                 )
                 saved_count += 1
 
@@ -331,7 +382,8 @@ class ContinuousGeneratorProcess:
         pattern_based: bool,
         pattern_ids: list,
         template_id: Optional[str] = None,
-        parameters: Optional[dict] = None
+        parameters: Optional[dict] = None,
+        pattern_coins: Optional[list] = None
     ):
         """Save generated strategy to database"""
         try:
@@ -350,7 +402,8 @@ class ContinuousGeneratorProcess:
                     pattern_based=pattern_based,
                     pattern_ids=pattern_ids,
                     template_id=template_id,
-                    parameters=parameters
+                    parameters=parameters,
+                    pattern_coins=pattern_coins
                 )
                 session.add(strategy)
             logger.debug(f"Saved strategy {name} to database")

@@ -2,10 +2,10 @@
 Logging system for SixBTC
 
 Provides unified logging across all modules with:
-- File rotation
+- File rotation (plain text, parseable)
+- Console output (colored if interactive terminal)
 - Per-module log levels
-- Structured output (no emojis - ASCII only)
-- Console + file output
+- ASCII only (no emojis)
 """
 
 import logging
@@ -14,8 +14,33 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
-from rich.console import Console
-from rich.logging import RichHandler
+
+class ColoredFormatter(logging.Formatter):
+    """
+    Formatter that adds ANSI colors to log levels for terminal output.
+    Only used when output is an interactive terminal.
+    """
+
+    COLORS = {
+        'DEBUG': '\033[36m',     # Cyan
+        'INFO': '\033[32m',      # Green
+        'WARNING': '\033[33m',   # Yellow
+        'ERROR': '\033[31m',     # Red
+        'CRITICAL': '\033[35m',  # Magenta
+    }
+    RESET = '\033[0m'
+
+    def format(self, record: logging.LogRecord) -> str:
+        # Color the level name
+        levelname = record.levelname
+        if levelname in self.COLORS:
+            record.levelname = f"{self.COLORS[levelname]}{levelname}{self.RESET}"
+
+        result = super().format(record)
+
+        # Restore original levelname for other handlers
+        record.levelname = levelname
+        return result
 
 
 def setup_logging(
@@ -55,13 +80,14 @@ def setup_logging(
     # Remove existing handlers (if any)
     root_logger.handlers.clear()
 
+    # Standard format for all handlers
+    log_format = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+
     # =========================================================================
-    # FILE HANDLER (All logs → file)
+    # FILE HANDLER (Plain text, no colors, parseable)
     # =========================================================================
-    file_formatter = logging.Formatter(
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
+    file_formatter = logging.Formatter(fmt=log_format, datefmt=date_format)
 
     file_handler = RotatingFileHandler(
         filename=log_file,
@@ -74,18 +100,18 @@ def setup_logging(
     root_logger.addHandler(file_handler)
 
     # =========================================================================
-    # CONSOLE HANDLER (Rich output for terminal)
+    # CONSOLE HANDLER (Colors only if interactive terminal)
     # =========================================================================
-    console = Console()
-    console_handler = RichHandler(
-        console=console,
-        rich_tracebacks=True,
-        tracebacks_show_locals=False,
-        show_time=True,   # Show timestamps in console output
-        show_path=False,  # Clean console output
-        log_time_format="%Y-%m-%d %H:%M:%S"  # Custom timestamp format
-    )
+    console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(getattr(logging, log_level.upper()))
+
+    if sys.stderr.isatty():
+        # Interactive terminal: use colors
+        console_handler.setFormatter(ColoredFormatter(fmt=log_format, datefmt=date_format))
+    else:
+        # Non-interactive (piped, redirected): plain text
+        console_handler.setFormatter(logging.Formatter(fmt=log_format, datefmt=date_format))
+
     root_logger.addHandler(console_handler)
 
     # =========================================================================

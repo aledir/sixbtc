@@ -279,7 +279,7 @@ class StrategyProcessor:
         )
 
         if result > 0:
-            logger.warning(f"Released {result} stale processing claims (timeout: {self.timeout_seconds}s)")
+            logger.info(f"Released {result} stale processing claims (timeout: {self.timeout_seconds}s)")
 
         return result
 
@@ -442,3 +442,68 @@ class StrategyProcessor:
             return count
         finally:
             session.close()
+
+    def get_queue_depths(self) -> dict:
+        """
+        Get count of strategies by status (excluding currently processing).
+
+        Returns dict with counts for each status that can be used for
+        pipeline monitoring and backpressure decisions.
+
+        Returns:
+            Dict mapping status -> count of available (non-processing) strategies
+        """
+        session = self._get_session()
+
+        try:
+            results = {}
+            for status in ['GENERATED', 'VALIDATED', 'TESTED', 'SELECTED', 'LIVE', 'RETIRED']:
+                count = (
+                    session.query(Strategy)
+                    .filter(
+                        Strategy.status == status,
+                        Strategy.processing_by.is_(None)
+                    )
+                    .count()
+                )
+                results[status] = count
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Failed to get queue depths: {e}")
+            return {}
+        finally:
+            session.close()
+
+    def calculate_backpressure_cooldown(
+        self,
+        queue_depth: int,
+        limit: int,
+        base: int = 30,
+        increment: int = 2,
+        max_cooldown: int = 120
+    ) -> int:
+        """
+        Calculate cooldown based on how much over limit we are.
+
+        Progressive cooldown formula:
+        - If under limit: 0 (no cooldown)
+        - If at/over limit: base + (overflow * increment), capped at max_cooldown
+
+        Args:
+            queue_depth: Current queue depth
+            limit: Queue limit threshold
+            base: Base cooldown in seconds when limit reached
+            increment: Extra seconds per strategy over limit
+            max_cooldown: Maximum cooldown in seconds
+
+        Returns:
+            Cooldown in seconds (0 if under limit)
+        """
+        if queue_depth < limit:
+            return 0
+
+        overflow = queue_depth - limit
+        cooldown = base + (overflow * increment)
+        return min(cooldown, max_cooldown)

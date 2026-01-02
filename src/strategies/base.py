@@ -268,6 +268,22 @@ class StrategyCore(ABC):
     """
     Abstract base class for all trading strategies.
 
+    TWO-PHASE SIGNAL GENERATION:
+        Strategies use a two-phase approach for performance and testability:
+
+        1. calculate_indicators(df) -> df_with_indicators
+           Pre-calculates ALL indicators on the full dataframe.
+           Called ONCE per backtest/signal generation cycle.
+
+        2. generate_signal(df_with_indicators) -> Signal
+           Reads pre-calculated indicator values and generates signal.
+           Only uses iloc[-1] to read current bar values.
+
+        This separation enables:
+        - Freqtrade-style lookahead bias detection (compare indicator values)
+        - Numba/Cython optimization of signal generation loop
+        - O(n) indicator calculation instead of O(n²)
+
     REQUIREMENTS:
     1. Pure function: Same input -> same output
     2. No state mutation
@@ -287,16 +303,20 @@ class StrategyCore(ABC):
         class MyStrategy(StrategyCore):
             leverage = 10  # Target 10x leverage
 
+            def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+                df = df.copy()
+                df['rsi'] = ta.RSI(df['close'], timeperiod=14)
+                df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+                return df
+
             def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
-                if entry_condition:
+                if df['rsi'].iloc[-1] < 30:
                     return Signal(
                         direction='long',
                         leverage=self.leverage,
                         sl_type=StopLossType.ATR,
                         atr_stop_multiplier=2.0,
-                        tp_type=TakeProfitType.RR_RATIO,
-                        rr_ratio=2.0,
-                        reason="Entry reason"
+                        reason=f"RSI oversold at {df['rsi'].iloc[-1]:.1f}"
                     )
                 return None
     """
@@ -304,6 +324,10 @@ class StrategyCore(ABC):
     # Target leverage - override in subclass
     # Actual leverage = min(this value, coin's max_leverage from DB)
     leverage: int = 1
+
+    # Indicator column names added by calculate_indicators()
+    # Used for lookahead bias detection
+    indicator_columns: List[str] = []
 
     def __init__(self, params: Optional[dict] = None):
         """
@@ -315,67 +339,97 @@ class StrategyCore(ABC):
         self.params = params or {}
 
     @abstractmethod
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Pre-calculate ALL indicators on the dataframe.
+
+        This method is called ONCE before signal generation. All indicator
+        calculations should happen here, not in generate_signal().
+
+        Args:
+            df: OHLCV DataFrame with columns ['open', 'high', 'low', 'close', 'volume']
+
+        Returns:
+            DataFrame with original columns PLUS indicator columns.
+            Must NOT modify the original df - return a copy.
+
+        Example:
+            def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+                df = df.copy()
+                df['rsi'] = ta.RSI(df['close'], timeperiod=14)
+                df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+                df['ema_fast'] = ta.EMA(df['close'], timeperiod=12)
+                df['ema_slow'] = ta.EMA(df['close'], timeperiod=26)
+                df['macd'], df['macd_signal'], df['macd_hist'] = ta.MACD(df['close'])
+                return df
+
+        IMPORTANT:
+        - Always return df.copy() to avoid modifying the original
+        - Use only lookback operations (no center=True, no shift(-N))
+        - Set self.indicator_columns to list column names for lookahead testing
+        """
+        pass
+
+    @abstractmethod
     def generate_signal(
         self,
         df: pd.DataFrame,
         symbol: Optional[str] = None
     ) -> Optional[Signal]:
         """
-        Generate trading signal from OHLCV data.
+        Generate trading signal from DataFrame with pre-calculated indicators.
+
+        This method receives a DataFrame that has ALREADY been processed by
+        calculate_indicators(). It should ONLY read indicator values using
+        iloc[-1] and apply entry/exit logic.
 
         Args:
-            df: OHLCV DataFrame with columns ['open', 'high', 'low', 'close', 'volume']
+            df: DataFrame with OHLCV + indicator columns (from calculate_indicators)
                 Rows are ordered chronologically (oldest first)
-                You can ONLY use data up to the current row (no future data)
+                Use df['indicator_name'].iloc[-1] to read current bar values
             symbol: Coin symbol (e.g., 'BTC', 'ETH') - passed for context
 
         Returns:
             Signal object if conditions met, None otherwise
 
-        Example (ATR-based):
+        Example:
             def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
                 if len(df) < 50:
                     return None
 
-                rsi = ta.RSI(df['close'], timeperiod=14)
-                if rsi.iloc[-1] < 30:
+                # Read pre-calculated indicators (DO NOT recalculate here!)
+                rsi = df['rsi'].iloc[-1]
+                atr = df['atr'].iloc[-1]
+
+                if pd.isna(rsi) or pd.isna(atr):
+                    return None
+
+                if rsi < 30:
                     return Signal(
                         direction='long',
                         leverage=self.leverage,
                         sl_type=StopLossType.ATR,
                         atr_stop_multiplier=2.0,
-                        tp_type=TakeProfitType.ATR,
-                        atr_take_multiplier=3.0,
-                        reason=f"RSI oversold at {rsi.iloc[-1]:.1f}"
+                        reason=f"RSI oversold at {rsi:.1f}"
                     )
                 return None
 
-        Example (Structure-based SL):
-            def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
-                swing_low = df['low'].rolling(20).min().iloc[-1]
-                current_price = df['close'].iloc[-1]
-
-                if entry_condition:
-                    return Signal(
-                        direction='long',
-                        leverage=self.leverage,
-                        sl_type=StopLossType.STRUCTURE,
-                        sl_price=swing_low,
-                        tp_type=TakeProfitType.RR_RATIO,
-                        rr_ratio=2.5,
-                        reason=f"Entry at {current_price}, SL at swing low {swing_low}"
-                    )
-                return None
+        IMPORTANT:
+        - DO NOT calculate indicators here - they should be pre-calculated
+        - ONLY read values using iloc[-1]
+        - Keep logic simple for potential Numba optimization
         """
         pass
 
     def generate_signals_vectorized(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Generate signals for ALL bars in the dataframe (vectorized).
+        Generate signals for ALL bars in the dataframe.
 
-        This method is used for lookahead bias detection.
-        It must produce the SAME signals as calling generate_signal()
-        iteratively for each bar with truncated data.
+        Uses two-phase approach:
+        1. Calculate indicators ONCE on full dataframe
+        2. Iterate through bars, reading pre-calculated indicator values
+
+        This is much faster than recalculating indicators for each bar.
 
         Args:
             df: OHLCV DataFrame with full data
@@ -385,10 +439,9 @@ class StrategyCore(ABC):
                 - 'signal': 1 (long), -1 (short), 0 (no signal/close)
                 - 'sl_type': StopLossType value
                 - 'tp_type': TakeProfitType value
-                - 'reason': Signal reason (optional)
 
-        Default implementation calls generate_signal() in a loop.
-        Override for better performance with true vectorized logic.
+        Note: Override for even better performance with true vectorized logic
+        that doesn't require iteration.
         """
         n = len(df)
 
@@ -397,12 +450,16 @@ class StrategyCore(ABC):
         sl_types = [''] * n
         tp_types = [''] * n
 
+        # Phase 1: Calculate indicators ONCE on full dataframe
+        df_with_indicators = self.calculate_indicators(df)
+
         # Minimum warmup period (most strategies need ~50 bars)
         warmup = min(50, n // 2)
 
+        # Phase 2: Iterate through bars, reading pre-calculated values
         for i in range(warmup, n):
-            # Pass truncated data (no lookahead)
-            df_slice = df.iloc[:i + 1]
+            # Pass truncated view (indicators already calculated)
+            df_slice = df_with_indicators.iloc[:i + 1]
 
             try:
                 signal = self.generate_signal(df_slice)

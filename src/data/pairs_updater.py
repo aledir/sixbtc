@@ -296,9 +296,11 @@ class PairsUpdater:
             if coin:
                 return coin.max_leverage
 
-        # Default fallback
-        logger.warning(f"Coin {symbol} not found in DB, using default max_leverage=10")
-        return 10
+        # No fallback - coin must be in DB
+        raise ValueError(
+            f"Coin {symbol} not found in DB - cannot determine max_leverage. "
+            "Run pairs_updater.update() to sync coins from Hyperliquid."
+        )
 
     def is_config_stale(self, max_age_hours: int = 24) -> bool:
         """
@@ -361,23 +363,25 @@ def get_coin_max_leverage(symbol: str) -> int:
     return updater.get_coin_max_leverage(symbol)
 
 
-def get_tradable_pairs_for_strategy(strategy_backtest_pairs: List[str]) -> List[str]:
+def get_tradable_pairs_for_strategy(
+    strategy_backtest_pairs: List[str],
+    pattern_coins: Optional[List[str]] = None
+) -> List[str]:
     """
-    Get pairs tradable for a strategy.
+    Get pairs tradable for a strategy with pattern-awareness.
 
-    Returns intersection of:
-    - Pairs the strategy was backtested on
-    - Currently active coins with volume >= min_volume_24h
+    Priority:
+    1. pattern_coins (if available) - already edge-filtered, preferred
+    2. backtest_pairs (fallback) - audit trail pairs
 
-    This ensures:
-    1. We only trade pairs that were tested (no blind trading)
-    2. We skip pairs that became illiquid or were delisted
+    Intersected with currently active liquid coins.
 
     Args:
         strategy_backtest_pairs: List from Strategy.backtest_pairs
+        pattern_coins: List from Strategy.pattern_coins (high-edge coins)
 
     Returns:
-        List of tradable symbols
+        List of tradable symbols (maintains pattern order if pattern_coins used)
     """
     config = load_config()
     min_volume = config.get('trading.min_volume_24h', 1_000_000)
@@ -389,13 +393,26 @@ def get_tradable_pairs_for_strategy(strategy_backtest_pairs: List[str]) -> List[
         ).all()
 
     active_liquid = {c.symbol for c in liquid_coins}
-    backtest_set = set(strategy_backtest_pairs or [])
 
-    tradable = list(backtest_set & active_liquid)
+    # Use pattern coins if available (preferred - edge-sorted)
+    if pattern_coins:
+        candidate_set = set(pattern_coins)
+        source = "pattern_coins"
+        # Maintain order (sorted by edge)
+        ordered_candidates = pattern_coins
+    else:
+        candidate_set = set(strategy_backtest_pairs or [])
+        source = "backtest_pairs"
+        ordered_candidates = strategy_backtest_pairs or []
+
+    tradable_set = candidate_set & active_liquid
+
+    # Maintain order from source
+    tradable = [c for c in ordered_candidates if c in tradable_set]
 
     logger.info(
-        f"Tradable pairs: {len(tradable)} "
-        f"(backtest={len(backtest_set)}, active_liquid={len(active_liquid)})"
+        f"Tradable pairs ({source}): {len(tradable)} "
+        f"(candidates={len(candidate_set)}, active_liquid={len(active_liquid)})"
     )
 
     return tradable

@@ -13,7 +13,8 @@ import os
 import signal
 import threading
 from datetime import datetime, timedelta
-from typing import Dict, List
+from pathlib import Path
+from typing import Dict, List, Set
 
 from src.config import load_config
 from src.database import get_session, Strategy, StrategyProcessor
@@ -22,7 +23,7 @@ from src.utils import get_logger, setup_logging
 # Initialize logging at module load
 _config = load_config()._raw_config
 setup_logging(
-    log_file=_config.get('logging', {}).get('file', 'logs/sixbtc.log'),
+    log_file='logs/scheduler.log',
     log_level=_config.get('logging', {}).get('level', 'INFO'),
 )
 
@@ -174,17 +175,19 @@ class ContinuousSchedulerProcess:
         try:
             from src.backtester.data_loader import BacktestDataLoader
 
-            loader = BacktestDataLoader(self.config)
+            cache_dir = self.config.get('data', {}).get('cache_dir', 'data/binance')
+            loader = BacktestDataLoader(cache_dir=cache_dir)
 
-            # Refresh BTC data for all timeframes
-            timeframes = ['5m', '15m', '30m', '1h', '4h', '1d']
+            # Refresh BTC data for configured timeframes only
+            timeframes = self.config.get('timeframes', ['15m', '1h', '4h'])
 
             for tf in timeframes:
                 try:
                     data = loader.load_single_symbol('BTC', tf, days=30)
                     logger.debug(f"Refreshed BTC {tf} data: {len(data)} bars")
                 except Exception as e:
-                    logger.warning(f"Failed to refresh {tf} data: {e}")
+                    # Cache not found is expected - data scheduler handles downloads
+                    logger.debug(f"BTC {tf} data not in cache: {e}")
 
             logger.info("Data cache refresh complete")
 

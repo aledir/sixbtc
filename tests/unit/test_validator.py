@@ -80,25 +80,36 @@ class Strategy_Invalid(StrategyCore):
 def valid_strategy_instance():
     """Valid strategy instance for shuffle test"""
     class TestStrategy(StrategyCore):
-        def generate_signal(self, df: pd.DataFrame) -> Signal | None:
-            # Simple RSI strategy
-            if len(df) < 20:
-                return None
+        indicator_columns = ['rsi']
 
-            # Calculate RSI
+        def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+            """Pre-calculate RSI indicator"""
+            df = df.copy()
+
+            # Calculate RSI manually
             close = df['close'].values
-            changes = np.diff(close)
+            changes = np.diff(close, prepend=close[0])
             gains = np.where(changes > 0, changes, 0)
             losses = np.abs(np.where(changes < 0, changes, 0))
 
-            avg_gain = np.mean(gains[-14:]) if len(gains) >= 14 else 0
-            avg_loss = np.mean(losses[-14:]) if len(losses) >= 14 else 0
+            # Rolling average
+            gain_avg = pd.Series(gains).rolling(14).mean()
+            loss_avg = pd.Series(losses).rolling(14).mean()
 
-            if avg_loss == 0:
+            rs = gain_avg / loss_avg.replace(0, np.nan)
+            df['rsi'] = 100 - (100 / (1 + rs))
+
+            return df
+
+        def generate_signal(self, df: pd.DataFrame) -> Signal | None:
+            # Simple RSI strategy using pre-calculated indicator
+            if len(df) < 20:
                 return None
 
-            rs = avg_gain / avg_loss
-            rsi = 100 - (100 / (1 + rs))
+            rsi = df['rsi'].iloc[-1]
+
+            if pd.isna(rsi):
+                return None
 
             # Signal logic
             if rsi < 30:
@@ -191,6 +202,11 @@ class Strategy_MultiViolation(StrategyCore):
         """Test shuffle test with too few signals"""
         # Strategy that generates very few signals
         class RareSignalStrategy(StrategyCore):
+            indicator_columns = []
+
+            def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+                return df.copy()
+
             def generate_signal(self, df: pd.DataFrame) -> Signal | None:
                 # Only signal once every 100 bars
                 if len(df) % 100 == 0:
@@ -316,6 +332,11 @@ class Strategy_MultiViolation(StrategyCore):
         """Test validation handles shuffle test exceptions"""
         # Strategy that raises exception
         class BrokenStrategy(StrategyCore):
+            indicator_columns = []
+
+            def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+                return df.copy()
+
             def generate_signal(self, df: pd.DataFrame) -> Signal | None:
                 raise Exception("Strategy error")
 
@@ -385,6 +406,11 @@ class Strategy(StrategyCore):
         """Test shuffle test with zero variance results"""
         # Strategy that always generates same signal
         class ConstantStrategy(StrategyCore):
+            indicator_columns = []
+
+            def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+                return df.copy()
+
             def generate_signal(self, df: pd.DataFrame) -> Signal | None:
                 if len(df) >= 20 and len(df) % 10 == 0:
                     return Signal(direction='long')

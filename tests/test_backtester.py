@@ -16,29 +16,44 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch, MagicMock
 
 from src.backtester.data_loader import BacktestDataLoader
-from src.backtester.backtest_engine import VectorBTBacktester
+from src.backtester.backtest_engine import BacktestEngine
 from src.backtester.validator import LookaheadValidator
-from src.backtester.optimizer import WalkForwardOptimizer
 from src.strategies.base import StrategyCore, Signal
+
+# Alias for backward compatibility
+VectorBTBacktester = BacktestEngine
 
 
 class MockStrategy(StrategyCore):
     """Mock strategy for testing"""
 
+    indicator_columns = ['sma_fast', 'sma_slow']
+
     def __init__(self, **params):
+        super().__init__(params)
         self.timeframe = '15m'
         self.symbol = 'BTC'
-        self.params = params
+
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Pre-calculate indicators"""
+        df = df.copy()
+        df['sma_fast'] = df['close'].rolling(10).mean()
+        df['sma_slow'] = df['close'].rolling(20).mean()
+        return df
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
-        """Simple momentum strategy"""
+        """Simple momentum strategy using pre-calculated indicators"""
         if len(df) < 20:
             return None
 
-        sma_fast = df['close'].rolling(10).mean()
-        sma_slow = df['close'].rolling(20).mean()
+        # Read pre-calculated indicators
+        sma_fast = df['sma_fast'].iloc[-1] if 'sma_fast' in df.columns else df['close'].rolling(10).mean().iloc[-1]
+        sma_slow = df['sma_slow'].iloc[-1] if 'sma_slow' in df.columns else df['close'].rolling(20).mean().iloc[-1]
 
-        if sma_fast.iloc[-1] > sma_slow.iloc[-1]:
+        if pd.isna(sma_fast) or pd.isna(sma_slow):
+            return None
+
+        if sma_fast > sma_slow:
             return Signal(
                 direction='long',
                 atr_stop_multiplier=2.0,
@@ -275,44 +290,6 @@ def generate_signal(df):
         assert results['ast_check_passed'] is False
         assert len(results['ast_violations']) > 0
         assert results['passed'] is False
-
-
-class TestWalkForwardOptimizer:
-    """Test walk-forward optimization"""
-
-    @patch('src.config.loader.load_config')
-    def test_optimize_parameters(self, mock_config, sample_ohlcv_data):
-        """Test parameter optimization"""
-        # Mock config
-        mock_config.return_value = Mock(
-            get=lambda key, default=None: {
-                'hyperliquid.fee_rate': 0.0004,
-                'hyperliquid.slippage': 0.0002,
-                'backtesting.initial_capital': 10000,
-            }.get(key, default)
-        )
-
-        optimizer = WalkForwardOptimizer()
-
-        param_grid = {
-            'fast_period': [5, 10],
-            'slow_period': [20, 30]
-        }
-
-        best_params = optimizer.optimize(
-            strategy_class=MockStrategy,
-            data=sample_ohlcv_data,
-            param_grid=param_grid,
-            n_windows=2,  # Fewer windows for speed
-            metric='sharpe_ratio'
-        )
-
-        # Either finds params or rejects (both are valid)
-        assert best_params is None or isinstance(best_params, dict)
-
-        if best_params:
-            assert 'fast_period' in best_params
-            assert 'slow_period' in best_params
 
 
 class TestBacktesterIntegration:

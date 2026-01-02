@@ -19,6 +19,7 @@ any data after the "current" bar, the fake future will contaminate it.
 
 import numpy as np
 import pandas as pd
+from numba import jit
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
 
@@ -26,6 +27,57 @@ from src.strategies.base import StrategyCore, Signal
 from src.utils import get_logger
 
 logger = get_logger(__name__)
+
+
+# =============================================================================
+# NUMBA JIT-COMPILED FUNCTIONS
+# =============================================================================
+
+@jit(nopython=True, cache=True)
+def _generate_fake_ohlcv_numba(
+    last_close: float,
+    last_volume: float,
+    volatility: float,
+    n_bars: int
+) -> np.ndarray:
+    """
+    JIT-compiled fake OHLCV generation using random walk.
+
+    Args:
+        last_close: Last closing price to start random walk from
+        last_volume: Average volume for random volume generation
+        volatility: Price volatility (std of returns)
+        n_bars: Number of fake bars to generate
+
+    Returns:
+        2D array of shape (n_bars, 5): [open, high, low, close, volume]
+    """
+    # Pre-allocate output array
+    result = np.empty((n_bars, 5), dtype=np.float64)
+
+    current_price = last_close
+    intrabar_vol = volatility * 0.5
+
+    for i in range(n_bars):
+        # Random return with realistic volatility
+        ret = np.random.normal(0.0, volatility)
+        current_price = current_price * (1.0 + ret)
+
+        # Random OHLC around the close
+        open_price = current_price * (1.0 + np.random.normal(0.0, intrabar_vol))
+        high_price = max(open_price, current_price) * (1.0 + abs(np.random.normal(0.0, intrabar_vol)))
+        low_price = min(open_price, current_price) * (1.0 - abs(np.random.normal(0.0, intrabar_vol)))
+
+        # Random volume
+        volume = last_volume * (0.5 + np.random.random())
+
+        result[i, 0] = open_price
+        result[i, 1] = high_price
+        result[i, 2] = low_price
+        result[i, 3] = current_price
+        result[i, 4] = volume
+
+    return result
 
 
 @dataclass
@@ -188,9 +240,10 @@ class ShuffleTester:
         # Get data up to current point (this is what strategy SHOULD see)
         df_past_only = data.iloc[:current_idx + 1].copy()
 
-        # Generate signal with past data only
+        # Generate signal with past data only (two-phase approach)
         try:
-            signal_past_only = strategy.generate_signal(df_past_only)
+            df_past_with_indicators = strategy.calculate_indicators(df_past_only)
+            signal_past_only = strategy.generate_signal(df_past_with_indicators)
         except Exception as e:
             logger.debug(f"Signal generation failed at idx {current_idx}: {e}")
             return False  # Can't test if signal generation fails
@@ -206,9 +259,10 @@ class ShuffleTester:
             # Append fake future to past data
             df_with_fake_future = pd.concat([df_past_only, fake_future], ignore_index=True)
 
-            # Generate signal with fake future appended
+            # Generate signal with fake future appended (two-phase approach)
             try:
-                signal_with_future = strategy.generate_signal(df_with_fake_future)
+                df_future_with_indicators = strategy.calculate_indicators(df_with_fake_future)
+                signal_with_future = strategy.generate_signal(df_future_with_indicators)
             except Exception as e:
                 logger.debug(f"Signal generation with future failed: {e}")
                 continue
@@ -237,51 +291,33 @@ class ShuffleTester:
         """
         Generate fake future data using random walk from last price.
 
+        Uses Numba JIT-compiled function for fast generation.
+
         The fake data should be plausible (realistic volatility) but random,
         so if a strategy uses it, the results will change.
         """
         if len(past_data) == 0:
             raise ValueError("Cannot generate fake future from empty data")
 
-        last_row = past_data.iloc[-1]
-        last_close = last_row['close']
-        last_volume = past_data['volume'].mean()
+        # Extract parameters for Numba function
+        last_close = float(past_data['close'].iloc[-1])
+        last_volume = float(past_data['volume'].mean())
 
         # Calculate realistic volatility from past data
         returns = past_data['close'].pct_change().dropna()
-        volatility = returns.std() if len(returns) > 0 else 0.02
+        volatility = float(returns.std()) if len(returns) > 0 else 0.02
 
-        # Generate random future
-        fake_data = []
-        current_price = last_close
+        # Call Numba JIT-compiled function for fast generation
+        ohlcv_array = _generate_fake_ohlcv_numba(last_close, last_volume, volatility, n_bars)
 
-        for i in range(n_bars):
-            # Random return with realistic volatility
-            ret = np.random.normal(0, volatility)
-            current_price = current_price * (1 + ret)
-
-            # Random OHLC around the close
-            intrabar_vol = volatility * 0.5
-            open_price = current_price * (1 + np.random.normal(0, intrabar_vol))
-            high_price = max(open_price, current_price) * (1 + abs(np.random.normal(0, intrabar_vol)))
-            low_price = min(open_price, current_price) * (1 - abs(np.random.normal(0, intrabar_vol)))
-
-            # Random volume
-            volume = last_volume * (0.5 + np.random.random())
-
-            fake_data.append({
-                'open': open_price,
-                'high': high_price,
-                'low': low_price,
-                'close': current_price,
-                'volume': volume
-            })
-
-        fake_df = pd.DataFrame(fake_data)
+        # Convert to DataFrame
+        fake_df = pd.DataFrame(
+            ohlcv_array,
+            columns=['open', 'high', 'low', 'close', 'volume']
+        )
 
         # Add timestamp if original data has it
         if 'timestamp' in past_data.columns:
-            # Just create sequential timestamps (they won't matter for the test)
             last_ts = past_data['timestamp'].iloc[-1]
             if isinstance(last_ts, pd.Timestamp):
                 fake_df['timestamp'] = pd.date_range(

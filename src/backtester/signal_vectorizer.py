@@ -216,7 +216,13 @@ class VectorizedSignals:
 
 class SignalVectorizer:
     """
-    Wraps a StrategyCore to generate signals efficiently.
+    Wraps a StrategyCore to generate signals efficiently using two-phase approach.
+
+    TWO-PHASE APPROACH:
+    1. calculate_indicators(df) - Called ONCE on full dataframe
+    2. generate_signal(df_with_indicators) - Called per bar, reads pre-calculated values
+
+    This gives O(n) indicator calculation instead of O(n^2).
 
     Usage:
         strategy = Strategy_MOM_abc123()
@@ -242,6 +248,7 @@ class SignalVectorizer:
         self.strategy = strategy
         self.warmup = warmup
         self._cursor_df: Optional[CursorDataFrame] = None
+        self._df_with_indicators: Optional[pd.DataFrame] = None
         self._current_signal: Optional[Signal] = None
 
     def generate_all(
@@ -250,7 +257,7 @@ class SignalVectorizer:
         symbol: str = 'BTC'
     ) -> VectorizedSignals:
         """
-        Generate signals for entire DataFrame.
+        Generate signals for entire DataFrame using two-phase approach.
 
         This is the fast path for backtesting.
 
@@ -269,13 +276,21 @@ class SignalVectorizer:
         tp_multipliers = np.full(n, 3.0, dtype=np.float32)
         leverages = np.ones(n, dtype=np.int8)
 
-        # Create cursor view
-        cursor_df = CursorDataFrame(df)
+        # PHASE 1: Calculate indicators ONCE on full dataframe
+        try:
+            df_with_indicators = self.strategy.calculate_indicators(df)
+            logger.debug(f"Calculated indicators: {self.strategy.indicator_columns}")
+        except Exception as e:
+            logger.warning(f"calculate_indicators() failed, using raw data: {e}")
+            df_with_indicators = df.copy()
+
+        # Create cursor view on df_with_indicators
+        cursor_df = CursorDataFrame(df_with_indicators)
 
         # Calculate effective warmup
         effective_warmup = min(self.warmup, n - 1)
 
-        # Generate signals bar by bar using cursor view
+        # PHASE 2: Generate signals bar by bar using cursor view
         for i in range(effective_warmup, n):
             cursor_df.set_cursor(i)
 
@@ -309,10 +324,19 @@ class SignalVectorizer:
         """
         Prepare for stepping through bars (live mode).
 
+        Calculates indicators ONCE, then creates cursor for iteration.
+
         Args:
             df: Full OHLCV DataFrame
         """
-        self._cursor_df = CursorDataFrame(df)
+        # PHASE 1: Calculate indicators once
+        try:
+            self._df_with_indicators = self.strategy.calculate_indicators(df)
+        except Exception as e:
+            logger.warning(f"calculate_indicators() failed: {e}")
+            self._df_with_indicators = df.copy()
+
+        self._cursor_df = CursorDataFrame(self._df_with_indicators)
         self._current_signal = None
 
     def step(self, bar: int, symbol: str = 'BTC') -> Optional[Signal]:
@@ -558,15 +582,15 @@ class PrecomputedSeries:
 
 class FastSignalVectorizer:
     """
-    Ultra-fast signal vectorizer with pre-computed indicators.
+    Ultra-fast signal vectorizer using strategy's two-phase approach.
+
+    DEPRECATED: Use SignalVectorizer instead. Both now use the same
+    two-phase approach where strategies define their own indicators.
 
     Usage:
         strategy = MyStrategy()
         vectorizer = FastSignalVectorizer(strategy, warmup=50)
         result = vectorizer.generate_all(df, 'BTC')
-
-    For strategies that use standard indicators (RSI, ATR, SMA, etc.),
-    this can be 50-100x faster than the naive approach.
     """
 
     def __init__(self, strategy: StrategyCore, warmup: int = 50):
@@ -579,7 +603,7 @@ class FastSignalVectorizer:
         symbol: str = 'BTC'
     ) -> VectorizedSignals:
         """
-        Generate signals with pre-computed indicators.
+        Generate signals using strategy's two-phase approach.
 
         Args:
             df: OHLCV DataFrame
@@ -596,16 +620,25 @@ class FastSignalVectorizer:
         tp_multipliers = np.full(n, 3.0, dtype=np.float32)
         leverages = np.ones(n, dtype=np.int8)
 
-        # Create precomputed dataframe (indicators calculated once)
-        precomputed_df = PrecomputedDataFrame(df, precompute=True)
+        # PHASE 1: Calculate strategy's indicators ONCE on full dataframe
+        try:
+            df_with_indicators = self.strategy.calculate_indicators(df)
+            logger.debug(f"Calculated indicators: {self.strategy.indicator_columns}")
+        except Exception as e:
+            logger.warning(f"calculate_indicators() failed, using raw data: {e}")
+            df_with_indicators = df.copy()
+
+        # Create cursor view on df_with_indicators
+        cursor_df = CursorDataFrame(df_with_indicators)
 
         effective_warmup = min(self.warmup, n - 1)
 
+        # PHASE 2: Generate signals bar by bar
         for i in range(effective_warmup, n):
-            precomputed_df.set_cursor(i)
+            cursor_df.set_cursor(i)
 
             try:
-                signal = self.strategy.generate_signal(precomputed_df, symbol)
+                signal = self.strategy.generate_signal(cursor_df, symbol)
 
                 if signal is not None:
                     if signal.direction == 'long':

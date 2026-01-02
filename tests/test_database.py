@@ -379,12 +379,19 @@ class TestDatabaseManager:
     @patch('src.database.connection.create_engine')
     def test_initialization(self, mock_create_engine):
         """Test database manager initialization"""
+        # Clear the cached engine to ensure create_engine is called
+        import src.database.connection as conn_module
+        conn_module._engine = None
+
         mock_engine = Mock()
         mock_create_engine.return_value = mock_engine
 
         engine = get_engine()
 
         mock_create_engine.assert_called_once()
+
+        # Reset cache for other tests
+        conn_module._engine = None
 
     def test_transaction_rollback(self, test_db, sample_strategy_data):
         """Test transaction rollback on error"""

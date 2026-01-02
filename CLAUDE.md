@@ -1,12 +1,28 @@
 # SixBTC - AI-Powered Trading System Development Guide
 
-**Last Updated**: 2025-12-20 | **Python**: 3.11+ | **Core**: VectorBT + Hyperliquid SDK
+**Last Updated**: 2025-12-28 | **Python**: 3.11+ | **Core**: VectorBT + Hyperliquid SDK
 
 ---
 
-## ⚡ ULTIMATE GOAL
-
-**MAKE MONEY** - The sole purpose of SixBTC is to generate consistent profit in cryptocurrency perpetual futures markets. Every line of code, every architectural decision, every optimization must serve this objective. A non-profitable trading system is a failed system.
+# ███████████████████████████████████████████████████████████████████████████████
+# ██                                                                           ██
+# ██   REGOLA ZERO - SUPREMA E INVIOLABILE                                     ██
+# ██                                                                           ██
+# ██   L'UNICA COSA CHE CONTA È FARE PROFITTO.                                 ██
+# ██                                                                           ██
+# ██   Tutto il resto - architettura, codice pulito, best practices,           ██
+# ██   pattern, testing - esiste SOLO per servire questo obiettivo.            ██
+# ██                                                                           ██
+# ██   OGNI decisione deve rispondere a UNA domanda:                           ██
+# ██   "Questo mi aiuta a fare più soldi?"                                     ██
+# ██                                                                           ██
+# ██   Se la risposta è NO → non farlo.                                        ██
+# ██   Se la risposta è SÌ → fallo, anche se viola altre regole.               ██
+# ██                                                                           ██
+# ██   IN CASO DI CONFLITTO TRA QUALSIASI REGOLA E IL PROFITTO:                ██
+# ██   IL PROFITTO VINCE. SEMPRE. SENZA ECCEZIONI.                             ██
+# ██                                                                           ██
+# ███████████████████████████████████████████████████████████████████████████████
 
 ---
 

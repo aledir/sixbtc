@@ -161,6 +161,9 @@ class Strategy(Base):
     backtest_pairs = Column(JSON)  # Audit trail: ["BTC", "ETH", ...]
     backtest_date = Column(DateTime)  # Date of backtest
 
+    # Pattern-specific coin selection (from pattern's coin_performance)
+    pattern_coins = Column(JSON)  # High-edge coins: ["ME", "RENDER", ...]
+
     # Backtest score (from BacktestResult, cached for ranking)
     score_backtest = Column(Float)  # Composite score 0-100
 
@@ -177,10 +180,10 @@ class Strategy(Base):
     # Backtest vs Live comparison
     live_degradation_pct = Column(Float)  # (backtest_score - live_score) / backtest_score
 
-    # Relationships
-    backtest_results = relationship("BacktestResult", back_populates="strategy")
-    trades = relationship("Trade", back_populates="strategy")
-    performance_snapshots = relationship("PerformanceSnapshot", back_populates="strategy")
+    # Relationships (cascade delete for child records when strategy is deleted)
+    backtest_results = relationship("BacktestResult", back_populates="strategy", cascade="all, delete-orphan")
+    trades = relationship("Trade", back_populates="strategy", cascade="all, delete-orphan")
+    performance_snapshots = relationship("PerformanceSnapshot", back_populates="strategy", cascade="all, delete-orphan")
     template = relationship("StrategyTemplate", backref="strategies")
 
     # Indexes for fast lookups

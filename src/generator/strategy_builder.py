@@ -61,6 +61,7 @@ class GeneratedStrategy:
     template_id: Optional[str] = None  # Template UUID if template-based
     parameters: Optional[dict] = None  # Parameters used if template-based
     parameter_hash: Optional[str] = None  # Hash for deduplication
+    pattern_coins: Optional[list[str]] = None  # High-edge coins from pattern
 
 
 class StrategyBuilder:
@@ -165,6 +166,25 @@ class StrategyBuilder:
         """
         leverage = self._get_random_leverage()
 
+        # Extract high-edge coins from pattern's coin_performance
+        pattern_coins = None
+        if pattern.coin_performance:
+            coin_config = self.config.get('pattern_discovery', {}).get('coin_selection', {})
+            min_edge = coin_config.get('min_edge', 0.10)
+            min_signals = coin_config.get('min_signals', 50)
+            max_coins = coin_config.get('max_coins', 30)
+
+            pattern_coins = pattern.get_high_edge_coins(
+                min_edge=min_edge,
+                min_signals=min_signals,
+                max_coins=max_coins
+            )
+            if pattern_coins:
+                logger.info(
+                    f"Pattern {pattern.name}: {len(pattern_coins)} coins with edge >= {min_edge:.0%} "
+                    f"(top: {pattern_coins[:5]})"
+                )
+
         # Mode A: Direct embedding (preferred when formula_source available)
         if mode in ("auto", "direct") and pattern.formula_source:
             result = self.direct_generator.generate(pattern, leverage)
@@ -185,7 +205,8 @@ class StrategyBuilder:
                     validation_errors=result.validation_errors,
                     leverage=result.leverage,
                     pattern_id=result.pattern_id,
-                    generation_mode="direct"
+                    generation_mode="direct",
+                    pattern_coins=pattern_coins
                 )
             elif mode == "direct":
                 # Direct-only mode requested but failed
@@ -202,12 +223,13 @@ class StrategyBuilder:
                 )
 
         # Mode B: AI wrapping (uses provided code in prompt)
-        return self._generate_pattern_ai(pattern, leverage)
+        return self._generate_pattern_ai(pattern, leverage, pattern_coins)
 
     def _generate_pattern_ai(
         self,
         pattern: Pattern,
-        leverage: int
+        leverage: int,
+        pattern_coins: Optional[list[str]] = None
     ) -> Optional[GeneratedStrategy]:
         """
         Generate strategy using AI (Mode B) with provided code
@@ -287,7 +309,8 @@ class StrategyBuilder:
                 validation_errors=errors,
                 leverage=leverage,
                 pattern_id=pattern.id,
-                generation_mode="ai_pattern"
+                generation_mode="ai_pattern",
+                pattern_coins=pattern_coins
             )
 
         except Exception as e:

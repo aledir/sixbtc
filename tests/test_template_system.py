@@ -219,6 +219,7 @@ class TestTemplateGenerator:
     def mock_config(self):
         """Config for template generator"""
         return {
+            'timeframes': ['15m', '1h', '4h'],
             'ai': {
                 'providers': [
                     {
@@ -277,7 +278,8 @@ class Strategy_MOM_abc123(StrategyCore):
         assert template.timeframe == "1h"
         assert "indicator_period" in template.parameters_schema
         assert "threshold" in template.parameters_schema
-        assert "leverage" in template.parameters_schema
+        # Note: 'leverage' is intentionally removed by the generator (assigned by system)
+        assert "leverage" not in template.parameters_schema
         assert "{{" in template.code_template  # Has Jinja2 placeholders
 
 
@@ -290,10 +292,11 @@ class TestStrategyBuilderTemplateIntegration:
     def mock_config(self):
         """Config for strategy builder"""
         return {
+            'pattern_discovery': {
+                'api_url': 'http://localhost:8001',
+                'min_quality_score': 0.75
+            },
             'generation': {
-                'pattern_discovery': {
-                    'api_url': 'http://localhost:8001'
-                },
                 'pattern_tier_filter': 1,
                 'min_quality_score': 0.75,
                 'max_fix_attempts': 3,

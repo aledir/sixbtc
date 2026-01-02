@@ -89,34 +89,48 @@ class Strategy_{strategy_type}_{strategy_id}(StrategyCore):
 
     leverage = {leverage}
 
+    # Indicator columns added by calculate_indicators()
+    indicator_columns = ['atr', 'pattern_signal']
+
     def __init__(self, params: dict = None):
         super().__init__(params)
 
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Pre-calculate ATR and pattern signal.
+
+        The pattern function is called here ONCE on the full dataframe.
+        """
+        df = df.copy()
+
+        # ATR for stops
+        df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+
+        # Call pattern function ONCE on full dataframe
+        try:
+            pattern_result = {pattern_func_name}(df)
+            if isinstance(pattern_result, pd.Series):
+                df['pattern_signal'] = pattern_result
+            else:
+                # Scalar result - apply to last bar only
+                df['pattern_signal'] = False
+                df.loc[df.index[-1], 'pattern_signal'] = pattern_result
+        except Exception:
+            df['pattern_signal'] = False
+
+        return df
+
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
-        """Generate {direction} signal based on pattern: {pattern_name}"""
+        """Generate {direction} signal from pre-calculated pattern."""
         min_bars = 100
         if len(df) < min_bars:
             return None
 
-        current_price = df['close'].iloc[-1]
-
-        # ATR for stop loss calculation
-        atr = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-        current_atr = atr.iloc[-1]
+        # Read pre-calculated values
+        current_atr = df['atr'].iloc[-1]
+        entry_condition = bool(df['pattern_signal'].iloc[-1])
 
         if pd.isna(current_atr) or current_atr <= 0:
-            return None
-
-        # Call pattern function
-        try:
-            pattern_signal = {pattern_func_name}(df)
-
-            # Get last value (current bar signal)
-            if isinstance(pattern_signal, pd.Series):
-                entry_condition = bool(pattern_signal.iloc[-1]) if len(pattern_signal) > 0 else False
-            else:
-                entry_condition = bool(pattern_signal)
-        except Exception:
             return None
 
         if entry_condition:

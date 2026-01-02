@@ -21,7 +21,12 @@ import pandas as pd
 
 class DummyStrategy(StrategyCore):
     """Dummy strategy for testing"""
-    def generate_signal(self, df: pd.DataFrame):
+    indicator_columns = []
+
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        return df.copy()
+
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
         return None
 
 

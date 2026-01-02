@@ -7,10 +7,33 @@ Patterns are used as building blocks for AI-generated strategies.
 
 import requests
 from typing import Optional, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CoinPerformance:
+    """Coin-specific performance data for a pattern"""
+    coin: str
+    edge: float
+    win_rate: float
+    n_signals: int
+
+
+@dataclass
+class TargetResult:
+    """Target-specific test results for a pattern"""
+    target_name: str
+    tier: Optional[int]  # Can be None for non-validated targets
+    edge: float  # avg_edge from API
+    win_rate: float
+    n_signals: int
+    direction: str  # 'long' or 'short'
+    hold_hours: int  # 1, 4, 24, etc.
+    is_valid: bool = False
+    quality_score: float = 0.0
 
 
 @dataclass
@@ -45,6 +68,44 @@ class Pattern:
     # Executable source code (from new API)
     formula_source: Optional[str] = None  # Complete Python function code
     formula_components: Optional[dict] = None  # {category, docstring, return_expression}
+
+    # Coin-specific performance data
+    coin_performance: Optional[List[CoinPerformance]] = None
+
+    # Multi-target support
+    target_results: Optional[List[TargetResult]] = None
+    original_pattern_id: Optional[str] = None  # For virtual patterns
+    is_virtual: bool = False  # True if expanded from multi-target
+
+    def get_high_edge_coins(
+        self,
+        min_edge: float = 0.10,
+        min_signals: int = 50,
+        max_coins: int = 30
+    ) -> List[str]:
+        """
+        Get coins where this pattern has demonstrated positive edge.
+
+        Args:
+            min_edge: Minimum edge threshold (default 10%)
+            min_signals: Minimum number of signals for reliability
+            max_coins: Maximum coins to return
+
+        Returns:
+            List of coin symbols sorted by edge (descending)
+        """
+        if not self.coin_performance:
+            return []
+
+        filtered = [
+            cp for cp in self.coin_performance
+            if cp.edge >= min_edge and cp.n_signals >= min_signals
+        ]
+
+        # Sort by edge descending
+        sorted_coins = sorted(filtered, key=lambda x: x.edge, reverse=True)
+
+        return [cp.coin for cp in sorted_coins[:max_coins]]
 
 
 class PatternFetcher:
@@ -250,6 +311,41 @@ class PatternFetcher:
         # target_direction now comes directly from API (long/short)
         target_direction = data.get('target_direction', 'long')
 
+        # Parse coin_performance data
+        coin_perf_data = data.get('coin_performance', [])
+        coin_performance = None
+        if coin_perf_data:
+            coin_performance = [
+                CoinPerformance(
+                    coin=cp.get('coin', ''),
+                    edge=cp.get('edge', 0.0),
+                    win_rate=cp.get('win_rate', 0.0),
+                    n_signals=cp.get('n_signals', 0)
+                )
+                for cp in coin_perf_data
+                if cp.get('coin')  # Skip empty entries
+            ]
+
+        # Parse target_results (dict format: {target_name: {tier, avg_edge, ...}})
+        target_results_data = data.get('target_results', {})
+        target_results = None
+        if target_results_data and isinstance(target_results_data, dict):
+            target_results = [
+                TargetResult(
+                    target_name=target_name,
+                    tier=tr_data.get('tier'),  # Can be None for non-tier targets
+                    edge=tr_data.get('avg_edge', 0.0),
+                    win_rate=tr_data.get('win_rate', 0.0),
+                    n_signals=tr_data.get('n_signals', 0),
+                    direction=tr_data.get('direction', 'long'),
+                    hold_hours=tr_data.get('hold_hours', 24),
+                    is_valid=tr_data.get('is_valid', False),
+                    quality_score=tr_data.get('quality_score', 0.0)
+                )
+                for target_name, tr_data in target_results_data.items()
+                if target_name and tr_data  # Skip empty entries
+            ]
+
         return Pattern(
             id=str(data.get('id', '')),
             name=data.get('name', ''),
@@ -280,6 +376,14 @@ class PatternFetcher:
             # Executable source code (new API fields)
             formula_source=data.get('formula_source'),
             formula_components=data.get('formula_components'),
+
+            # Coin-specific performance data
+            coin_performance=coin_performance,
+
+            # Multi-target support
+            target_results=target_results,
+            original_pattern_id=None,
+            is_virtual=False,
         )
 
     def get_stats(self) -> dict:
@@ -318,3 +422,129 @@ class PatternFetcher:
 
         logger.info(f"Found {len(new_patterns)} new patterns since {since_date}")
         return new_patterns
+
+    def expand_pattern_to_targets(
+        self,
+        pattern: Pattern,
+        min_edge: float = 0.05,
+        max_targets: int = 5
+    ) -> List[Pattern]:
+        """
+        Expand one pattern into multiple patterns, one per Tier 1 target.
+
+        This allows exploiting a single pattern formula for multiple trading
+        directions (long/short) and holding periods (4h/24h).
+
+        Args:
+            pattern: Base pattern with target_results
+            min_edge: Minimum edge for target inclusion (default 5%)
+            max_targets: Maximum number of targets to expand
+
+        Returns:
+            List of Pattern objects (virtual patterns)
+        """
+        if not pattern.target_results:
+            return [pattern]  # No expansion possible
+
+        # Filter Tier 1 targets with sufficient edge
+        tier1_targets = [
+            t for t in pattern.target_results
+            if t.tier == 1 and t.edge >= min_edge
+        ]
+
+        if len(tier1_targets) <= 1:
+            return [pattern]  # Only one target, no expansion needed
+
+        # Sort by edge descending and limit
+        tier1_targets = sorted(tier1_targets, key=lambda t: t.edge, reverse=True)
+        tier1_targets = tier1_targets[:max_targets]
+
+        # Create virtual pattern for each target
+        virtual_patterns = []
+        for target in tier1_targets:
+            virtual = Pattern(
+                id=f"{pattern.id}__{target.target_name}",  # Composite ID
+                name=f"{pattern.name}_{target.target_name}",
+                formula=pattern.formula,
+                tier=pattern.tier,
+                target_name=target.target_name,
+                target_direction=target.direction,
+                test_edge=target.edge,
+                test_win_rate=target.win_rate,
+                test_n_signals=target.n_signals,
+                quality_score=target.quality_score or pattern.quality_score,
+                timeframe=pattern.timeframe,
+                holding_period=f"{target.hold_hours}h",
+                strategy_type=pattern.strategy_type,
+                formula_readable=pattern.formula_readable,
+                suggested_sl_type=pattern.suggested_sl_type,
+                suggested_sl_multiplier=pattern.suggested_sl_multiplier,
+                suggested_tp_type=pattern.suggested_tp_type,
+                suggested_rr_ratio=pattern.suggested_rr_ratio,
+                avg_signals_per_month=pattern.avg_signals_per_month,
+                worst_window=pattern.worst_window,
+                formula_source=pattern.formula_source,
+                formula_components=pattern.formula_components,
+                coin_performance=pattern.coin_performance,
+                target_results=pattern.target_results,
+                original_pattern_id=pattern.id,
+                is_virtual=True,
+            )
+            virtual_patterns.append(virtual)
+
+        logger.info(
+            f"Expanded pattern {pattern.name} into {len(virtual_patterns)} "
+            f"virtual patterns for targets: {[t.target_name for t in tier1_targets]}"
+        )
+
+        return virtual_patterns
+
+    def get_tier_1_patterns_expanded(
+        self,
+        limit: int = 10,
+        min_quality_score: float = 0.75,
+        expand_multi_target: bool = True,
+        min_edge_for_expansion: float = 0.05,
+        max_targets_per_pattern: int = 5
+    ) -> List[Pattern]:
+        """
+        Fetch Tier 1 patterns with multi-target expansion.
+
+        When a pattern has multiple Tier 1 targets (e.g., both LONG and SHORT),
+        this method expands it into separate virtual patterns, each optimized
+        for its specific target.
+
+        Args:
+            limit: Max base patterns to fetch from API
+            min_quality_score: Quality threshold for base patterns
+            expand_multi_target: If True, expand patterns with multiple Tier 1 targets
+            min_edge_for_expansion: Minimum edge for a target to be expanded (default 5%)
+            max_targets_per_pattern: Maximum targets to expand per pattern
+
+        Returns:
+            List of Pattern objects (may be more than limit if expanded)
+        """
+        base_patterns = self.get_tier_1_patterns(
+            limit=limit,
+            min_quality_score=min_quality_score
+        )
+
+        if not expand_multi_target:
+            return base_patterns
+
+        # Expand patterns with multiple Tier 1 targets
+        expanded = []
+        for pattern in base_patterns:
+            virtual_patterns = self.expand_pattern_to_targets(
+                pattern,
+                min_edge=min_edge_for_expansion,
+                max_targets=max_targets_per_pattern
+            )
+            expanded.extend(virtual_patterns)
+
+        logger.info(
+            f"Expanded {len(base_patterns)} base patterns to "
+            f"{len(expanded)} total patterns (including virtual)"
+        )
+
+        return expanded

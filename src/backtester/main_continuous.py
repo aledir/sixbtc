@@ -30,7 +30,7 @@ from src.utils import get_logger, setup_logging
 # Initialize logging at module load
 _config = load_config()._raw_config
 setup_logging(
-    log_file=_config.get('logging', {}).get('file', 'logs/sixbtc.log'),
+    log_file='logs/backtester.log',
     log_level=_config.get('logging', {}).get('level', 'INFO'),
 )
 
@@ -56,6 +56,19 @@ class ContinuousBacktesterProcess:
         backtesting_config = self.config.get('backtesting', {})
         self.parallel_threads = backtesting_config.get('parallel_threads', 10)
 
+        # Pipeline backpressure configuration (downstream = TESTED queue)
+        pipeline_config = self.config.get('pipeline', {})
+        queue_limits = pipeline_config.get('queue_limits', {})
+        backpressure_config = pipeline_config.get('backpressure', {})
+        monitoring_config = pipeline_config.get('monitoring', {})
+
+        self.tested_limit = queue_limits.get('tested', 30)
+        self.base_cooldown = backpressure_config.get('base_cooldown', 30)
+        self.max_cooldown = backpressure_config.get('max_cooldown', 120)
+        self.cooldown_increment = backpressure_config.get('cooldown_increment', 2)
+        self.log_interval = monitoring_config.get('log_interval', 30)
+        self._last_log_time = datetime.min
+
         # ThreadPoolExecutor for parallel backtesting
         self.executor = ThreadPoolExecutor(
             max_workers=self.parallel_threads,
@@ -67,7 +80,8 @@ class ContinuousBacktesterProcess:
 
         # Components
         self.engine = BacktestEngine(self.config)
-        cache_dir = self.config.get('directories', {}).get('data', 'data')
+        # Use data.cache_dir (where BinanceDataDownloader saves files) or default to data/binance
+        cache_dir = self.config.get('data', {}).get('cache_dir', 'data/binance')
         self.data_loader = BacktestDataLoader(cache_dir)
         self.processor = StrategyProcessor(process_id=f"backtester-{os.getpid()}")
 
@@ -101,7 +115,8 @@ class ContinuousBacktesterProcess:
 
         logger.info(
             f"ContinuousBacktesterProcess initialized: "
-            f"{self.parallel_threads} threads, {len(self.timeframes)} TFs, {self.pairs_count} pairs"
+            f"{self.parallel_threads} threads, {len(self.timeframes)} TFs, {self.pairs_count} pairs, "
+            f"downstream limit {self.tested_limit} TESTED"
         )
 
     def _get_backtest_pairs(self) -> List[str]:
@@ -122,6 +137,92 @@ class ContinuousBacktesterProcess:
 
         logger.info(f"Loaded {len(pairs)} pairs from database")
         return pairs
+
+    def _validate_pattern_coins(
+        self,
+        pattern_coins: List[str],
+        timeframe: str
+    ) -> Tuple[Optional[List[str]], str]:
+        """
+        Validate pattern coins for backtest/live consistency.
+
+        Three-level validation (all required):
+        1. Liquidity: coin must be in active trading pairs (volume >= threshold)
+        2. Cache: coin must have cached OHLCV data
+        3. Coverage: coin must have >= 90% data coverage for training+holdout period
+
+        NO FALLBACK: If insufficient coins pass validation, returns None.
+        This ensures backtest coins = live coins = pattern edge preserved.
+
+        Args:
+            pattern_coins: List of coins from pattern's coin_performance (ordered by edge)
+            timeframe: Timeframe to validate data coverage for
+
+        Returns:
+            (validated_coins, rejection_reason) - validated_coins is None if rejected
+        """
+        if not pattern_coins:
+            return None, "no_pattern_coins"
+
+        min_coins = self.config.get('pattern_discovery', {}).get(
+            'coin_selection', {}
+        ).get('min_tradable_coins', 10)
+
+        # Level 1: Liquidity filter (active trading pairs from DB)
+        active_coins = set(get_current_pairs())
+        liquid_coins = [c for c in pattern_coins if c in active_coins]
+
+        if len(liquid_coins) < min_coins:
+            logger.warning(
+                f"Liquidity filter: {len(liquid_coins)}/{len(pattern_coins)} coins liquid "
+                f"(need {min_coins})"
+            )
+            return None, f"insufficient_liquidity:{len(liquid_coins)}/{min_coins}"
+
+        # Level 2: Cache filter (data must exist in cache)
+        from src.backtester.cache_reader import BacktestCacheReader, CacheNotFoundError
+        try:
+            cache_reader = BacktestCacheReader(self.data_loader.cache_dir)
+            cached_symbols = set(cache_reader.list_cached_symbols(timeframe))
+        except CacheNotFoundError:
+            return None, "cache_not_found"
+
+        cached_coins = [c for c in liquid_coins if c in cached_symbols]
+
+        if len(cached_coins) < min_coins:
+            logger.warning(
+                f"Cache filter: {len(cached_coins)}/{len(liquid_coins)} coins cached "
+                f"(need {min_coins})"
+            )
+            return None, f"insufficient_cache:{len(cached_coins)}/{min_coins}"
+
+        # Level 3: Coverage filter (>= 90% data for training+holdout period)
+        total_days = self.training_days + self.holdout_days
+        min_coverage = 0.90
+
+        validated_coins = []
+        for coin in cached_coins:
+            info = cache_reader.get_cache_info(coin, timeframe)
+            if info and info.get('days', 0) >= total_days * min_coverage:
+                validated_coins.append(coin)
+
+            if len(validated_coins) >= min_coins * 2:
+                # Have enough, stop checking (preserve edge order)
+                break
+
+        if len(validated_coins) < min_coins:
+            logger.warning(
+                f"Coverage filter: {len(validated_coins)}/{len(cached_coins)} coins with "
+                f">= {min_coverage:.0%} coverage for {total_days}d (need {min_coins})"
+            )
+            return None, f"insufficient_coverage:{len(validated_coins)}/{min_coins}"
+
+        logger.info(
+            f"Validated {len(validated_coins)} pattern coins "
+            f"(from {len(pattern_coins)} original, {min_coins} required)"
+        )
+
+        return validated_coins, "validated"
 
     def _get_training_holdout_data(
         self,
@@ -174,30 +275,33 @@ class ContinuousBacktesterProcess:
             logger.error(f"Failed to load training/holdout data for {timeframe}: {e}")
             return {}, {}
 
+    def _log_pipeline_status(self):
+        """Log pipeline status periodically for monitoring"""
+        now = datetime.now()
+        if (now - self._last_log_time).total_seconds() < self.log_interval:
+            return
+
+        try:
+            depths = self.processor.get_queue_depths()
+            logger.info(
+                f"Pipeline: GEN={depths.get('GENERATED', 0)} "
+                f"VAL={depths.get('VALIDATED', 0)} "
+                f"TST={depths.get('TESTED', 0)}/{self.tested_limit} "
+                f"LIVE={depths.get('LIVE', 0)}"
+            )
+            self._last_log_time = now
+        except Exception as e:
+            logger.debug(f"Failed to log pipeline status: {e}")
+
     async def run_continuous(self):
-        """Main continuous backtesting loop"""
-        logger.info("Starting continuous backtesting loop")
+        """Main continuous backtesting loop with downstream backpressure"""
+        logger.info("Starting continuous backtesting loop (with downstream backpressure)")
 
         while not self.shutdown_event.is_set() and not self.force_exit:
-            # Claim a strategy for backtesting
-            strategy = self.processor.claim_strategy("VALIDATED")
+            # Log pipeline status periodically
+            self._log_pipeline_status()
 
-            if strategy is None:
-                # No strategies to backtest, wait and retry
-                await asyncio.sleep(5)
-                continue
-
-            # Submit backtest task
-            future = self.executor.submit(
-                self._backtest_strategy_all_tf,
-                strategy.id,
-                strategy.name,
-                strategy.code,
-                strategy.timeframe
-            )
-            self.active_futures[future] = str(strategy.id)
-
-            # Process completed backtests
+            # Process completed backtests first (free up slots)
             done_futures = []
             for f in list(self.active_futures.keys()):
                 if f.done():
@@ -214,6 +318,49 @@ class ContinuousBacktesterProcess:
                 except Exception as e:
                     logger.error(f"Backtest error for {strategy_id}: {e}")
 
+            # Check downstream backpressure (TESTED queue)
+            tested_count = self.processor.count_available("TESTED")
+            if tested_count >= self.tested_limit:
+                cooldown = self.processor.calculate_backpressure_cooldown(
+                    tested_count,
+                    self.tested_limit,
+                    self.base_cooldown,
+                    self.cooldown_increment,
+                    self.max_cooldown
+                )
+                logger.info(
+                    f"Downstream backpressure: {tested_count} TESTED "
+                    f"(limit {self.tested_limit}), waiting {cooldown}s"
+                )
+                await asyncio.sleep(cooldown)
+                continue
+
+            # Only claim new strategies if we have free worker slots
+            # This prevents claiming more strategies than we can process
+            if len(self.active_futures) >= self.parallel_threads:
+                # All workers busy, wait before checking again
+                await asyncio.sleep(1)
+                continue
+
+            # Claim a strategy for backtesting
+            strategy = self.processor.claim_strategy("VALIDATED")
+
+            if strategy is None:
+                # No strategies to backtest, wait and retry
+                await asyncio.sleep(5)
+                continue
+
+            # Submit backtest task
+            future = self.executor.submit(
+                self._backtest_strategy_all_tf,
+                strategy.id,
+                strategy.name,
+                strategy.code,
+                strategy.timeframe,
+                strategy.pattern_coins
+            )
+            self.active_futures[future] = str(strategy.id)
+
             await asyncio.sleep(0.1)
 
         logger.info("Backtesting loop ended")
@@ -223,7 +370,8 @@ class ContinuousBacktesterProcess:
         strategy_id,
         strategy_name: str,
         code: str,
-        original_tf: str
+        original_tf: str,
+        pattern_coins: Optional[List[str]] = None
     ) -> Tuple[bool, str]:
         """
         Run training/holdout backtest on all timeframes and select optimal TF.
@@ -251,25 +399,46 @@ class ContinuousBacktesterProcess:
                 self._delete_strategy(strategy_id, "Could not load strategy instance")
                 return (False, "Could not load strategy instance")
 
-            # Load pairs
-            pairs = self._get_backtest_pairs()
-            if not pairs:
-                self._delete_strategy(strategy_id, "No pairs available")
-                return (False, "No pairs available")
-
             # Test all timeframes with training/holdout backtesting
+            # Each TF validates its own coins (pattern-specific, no fallback)
             tf_results = {}
             tf_backtest_ids = {}
+            tf_validated_coins = {}  # Track which coins were used per TF
 
             for tf in self.timeframes:
+                # Validate pattern coins for this timeframe (3-level validation)
+                if pattern_coins:
+                    validated_coins, validation_reason = self._validate_pattern_coins(
+                        pattern_coins, tf
+                    )
+                    if validated_coins is None:
+                        logger.info(
+                            f"[{strategy_name}] {tf}: SKIPPED - {validation_reason}"
+                        )
+                        continue
+                    pairs = validated_coins
+                    logger.info(
+                        f"[{strategy_name}] {tf}: Using {len(pairs)} validated pattern coins"
+                    )
+                else:
+                    # Non-pattern strategy: use volume-based pairs
+                    pairs = self._get_backtest_pairs()
+                    if not pairs:
+                        logger.warning(f"[{strategy_name}] {tf}: No pairs available")
+                        continue
+
                 logger.info(f"[{strategy_name}] Testing {tf} on {len(pairs)} pairs (training/holdout)...")
 
                 # Load training/holdout data (NON-OVERLAPPING)
                 training_data, holdout_data = self._get_training_holdout_data(pairs, tf)
 
+                # Coins already validated, but check data loading succeeded
                 if not training_data or len(training_data) < 5:
                     logger.warning(f"Insufficient training data for {tf}, skipping")
                     continue
+
+                # Store validated coins for this TF
+                tf_validated_coins[tf] = list(training_data.keys())
 
                 # Run TRAINING period backtest
                 try:
@@ -338,11 +507,12 @@ class ContinuousBacktesterProcess:
 
                 tf_backtest_ids[tf] = training_backtest_id
 
+                holdout_trades = holdout_result.get('total_trades', 0) if holdout_result else 0
+                holdout_sharpe = holdout_result.get('sharpe_ratio', 0) if holdout_result else 0
                 logger.info(
                     f"[{strategy_name}] {tf}: "
                     f"Training: {training_result['total_trades']} trades, Sharpe {training_result.get('sharpe_ratio', 0):.2f} | "
-                    f"Holdout: {holdout_result.get('total_trades', 0) if holdout_result else 0} trades, "
-                    f"Sharpe {holdout_result.get('sharpe_ratio', 0):.2f if holdout_result else 0} | "
+                    f"Holdout: {holdout_trades} trades, Sharpe {holdout_sharpe:.2f} | "
                     f"Final Score: {final_result.get('final_score', 0):.2f}"
                 )
 
@@ -353,8 +523,11 @@ class ContinuousBacktesterProcess:
                 self._delete_strategy(strategy_id, "No TF passed thresholds")
                 return (False, "No TF passed thresholds")
 
-            # Update strategy with optimal TF
-            self._update_strategy_optimal_tf(strategy_id, optimal_tf, pairs)
+            # Get validated coins for optimal TF (these are the coins to use in live trading)
+            optimal_tf_coins = tf_validated_coins.get(optimal_tf, [])
+
+            # Update strategy with optimal TF and its validated coins
+            self._update_strategy_optimal_tf(strategy_id, optimal_tf, optimal_tf_coins)
 
             # Mark optimal backtest
             if optimal_tf in tf_backtest_ids:
@@ -418,7 +591,8 @@ class ContinuousBacktesterProcess:
             )
             return result
         except Exception as e:
-            logger.error(f"Portfolio backtest failed: {e}")
+            import traceback
+            logger.error(f"Portfolio backtest failed: {e}\n{traceback.format_exc()}")
             return {'total_trades': 0}
 
     def _validate_holdout(

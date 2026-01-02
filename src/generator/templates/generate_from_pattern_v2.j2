@@ -116,38 +116,56 @@ class Strategy_{{ pattern.strategy_type or "GEN" }}_{{ strategy_id }}(StrategyCo
 
     Pattern Edge: {{ "%.2f"|format(pattern.test_edge * 100) }}%
     Pattern Win Rate: {{ "%.1f"|format(pattern.test_win_rate * 100) }}%
+
+    Uses two-phase approach:
+    1. calculate_indicators() - Pre-calculate ATR and pattern result
+    2. generate_signal() - Read pre-calculated values
     """
 
     leverage = {{ leverage }}
 
+    # Indicator columns added by calculate_indicators()
+    indicator_columns = ['atr', 'pattern_signal']
+
     def __init__(self, params: dict = None):
         super().__init__(params)
 
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Pre-calculate indicators: ATR and pattern signal.
+
+        The pattern function is called here ONCE on the full dataframe.
+        """
+        df = df.copy()
+
+        # ATR for stops
+        df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+
+        # Call pattern function ONCE on full dataframe
+        try:
+            pattern_result = {{ pattern.name.split('.')[-1] }}(df)
+            if isinstance(pattern_result, pd.Series):
+                df['pattern_signal'] = pattern_result
+            else:
+                # Scalar result - apply to last bar only
+                df['pattern_signal'] = False
+                df.loc[df.index[-1], 'pattern_signal'] = pattern_result
+        except Exception:
+            df['pattern_signal'] = False
+
+        return df
+
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
-        """Generate {{ pattern.target_direction }} signal using pattern: {{ pattern.name }}"""
+        """Generate {{ pattern.target_direction }} signal from pre-calculated pattern."""
         min_bars = 100
         if len(df) < min_bars:
             return None
 
-        current_price = df['close'].iloc[-1]
-
-        # ATR for stops
-        atr = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-        current_atr = atr.iloc[-1]
+        # Read pre-calculated values
+        current_atr = df['atr'].iloc[-1]
+        entry_condition = bool(df['pattern_signal'].iloc[-1])
 
         if pd.isna(current_atr) or current_atr <= 0:
-            return None
-
-        # Call pattern function
-        try:
-            pattern_result = {{ pattern.name.split('.')[-1] }}(df)
-
-            # Extract current bar signal
-            if isinstance(pattern_result, pd.Series):
-                entry_condition = bool(pattern_result.iloc[-1]) if len(pattern_result) > 0 else False
-            else:
-                entry_condition = bool(pattern_result)
-        except Exception:
             return None
 
         if entry_condition:

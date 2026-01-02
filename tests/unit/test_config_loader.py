@@ -15,12 +15,21 @@ from pathlib import Path
 import pytest
 import yaml
 
+import src.config.loader as config_loader
 from src.config.loader import (
     load_config,
     _interpolate_env_vars,
     _validate_config,
     Config
 )
+
+
+@pytest.fixture(autouse=True)
+def clear_config_cache():
+    """Clear config cache before each test to ensure isolation"""
+    config_loader._cached_config = None
+    yield
+    config_loader._cached_config = None
 
 
 class TestConfigModel:

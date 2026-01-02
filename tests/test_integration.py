@@ -118,7 +118,7 @@ def full_config():
 
 @pytest.fixture
 def sample_market_data():
-    """Generate realistic market data"""
+    """Generate realistic market data as Dict[str, DataFrame] for backtest API"""
     dates = pd.date_range(
         start=datetime.now() - timedelta(days=180),
         periods=5000,
@@ -146,11 +146,13 @@ def sample_market_data():
         'volume': volume
     })
 
-    return df
+    # Return as dict for new backtest API
+    return {'BTC': df}
 
 
 class MockGeneratedStrategy(StrategyCore):
     """Mock generated strategy for testing"""
+    indicator_columns = []
 
     def __init__(self, strategy_id: str, quality: str = 'good'):
         self.strategy_id = strategy_id
@@ -158,6 +160,9 @@ class MockGeneratedStrategy(StrategyCore):
         self.timeframe = '15m'
         self.symbol = 'BTC/USDT'
         self.quality = quality
+
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        return df.copy()
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
         if len(df) < 50:
@@ -211,11 +216,9 @@ class TestGenerationToBacktestWorkflow:
 
         for strategy in strategies:
             try:
-                results = engine.run_backtest(
+                results = engine.backtest(
                     strategy=strategy,
-                    data=sample_market_data,
-                    initial_capital=full_config['backtester']['initial_capital'],
-                    fees=full_config['backtester']['fees']
+                    data=sample_market_data
                 )
 
                 backtest_results.append({
@@ -464,10 +467,9 @@ class TestDataFlowBetweenModules:
 
         # 2. Backtest
         engine = VectorBTEngine()
-        backtest_results = engine.run_backtest(
+        backtest_results = engine.backtest(
             strategy=strategy,
-            data=sample_market_data,
-            initial_capital=10000
+            data=sample_market_data
         )
 
         # 3. Create strategy record
@@ -497,6 +499,11 @@ class TestSystemResilience:
         """Test system handles backtest failures gracefully"""
         # Strategy that will fail
         class FailingStrategy(StrategyCore):
+            indicator_columns = []
+
+            def calculate_indicators(self, df):
+                return df.copy()
+
             def generate_signal(self, df, symbol=None):
                 raise Exception("Intentional failure")
 
@@ -515,6 +522,11 @@ class TestSystemResilience:
     def test_handles_empty_signal_stream(self, full_config, sample_market_data):
         """Test system handles strategies that produce no signals"""
         class NoSignalStrategy(StrategyCore):
+            indicator_columns = []
+
+            def calculate_indicators(self, df):
+                return df.copy()
+
             def generate_signal(self, df, symbol=None):
                 return None  # Never signals
 
@@ -524,7 +536,7 @@ class TestSystemResilience:
         engine = VectorBTEngine()
 
         # Should complete without errors
-        results = engine.run_backtest(strategy, sample_market_data, 10000)
+        results = engine.backtest(strategy, sample_market_data)
 
         # Should have 0 trades
         assert results.get('total_trades', 0) == 0

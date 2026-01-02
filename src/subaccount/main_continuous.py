@@ -23,7 +23,7 @@ from src.utils import get_logger, setup_logging
 # Initialize logging at module load
 _config = load_config()._raw_config
 setup_logging(
-    log_file=_config.get('logging', {}).get('file', 'logs/sixbtc.log'),
+    log_file='logs/subaccount.log',
     log_level=_config.get('logging', {}).get('level', 'INFO'),
 )
 

@@ -81,6 +81,10 @@ import pandas as pd
 
 class Strategy_MOM_test123(StrategyCore):
     leverage = 5
+    indicator_columns = []
+
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        return df.copy()
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
         return None

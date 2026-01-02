@@ -432,20 +432,28 @@ class TestDryRunErrorHandling:
     def test_invalid_signal_rejected(self, mock_config):
         """Test invalid signals are rejected gracefully"""
         risk_manager = RiskManager(config=mock_config)
-
-        # Signal with invalid stop loss (> entry price for long)
-        invalid_signal = Signal(
-            direction='long',
-            stop_loss=60000.0,  # Invalid: stop > entry
-            take_profit=55000.0,
-            confidence=1.0,
-            reason="Invalid signal"
-        )
-
         current_price = 50000.0
 
-        # Should reject invalid signal
-        is_valid = risk_manager.validate_signal(invalid_signal, current_price)
+        # Test 1: Invalid direction
+        invalid_direction_signal = Mock()
+        invalid_direction_signal.direction = 'invalid_direction'
+
+        is_valid = risk_manager.validate_signal(invalid_direction_signal, current_price)
+        assert is_valid is False
+
+        # Test 2: Missing direction attribute
+        signal_no_direction = Mock(spec=[])  # Empty spec = no attributes
+        is_valid = risk_manager.validate_signal(signal_no_direction, current_price)
+        assert is_valid is False
+
+        # Test 3: Signal with stop_loss > entry (invalid for long)
+        # Using mock to test the legacy validation path
+        invalid_sl_signal = Mock()
+        invalid_sl_signal.direction = 'long'
+        invalid_sl_signal.stop_loss = 60000.0  # Above entry (50000) - invalid for long
+        invalid_sl_signal.take_profit = 55000.0
+
+        is_valid = risk_manager.validate_signal(invalid_sl_signal, current_price)
         assert is_valid is False
 
     def test_zero_size_position_rejected(self, mock_config):

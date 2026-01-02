@@ -100,6 +100,10 @@ def simple_strategy():
     """Simple RSI strategy for testing"""
     class TestStrategy(StrategyCore):
         """Test strategy that generates a long signal"""
+        indicator_columns = []
+
+        def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+            return df.copy()
 
         def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
             if len(df) < 20:

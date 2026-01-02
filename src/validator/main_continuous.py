@@ -31,7 +31,7 @@ from src.utils import get_logger, setup_logging
 # Initialize logging at module load
 _config = load_config()._raw_config
 setup_logging(
-    log_file=_config.get('logging', {}).get('file', 'logs/sixbtc.log'),
+    log_file='logs/validator.log',
     log_level=_config.get('logging', {}).get('level', 'INFO'),
 )
 
@@ -57,6 +57,19 @@ class ContinuousValidatorProcess:
         validation_config = self.config.get('validation', {})
         self.parallel_threads = validation_config.get('parallel_threads', 5)
 
+        # Pipeline backpressure configuration (downstream = VALIDATED queue)
+        pipeline_config = self.config.get('pipeline', {})
+        queue_limits = pipeline_config.get('queue_limits', {})
+        backpressure_config = pipeline_config.get('backpressure', {})
+        monitoring_config = pipeline_config.get('monitoring', {})
+
+        self.validated_limit = queue_limits.get('validated', 50)
+        self.base_cooldown = backpressure_config.get('base_cooldown', 30)
+        self.max_cooldown = backpressure_config.get('max_cooldown', 120)
+        self.cooldown_increment = backpressure_config.get('cooldown_increment', 2)
+        self.log_interval = monitoring_config.get('log_interval', 30)
+        self._last_log_time = datetime.min
+
         # ThreadPoolExecutor for parallel validation
         self.executor = ThreadPoolExecutor(
             max_workers=self.parallel_threads,
@@ -79,7 +92,8 @@ class ContinuousValidatorProcess:
         self._test_data: Optional[pd.DataFrame] = None
 
         logger.info(
-            f"ContinuousValidatorProcess initialized: {self.parallel_threads} threads"
+            f"ContinuousValidatorProcess initialized: {self.parallel_threads} threads, "
+            f"downstream limit {self.validated_limit} VALIDATED"
         )
 
     @property
@@ -93,21 +107,83 @@ class ContinuousValidatorProcess:
         """Load test data for validation"""
         try:
             from src.backtester.data_loader import BacktestDataLoader
-            # BacktestDataLoader expects cache_dir string, not config dict
-            cache_dir = self.config.get('directories', {}).get('data', 'data/binance')
+            # BacktestDataLoader expects cache_dir string - use data.cache_dir where Binance data is stored
+            cache_dir = self.config.get('data', {}).get('cache_dir', 'data/binance')
             loader = BacktestDataLoader(cache_dir=cache_dir)
             data = loader.load_single_symbol('BTC', '15m', days=30)
             logger.info(f"Loaded {len(data)} bars of BTC 15m test data")
             return data
         except Exception as e:
-            logger.warning(f"Failed to load test data: {e}, using synthetic")
+            # Use DEBUG for expected fallback to synthetic data
+            logger.debug(f"No cached data available ({e}), using synthetic test data")
             return self.execution_validator._generate_test_data(500)
 
+    def _log_pipeline_status(self):
+        """Log pipeline status periodically for monitoring"""
+        now = datetime.now()
+        if (now - self._last_log_time).total_seconds() < self.log_interval:
+            return
+
+        try:
+            depths = self.processor.get_queue_depths()
+            logger.info(
+                f"Pipeline: GEN={depths.get('GENERATED', 0)} "
+                f"VAL={depths.get('VALIDATED', 0)}/{self.validated_limit} "
+                f"TST={depths.get('TESTED', 0)} LIVE={depths.get('LIVE', 0)}"
+            )
+            self._last_log_time = now
+        except Exception as e:
+            logger.debug(f"Failed to log pipeline status: {e}")
+
     async def run_continuous(self):
-        """Main continuous validation loop"""
-        logger.info("Starting continuous validation loop")
+        """Main continuous validation loop with downstream backpressure"""
+        logger.info("Starting continuous validation loop (with downstream backpressure)")
 
         while not self.shutdown_event.is_set() and not self.force_exit:
+            # Log pipeline status periodically
+            self._log_pipeline_status()
+
+            # Process completed validations first (free up slots)
+            done_futures = []
+            for f in list(self.active_futures.keys()):
+                if f.done():
+                    done_futures.append(f)
+
+            for future in done_futures:
+                strategy_id = self.active_futures.pop(future)
+                try:
+                    success, reason = future.result()
+                    if success:
+                        logger.info(f"Strategy {strategy_id} VALIDATED")
+                    else:
+                        logger.info(f"Strategy {strategy_id} FAILED: {reason}")
+                except Exception as e:
+                    logger.error(f"Validation error for {strategy_id}: {e}")
+
+            # Check downstream backpressure (VALIDATED queue)
+            validated_count = self.processor.count_available("VALIDATED")
+            if validated_count >= self.validated_limit:
+                cooldown = self.processor.calculate_backpressure_cooldown(
+                    validated_count,
+                    self.validated_limit,
+                    self.base_cooldown,
+                    self.cooldown_increment,
+                    self.max_cooldown
+                )
+                logger.info(
+                    f"Downstream backpressure: {validated_count} VALIDATED "
+                    f"(limit {self.validated_limit}), waiting {cooldown}s"
+                )
+                await asyncio.sleep(cooldown)
+                continue
+
+            # Only claim new strategies if we have free worker slots
+            # This prevents claiming more strategies than we can process
+            if len(self.active_futures) >= self.parallel_threads:
+                # All workers busy, wait before checking again
+                await asyncio.sleep(1)
+                continue
+
             # Claim a strategy for validation
             strategy = self.processor.claim_strategy("GENERATED")
 
@@ -124,23 +200,6 @@ class ContinuousValidatorProcess:
                 strategy.code
             )
             self.active_futures[future] = str(strategy.id)
-
-            # Process completed validations
-            done_futures = []
-            for f in list(self.active_futures.keys()):
-                if f.done():
-                    done_futures.append(f)
-
-            for future in done_futures:
-                strategy_id = self.active_futures.pop(future)
-                try:
-                    success, reason = future.result()
-                    if success:
-                        logger.info(f"Strategy {strategy_id} VALIDATED")
-                    else:
-                        logger.info(f"Strategy {strategy_id} FAILED: {reason}")
-                except Exception as e:
-                    logger.error(f"Validation error for {strategy_id}: {e}")
 
             await asyncio.sleep(0.1)
 

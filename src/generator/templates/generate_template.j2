@@ -213,6 +213,15 @@ ALLOWED patterns:
 
 === CODE TEMPLATE ===
 
+IMPORTANT: The strategy uses a TWO-PHASE approach:
+1. calculate_indicators(df) - Pre-calculate ALL indicators ONCE
+2. generate_signal(df) - Read pre-calculated values and generate signal
+
+This enables:
+- O(n) instead of O(n^2) indicator calculation in backtests
+- Freqtrade-style lookahead bias detection
+- Potential Numba optimization
+
 ```python
 import pandas as pd
 import numpy as np
@@ -263,30 +272,59 @@ class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
 
     leverage = {{ "__LEVERAGE__" }}  # Will be replaced by system
 
+    # Indicator columns added by calculate_indicators()
+    # Used for lookahead bias detection
+    indicator_columns = ['atr']  # ADD YOUR INDICATOR NAMES HERE
+
     def __init__(self, params: dict = None):
         super().__init__(params)
 
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Pre-calculate ALL indicators on the dataframe.
+
+        This method is called ONCE before signal generation. All indicator
+        calculations should happen here, not in generate_signal().
+
+        IMPORTANT:
+        - Always return df.copy() to avoid modifying the original
+        - Use only lookback operations (no center=True, no shift(-N))
+        - Update indicator_columns with all column names you add
+        """
+        df = df.copy()
+
+        # ATR for stop loss calculation (always needed)
+        df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+
+        # YOUR INDICATOR CALCULATIONS HERE
+        # Example: df['rsi'] = ta.RSI(df['close'], timeperiod={{ "{{ indicator_period }}" }})
+
+        return df
+
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
+        """
+        Generate signal from DataFrame with pre-calculated indicators.
+
+        IMPORTANT: DO NOT calculate indicators here - they are already in df.
+        Only read values using iloc[-1] and apply entry/exit logic.
+        """
         min_bars = 100
         if len(df) < min_bars:
             return None
 
         # ============================================
-        # CALCULATE INDICATORS
-        # Use parameterized periods: {{ "{{ indicator_period }}" }}
+        # READ PRE-CALCULATED INDICATOR VALUES
+        # Use iloc[-1] to get current bar values
         # ============================================
 
         current_price = df['close'].iloc[-1]
-
-        # ATR for stop loss calculation
-        atr = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-        current_atr = atr.iloc[-1]
+        current_atr = df['atr'].iloc[-1]
 
         if pd.isna(current_atr) or current_atr <= 0:
             return None
 
-        # YOUR INDICATOR CALCULATIONS HERE
-        # Example: rsi = ta.RSI(df['close'], timeperiod={{ "{{ indicator_period }}" }})
+        # YOUR INDICATOR VALUE READS HERE
+        # Example: current_rsi = df['rsi'].iloc[-1]
 
         # ============================================
 {% if structure.exit_indicator %}
@@ -458,6 +496,9 @@ Before generating, verify:
 [ ] Parameter schema matches placeholders in code (NO leverage!)
 [ ] 50-200 total parameter combinations
 [ ] leverage = {{ "__LEVERAGE__" }} is in class body (will be replaced by system)
+[ ] TWO-PHASE APPROACH: calculate_indicators() pre-calculates ALL indicators
+[ ] generate_signal() ONLY reads pre-calculated values (no ta.XXX calls!)
+[ ] indicator_columns class attribute lists all indicator column names
 
 Generate the complete parameterized template now.
 

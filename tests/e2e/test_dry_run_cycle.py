@@ -25,10 +25,15 @@ from mocks.mock_hyperliquid import MockHyperliquidClient
 
 class MockStrategy(StrategyCore):
     """Mock strategy that generates signals for testing"""
+    indicator_columns = []
+
     def __init__(self, strategy_id: str, params=None):
         super().__init__(params)
         self.strategy_id = strategy_id
         self.signal_count = 0
+
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        return df.copy()
 
     def generate_signal(self, df: pd.DataFrame) -> Signal | None:
         if len(df) < 20:

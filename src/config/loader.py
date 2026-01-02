@@ -267,12 +267,7 @@ def _validate_config(config: Config) -> None:
             f"['sync', 'async', 'multiprocess', 'hybrid'], got '{exec_mode}'"
         )
 
-    # Success
-    print(f"✓ Configuration loaded and validated successfully")
-    print(f"  - Timeframes: {timeframes}")
-    print(f"  - Risk mode: {sizing_mode}")
-    print(f"  - Execution mode: {exec_mode}")
-    print(f"  - Database: {db_host}:{db_port}/{db_name}")
+    # Validation passed - logging handled by caller
 
 
 # Convenience function for quick testing

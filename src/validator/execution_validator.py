@@ -214,6 +214,8 @@ class ExecutionValidator:
         """
         Test generate_signal on data.
 
+        Uses two-phase approach: calculate_indicators() then generate_signal().
+
         Returns:
             Tuple of (signal_count, errors)
         """
@@ -230,7 +232,11 @@ class ExecutionValidator:
             df_slice = data.iloc[:i+1].copy()
 
             try:
-                signal = strategy.generate_signal(df_slice)
+                # Phase 1: Calculate indicators (required before generate_signal)
+                df_with_indicators = strategy.calculate_indicators(df_slice)
+
+                # Phase 2: Generate signal from pre-calculated indicators
+                signal = strategy.generate_signal(df_with_indicators)
 
                 # Validate signal format
                 if signal is not None:
@@ -255,6 +261,8 @@ class ExecutionValidator:
         """
         Test strategy on edge case data.
 
+        Uses two-phase approach: calculate_indicators() then generate_signal().
+
         Returns:
             List of warnings (not errors)
         """
@@ -265,7 +273,9 @@ class ExecutionValidator:
 
             try:
                 if size > 0:
-                    signal = strategy.generate_signal(data)
+                    # Two-phase approach
+                    df_with_indicators = strategy.calculate_indicators(data)
+                    signal = strategy.generate_signal(df_with_indicators)
                     # Edge case handling is OK as long as it doesn't crash
             except Exception as e:
                 warnings.append(

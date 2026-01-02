@@ -10,12 +10,110 @@ import ast
 import numpy as np
 import pandas as pd
 import scipy.stats
+from numba import jit
 from typing import Dict, List, Tuple, Optional
 
 from src.strategies.base import StrategyCore
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# =============================================================================
+# NUMBA JIT-COMPILED FUNCTIONS
+# =============================================================================
+
+@jit(nopython=True, cache=True)
+def _calculate_edge_numba(
+    signals: np.ndarray,
+    entry_prices: np.ndarray,
+    entry_indices: np.ndarray,
+    close_prices: np.ndarray,
+    exit_bars: int = 10
+) -> float:
+    """
+    JIT-compiled edge calculation.
+
+    Args:
+        signals: Array of signal directions (1=long, -1=short)
+        entry_prices: Array of entry prices
+        entry_indices: Array of bar indices where entries occurred
+        close_prices: Full price series
+        exit_bars: Number of bars to hold position (default 10)
+
+    Returns:
+        Average return per trade
+    """
+    n_signals = len(signals)
+    if n_signals == 0:
+        return 0.0
+
+    n_bars = len(close_prices)
+    total_return = 0.0
+
+    for i in range(n_signals):
+        signal = signals[i]
+        entry_price = entry_prices[i]
+        entry_idx = entry_indices[i]
+
+        # Exit after exit_bars or at end of data
+        exit_idx = min(entry_idx + exit_bars, n_bars - 1)
+        exit_price = close_prices[exit_idx]
+
+        # Calculate return
+        if signal == 1:  # Long
+            ret = (exit_price - entry_price) / entry_price
+        else:  # Short
+            ret = (entry_price - exit_price) / entry_price
+
+        total_return += ret
+
+    return total_return / n_signals
+
+
+@jit(nopython=True, cache=True)
+def _run_shuffle_iterations_numba(
+    signals: np.ndarray,
+    entry_prices: np.ndarray,
+    entry_indices: np.ndarray,
+    close_prices: np.ndarray,
+    n_iterations: int,
+    exit_bars: int = 10
+) -> np.ndarray:
+    """
+    JIT-compiled shuffle test iterations.
+
+    Runs multiple shuffle iterations efficiently in Numba.
+
+    Args:
+        signals: Original signals array
+        entry_prices: Entry prices array
+        entry_indices: Entry bar indices array
+        close_prices: Full price series
+        n_iterations: Number of shuffle iterations
+        exit_bars: Number of bars to hold position
+
+    Returns:
+        Array of shuffled edge values
+    """
+    n_signals = len(signals)
+    shuffled_edges = np.empty(n_iterations, dtype=np.float64)
+
+    # Work with a copy for shuffling
+    shuffled_signals = signals.copy()
+
+    for iteration in range(n_iterations):
+        # Fisher-Yates shuffle
+        for i in range(n_signals - 1, 0, -1):
+            j = np.random.randint(0, i + 1)
+            shuffled_signals[i], shuffled_signals[j] = shuffled_signals[j], shuffled_signals[i]
+
+        # Calculate edge with shuffled signals
+        shuffled_edges[iteration] = _calculate_edge_numba(
+            shuffled_signals, entry_prices, entry_indices, close_prices, exit_bars
+        )
+
+    return shuffled_edges
 
 
 class LookaheadValidator:
@@ -187,6 +285,8 @@ class LookaheadValidator:
         """
         Empirical shuffle test for lookahead bias
 
+        Uses Numba JIT-compiled functions for fast shuffle iterations.
+
         Logic:
         1. Generate signals for entire dataset (real order)
         2. Calculate real edge (expectancy)
@@ -207,45 +307,55 @@ class LookaheadValidator:
         """
         logger.debug(f"  Generating signals for {len(data)} candles...")
 
-        # Generate real signals
+        # Pre-calculate indicators ONCE on full data (two-phase approach)
+        try:
+            data_with_indicators = strategy.calculate_indicators(data)
+        except Exception as e:
+            logger.warning(f"  Failed to calculate indicators: {e}")
+            data_with_indicators = data
+
+        # Generate real signals and capture bar indices
         real_signals = []
         real_prices = []
+        entry_indices = []
 
-        for i in range(len(data)):
-            df_slice = data.iloc[:i+1].copy()
-            signal = strategy.generate_signal(df_slice)
+        for i in range(len(data_with_indicators)):
+            df_slice = data_with_indicators.iloc[:i+1].copy()
+            try:
+                signal = strategy.generate_signal(df_slice)
+            except Exception:
+                continue  # Skip bars where signal generation fails
 
             if signal and signal.direction in ['long', 'short']:
                 real_signals.append(1 if signal.direction == 'long' else -1)
-                real_prices.append(data['close'].iloc[i])
+                real_prices.append(data_with_indicators['close'].iloc[i])
+                entry_indices.append(i)  # Capture bar index directly
 
         if len(real_signals) < 10:
             logger.warning("  Too few signals for shuffle test (<10)")
             return (1.0, False)
 
-        # Calculate real edge
-        real_edge = self._calculate_simple_edge(real_signals, real_prices, data['close'])
+        # Convert to NumPy arrays for Numba
+        signals_arr = np.array(real_signals, dtype=np.int64)
+        prices_arr = np.array(real_prices, dtype=np.float64)
+        indices_arr = np.array(entry_indices, dtype=np.int64)
+        close_arr = data_with_indicators['close'].values.astype(np.float64)
+
+        # Calculate real edge using Numba
+        real_edge = _calculate_edge_numba(
+            signals_arr, prices_arr, indices_arr, close_arr, 10
+        )
 
         logger.debug(f"  Real edge: {real_edge:.4f} ({len(real_signals)} signals)")
 
-        # Shuffle test
+        # Run shuffle iterations using Numba (all in one call)
         logger.debug(f"  Running {n_iterations} shuffle iterations...")
 
-        shuffled_edges = []
-        for _ in range(n_iterations):
-            # Shuffle signals (breaks temporal relationship)
-            shuffled_signals = np.random.permutation(real_signals)
-
-            # Calculate edge with shuffled signals
-            shuffled_edge = self._calculate_simple_edge(
-                shuffled_signals,
-                real_prices,
-                data['close']
-            )
-            shuffled_edges.append(shuffled_edge)
+        shuffled_edges = _run_shuffle_iterations_numba(
+            signals_arr, prices_arr, indices_arr, close_arr, n_iterations, 10
+        )
 
         # Calculate p-value
-        shuffled_edges = np.array(shuffled_edges)
         mean_shuffled = np.mean(shuffled_edges)
         std_shuffled = np.std(shuffled_edges)
 
@@ -274,15 +384,20 @@ class LookaheadValidator:
         self,
         signals: List[int],
         entry_prices: List[float],
-        price_series: pd.Series
+        price_series: pd.Series,
+        entry_indices: Optional[List[int]] = None
     ) -> float:
         """
-        Calculate simple edge (expectancy) from signals
+        Calculate simple edge (expectancy) from signals.
+
+        Note: This method is kept for backward compatibility.
+        Internal shuffle test uses Numba-optimized _calculate_edge_numba() directly.
 
         Args:
             signals: List of signal directions (1=long, -1=short)
             entry_prices: List of entry prices (aligned with signals)
             price_series: Full price series for exits
+            entry_indices: Optional pre-computed entry bar indices
 
         Returns:
             Average return per trade
@@ -290,6 +405,15 @@ class LookaheadValidator:
         if len(signals) == 0:
             return 0.0
 
+        # If entry indices provided, use Numba path
+        if entry_indices is not None:
+            signals_arr = np.array(signals, dtype=np.int64)
+            prices_arr = np.array(entry_prices, dtype=np.float64)
+            indices_arr = np.array(entry_indices, dtype=np.int64)
+            close_arr = price_series.values.astype(np.float64)
+            return _calculate_edge_numba(signals_arr, prices_arr, indices_arr, close_arr, 10)
+
+        # Fallback: Python implementation for backward compatibility
         returns = []
 
         for i, (signal, entry_price) in enumerate(zip(signals, entry_prices)):

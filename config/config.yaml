@@ -22,7 +22,6 @@ timeframes: ['15m', '30m', '1h', '4h', '1d']
 # DIRECTORIES
 # ==============================================================================
 directories:
-  strategies: strategies
   data: data
 
 # ==============================================================================
@@ -129,12 +128,30 @@ ai:
 generation:
   min_interval_seconds: 0      # Min seconds between AI calls
   parallel_threads: 1
-  # Backpressure: pause generation when pending queue exceeds this limit
-  max_pending_queue: 500       # Pause if >500 strategies waiting for backtest
-  backpressure_check_interval: 60  # Seconds between backpressure checks
   # NOTE: Each template generates ALL parametric variations (no AI cost)
-  # Flow control is handled by backpressure, not daily limits
+  # Flow control is handled by pipeline backpressure below
   # Leverage is read from DB (coins.max_leverage), not configured here
+
+# ==============================================================================
+# PIPELINE FLOW CONTROL (Multi-Level Backpressure System)
+# ==============================================================================
+# Prevents queue overflow by limiting strategies at each stage.
+# Each module checks its downstream queue before processing.
+# System self-regulates: slow backtester -> queues fill -> upstream pauses
+pipeline:
+  queue_limits:
+    generated: 100      # Max GENERATED strategies waiting for validation
+    validated: 50       # Max VALIDATED strategies waiting for backtest
+    tested: 30          # Max TESTED strategies waiting for classification
+
+  backpressure:
+    check_interval: 10        # Seconds between backpressure checks
+    base_cooldown: 30         # Base cooldown when backpressure triggers
+    max_cooldown: 120         # Maximum cooldown (2 minutes)
+    cooldown_increment: 2     # Extra seconds per strategy over limit
+
+  monitoring:
+    log_interval: 30          # Log pipeline status every N seconds
 
 # ==============================================================================
 # PATTERN DISCOVERY (External API)
@@ -143,6 +160,19 @@ pattern_discovery:
   api_url: http://localhost:8001
   tier_filter: 1               # Only use Tier 1 validated patterns
   min_quality_score: 0.75      # Minimum pattern quality score
+
+  # Coin selection from pattern's coin_performance
+  coin_selection:
+    min_edge: 0.10             # 10% minimum edge to include coin
+    min_signals: 50            # Minimum signals for statistical reliability
+    max_coins: 30              # Max coins to select per pattern
+    min_tradable_coins: 5      # Minimum validated coins required (NO fallback if fewer)
+
+  # Multi-target expansion: one pattern with N Tier 1 targets -> N strategies
+  multi_target:
+    enabled: true              # Enable multi-target expansion
+    min_edge_for_expansion: 0.05  # 5% min edge per target to expand
+    max_targets_per_pattern: 5    # Limit expansion per pattern
 
 # ==============================================================================
 # VALIDATION (Strategy Code Validation)
@@ -167,8 +197,8 @@ backtesting:
 
   # Holdout validation thresholds
   holdout:
-    max_degradation: 0.50    # Max 50% worse than training = overfitted
-    min_sharpe: 0.3          # Minimum Sharpe on holdout (can be lower than training)
+    max_degradation: 0.30    # Max 30% worse than training = overfitted
+    min_sharpe: 0.5          # Minimum Sharpe on holdout (recent performance matters)
     recency_weight: 0.60     # Weight for holdout score in final ranking
 
   # Minimum thresholds (gate check - classifier does the real ranking)

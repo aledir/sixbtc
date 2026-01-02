@@ -62,13 +62,24 @@ def sample_ohlcv():
 def mock_strategy():
     """Simple test strategy for testing"""
     class MockStrategy(StrategyCore):
-        def generate_signal(self, df: pd.DataFrame) -> Signal | None:
+        indicator_columns = ['sma_fast', 'sma_slow']
+
+        def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+            df = df.copy()
+            df['sma_fast'] = df['close'].rolling(10).mean()
+            df['sma_slow'] = df['close'].rolling(20).mean()
+            return df
+
+        def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
             if len(df) < 20:
                 return None
 
-            # Simple SMA crossover
-            sma_fast = df['close'].rolling(10).mean().iloc[-1]
-            sma_slow = df['close'].rolling(20).mean().iloc[-1]
+            # Simple SMA crossover using pre-calculated indicators
+            sma_fast = df['sma_fast'].iloc[-1]
+            sma_slow = df['sma_slow'].iloc[-1]
+
+            if pd.isna(sma_fast) or pd.isna(sma_slow):
+                return None
 
             if sma_fast > sma_slow:
                 return Signal(
@@ -243,13 +254,23 @@ from src.strategies.base import StrategyCore, Signal
 
 class Strategy_MOM_test123(StrategyCore):
     """Test momentum strategy"""
+    indicator_columns = ['sma_fast', 'sma_slow']
 
-    def generate_signal(self, df: pd.DataFrame) -> Signal | None:
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df['sma_fast'] = df['close'].rolling(10).mean()
+        df['sma_slow'] = df['close'].rolling(20).mean()
+        return df
+
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
         if len(df) < 20:
             return None
 
-        sma_fast = df['close'].rolling(10).mean().iloc[-1]
-        sma_slow = df['close'].rolling(20).mean().iloc[-1]
+        sma_fast = df['sma_fast'].iloc[-1]
+        sma_slow = df['sma_slow'].iloc[-1]
+
+        if pd.isna(sma_fast) or pd.isna(sma_slow):
+            return None
 
         if sma_fast > sma_slow:
             return Signal(

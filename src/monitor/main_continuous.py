@@ -27,7 +27,7 @@ from src.utils import get_logger, setup_logging
 # Initialize logging at module load
 _config = load_config()._raw_config
 setup_logging(
-    log_file=_config.get('logging', {}).get('file', 'logs/sixbtc.log'),
+    log_file='logs/monitor.log',
     log_level=_config.get('logging', {}).get('level', 'INFO'),
 )
 
@@ -169,9 +169,10 @@ class ContinuousMonitorProcess:
     def _check_database(self) -> Dict:
         """Check database connectivity"""
         try:
+            from sqlalchemy import text
             with get_session() as session:
                 # Simple query to test connection
-                session.execute("SELECT 1")
+                session.execute(text("SELECT 1"))
 
             return {'healthy': True, 'error': None}
 
