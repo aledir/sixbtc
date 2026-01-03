@@ -121,7 +121,7 @@ class PortfolioBuilder:
                 strategy.get('score', 0) >= self.min_score and
                 sharpe >= self.min_sharpe and
                 win_rate >= self.min_win_rate and
-                strategy.get('shuffle_p_value', 0.0) < 0.05  # Default to 0.0 (pass if missing)
+                strategy.get('shuffle_p_value', 1.0) < 0.05  # Default to 1.0 (fail if missing)
             ):
                 eligible.append(strategy)
 

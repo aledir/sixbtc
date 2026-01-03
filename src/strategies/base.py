@@ -321,9 +321,31 @@ class StrategyCore(ABC):
                 return None
     """
 
-    # Target leverage - override in subclass
-    # Actual leverage = min(this value, coin's max_leverage from DB)
+    # =========================================================================
+    # STRATEGY PARAMETERS (read by backtester for vectorized execution)
+    # =========================================================================
+    # These are class attributes that define the strategy's behavior.
+    # The backtester reads these directly instead of calling generate_signal().
+    # Override in subclass.
+
+    # Direction: 'long' or 'short'
+    direction: str = 'long'
+
+    # Stop loss percentage (e.g., 0.02 = 2%)
+    sl_pct: float = 0.02
+
+    # Take profit percentage (e.g., 0.03 = 3%)
+    tp_pct: float = 0.03
+
+    # Target leverage (capped at coin's max_leverage from DB)
     leverage: int = 1
+
+    # Exit after N bars (time-based exit)
+    exit_after_bars: int = 20
+
+    # Column name for entry signals in calculate_indicators()
+    # Must be a boolean Series
+    signal_column: str = 'entry_signal'
 
     # Indicator column names added by calculate_indicators()
     # Used for lookahead bias detection
@@ -461,22 +483,18 @@ class StrategyCore(ABC):
             # Pass truncated view (indicators already calculated)
             df_slice = df_with_indicators.iloc[:i + 1]
 
-            try:
-                signal = self.generate_signal(df_slice)
+            signal = self.generate_signal(df_slice)
 
-                if signal is not None:
-                    if signal.direction == 'long':
-                        signals[i] = 1
-                    elif signal.direction == 'short':
-                        signals[i] = -1
-                    else:
-                        signals[i] = 0
+            if signal is not None:
+                if signal.direction == 'long':
+                    signals[i] = 1
+                elif signal.direction == 'short':
+                    signals[i] = -1
+                else:
+                    signals[i] = 0
 
-                    sl_types[i] = signal.sl_type.value if signal.sl_type else ''
-                    tp_types[i] = signal.tp_type.value if signal.tp_type else ''
-
-            except Exception:
-                continue
+                sl_types[i] = signal.sl_type.value if signal.sl_type else ''
+                tp_types[i] = signal.tp_type.value if signal.tp_type else ''
 
         return pd.DataFrame({
             'signal': signals,

@@ -340,13 +340,38 @@ def update_pairs(n_pairs: Optional[int] = None) -> List[Dict[str, Any]]:
 
 def get_current_pairs() -> List[str]:
     """
-    Convenience function to get current pair whitelist.
+    Get current pair whitelist directly from database.
+
+    This is a lightweight function that queries the DB directly
+    without instantiating PairsUpdater.
 
     Returns:
-        List of symbol names
+        List of active symbol names ordered by volume
     """
-    updater = PairsUpdater()
-    return updater.get_pair_whitelist()
+    with get_session() as session:
+        coins = session.query(Coin.symbol).filter(
+            Coin.is_active == True
+        ).order_by(Coin.volume_24h.desc()).all()
+
+        return [c.symbol for c in coins]
+
+
+def get_coins_last_updated() -> Optional[datetime]:
+    """
+    Get the most recent updated_at timestamp from coins table.
+
+    Used for cache invalidation - if DB was updated after cache was loaded,
+    the cache should be refreshed.
+
+    Returns:
+        Most recent updated_at datetime, or None if no coins
+    """
+    with get_session() as session:
+        result = session.query(Coin.updated_at).order_by(
+            Coin.updated_at.desc()
+        ).first()
+
+        return result.updated_at if result else None
 
 
 def get_coin_max_leverage(symbol: str) -> int:

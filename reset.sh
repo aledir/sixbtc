@@ -6,8 +6,11 @@ set -e
 
 echo "Resetting SixBTC..."
 
-# Clear logs
+# Clear logs and recreate with correct permissions
 rm -f logs/*.log logs/*.log.* 2>/dev/null || true
+touch logs/generator.log logs/validator.log logs/backtester.log logs/classifier.log \
+      logs/executor.log logs/subaccount.log logs/monitor.log logs/scheduler.log \
+      logs/api.log logs/frontend.log
 echo "- Logs cleared"
 
 # Clear pending strategies

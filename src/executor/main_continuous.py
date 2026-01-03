@@ -26,10 +26,10 @@ from src.strategies.base import StrategyCore, Signal, StopLossType, ExitType
 from src.utils import get_logger, setup_logging
 
 # Initialize logging at module load
-_config = load_config()._raw_config
+_config = load_config()
 setup_logging(
     log_file='logs/executor.log',
-    log_level=_config.get('logging', {}).get('level', 'INFO'),
+    log_level=_config.get_required('logging.level'),
 )
 
 logger = get_logger(__name__)
@@ -42,20 +42,31 @@ class ContinuousExecutorProcess:
     Monitors market data and executes signals for live strategies.
     """
 
-    def __init__(self):
-        """Initialize the executor process"""
-        self.config = load_config()._raw_config
+    def __init__(
+        self,
+        client: Optional[HyperliquidClient] = None,
+        risk_manager: Optional[RiskManager] = None,
+        trailing_service: Optional[TrailingService] = None
+    ):
+        """
+        Initialize the executor process with dependency injection.
+
+        Args:
+            client: HyperliquidClient instance (created if not provided)
+            risk_manager: RiskManager instance (created if not provided)
+            trailing_service: TrailingService instance (created if not provided)
+        """
+        self.config = load_config()
         self.shutdown_event = threading.Event()
         self.force_exit = False
 
-        # Process configuration (from subaccount_manager section for dry_run)
-        subaccount_config = self.config.get('subaccount_manager', {})
-        self.dry_run = subaccount_config.get('dry_run', True)
+        # Process configuration - NO defaults (Fast Fail principle)
+        self.dry_run = self.config.get_required('subaccount_manager.dry_run')
 
-        # Components
-        self.client = HyperliquidClient(self.config, dry_run=self.dry_run)
-        self.risk_manager = RiskManager(self.config)
-        self.trailing_service = TrailingService(self.client, self.config)
+        # Components - use injected or create new (Dependency Injection pattern)
+        self.client = client or HyperliquidClient(self.config._raw_config, dry_run=self.dry_run)
+        self.risk_manager = risk_manager or RiskManager(self.config._raw_config)
+        self.trailing_service = trailing_service or TrailingService(self.client, self.config._raw_config)
 
         # Load trading pairs (multi-coin support)
         self.trading_pairs = self._load_trading_pairs()
@@ -69,8 +80,8 @@ class ContinuousExecutorProcess:
         # key = "symbol:subaccount_id" -> {'entry_time': datetime, 'exit_after_bars': int, 'timeframe': str}
         self._time_exit_tracking: Dict[str, Dict] = {}
 
-        # Check interval
-        self.check_interval_seconds = 15  # Check every 15 seconds
+        # Check interval - from config (NO hardcoding)
+        self.check_interval_seconds = self.config.get_required('executor.check_interval_seconds')
 
         logger.info(
             f"ContinuousExecutorProcess initialized: dry_run={self.dry_run}, "

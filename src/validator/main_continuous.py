@@ -29,10 +29,10 @@ from src.validator.execution_validator import ExecutionValidator
 from src.utils import get_logger, setup_logging
 
 # Initialize logging at module load
-_config = load_config()._raw_config
+_config = load_config()
 setup_logging(
     log_file='logs/validator.log',
-    log_level=_config.get('logging', {}).get('level', 'INFO'),
+    log_level=_config.get_required('logging.level'),
 )
 
 logger = get_logger(__name__)
@@ -47,27 +47,37 @@ class ContinuousValidatorProcess:
     Strategies that fail are deleted.
     """
 
-    def __init__(self):
-        """Initialize the validator process"""
-        self.config = load_config()._raw_config
+    def __init__(
+        self,
+        syntax_validator: Optional[SyntaxValidator] = None,
+        lookahead_detector: Optional[LookaheadDetector] = None,
+        lookahead_tester: Optional[LookaheadTester] = None,
+        execution_validator: Optional[ExecutionValidator] = None,
+        processor: Optional[StrategyProcessor] = None
+    ):
+        """
+        Initialize the validator process with dependency injection.
+
+        Args:
+            syntax_validator: SyntaxValidator instance (created if not provided)
+            lookahead_detector: LookaheadDetector instance (created if not provided)
+            lookahead_tester: LookaheadTester instance (created if not provided)
+            execution_validator: ExecutionValidator instance (created if not provided)
+            processor: StrategyProcessor instance (created if not provided)
+        """
+        self.config = load_config()
         self.shutdown_event = threading.Event()
         self.force_exit = False
 
-        # Process configuration (from validation section)
-        validation_config = self.config.get('validation', {})
-        self.parallel_threads = validation_config.get('parallel_threads', 5)
+        # Process configuration - NO defaults (Fast Fail principle)
+        self.parallel_threads = self.config.get_required('validation.parallel_threads')
 
         # Pipeline backpressure configuration (downstream = VALIDATED queue)
-        pipeline_config = self.config.get('pipeline', {})
-        queue_limits = pipeline_config.get('queue_limits', {})
-        backpressure_config = pipeline_config.get('backpressure', {})
-        monitoring_config = pipeline_config.get('monitoring', {})
-
-        self.validated_limit = queue_limits.get('validated', 50)
-        self.base_cooldown = backpressure_config.get('base_cooldown', 30)
-        self.max_cooldown = backpressure_config.get('max_cooldown', 120)
-        self.cooldown_increment = backpressure_config.get('cooldown_increment', 2)
-        self.log_interval = monitoring_config.get('log_interval', 30)
+        self.validated_limit = self.config.get_required('pipeline.queue_limits.validated')
+        self.base_cooldown = self.config.get_required('pipeline.backpressure.base_cooldown')
+        self.max_cooldown = self.config.get_required('pipeline.backpressure.max_cooldown')
+        self.cooldown_increment = self.config.get_required('pipeline.backpressure.cooldown_increment')
+        self.log_interval = self.config.get_required('pipeline.monitoring.log_interval')
         self._last_log_time = datetime.min
 
         # ThreadPoolExecutor for parallel validation
@@ -79,14 +89,14 @@ class ContinuousValidatorProcess:
         # Tracking
         self.active_futures: Dict[Future, str] = {}
 
-        # Validators
-        self.syntax_validator = SyntaxValidator()
-        self.lookahead_detector = LookaheadDetector()
-        self.lookahead_tester = LookaheadTester()
-        self.execution_validator = ExecutionValidator()
+        # Validators - use injected or create new (Dependency Injection pattern)
+        self.syntax_validator = syntax_validator or SyntaxValidator()
+        self.lookahead_detector = lookahead_detector or LookaheadDetector()
+        self.lookahead_tester = lookahead_tester or LookaheadTester()
+        self.execution_validator = execution_validator or ExecutionValidator()
 
         # Strategy processor for claiming
-        self.processor = StrategyProcessor(process_id=f"validator-{os.getpid()}")
+        self.processor = processor or StrategyProcessor(process_id=f"validator-{os.getpid()}")
 
         # Test data for shuffle test (loaded once)
         self._test_data: Optional[pd.DataFrame] = None
@@ -107,8 +117,8 @@ class ContinuousValidatorProcess:
         """Load test data for validation"""
         try:
             from src.backtester.data_loader import BacktestDataLoader
-            # BacktestDataLoader expects cache_dir string - use data.cache_dir where Binance data is stored
-            cache_dir = self.config.get('data', {}).get('cache_dir', 'data/binance')
+            # BacktestDataLoader expects cache_dir string - use directories.data
+            cache_dir = self.config.get_required('directories.data') + '/binance'
             loader = BacktestDataLoader(cache_dir=cache_dir)
             data = loader.load_single_symbol('BTC', '15m', days=30)
             logger.info(f"Loaded {len(data)} bars of BTC 15m test data")
@@ -245,7 +255,8 @@ class ContinuousValidatorProcess:
                 return (False, f"Execution: {exec_result.errors}")
 
             # Phase 4: Lookahead bias test (Future Contamination Test)
-            shuffle_enabled = self.config.get('validation', {}).get('shuffle_test_enabled', True)
+            # shuffle_test_enabled defaults to True if not in config
+            shuffle_enabled = self.config.get('validation.shuffle_test_enabled', True)
 
             if shuffle_enabled:
                 logger.debug(f"[{strategy_name}] Phase 4: Lookahead bias test")

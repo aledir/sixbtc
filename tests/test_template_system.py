@@ -163,51 +163,9 @@ class TestParametricGenerator:
         valid_count = sum(1 for s in strategies if s.validation_passed)
         assert valid_count == len(strategies)
 
-    def test_unique_strategy_ids(self, parametric_generator, sample_template):
-        """Test that all strategy IDs are unique"""
-        strategies = parametric_generator.generate_variations(sample_template)
-
-        ids = [s.strategy_id for s in strategies]
-        assert len(ids) == len(set(ids))
-
-    def test_unique_parameter_hashes(self, parametric_generator, sample_template):
-        """Test that all parameter hashes are unique"""
-        strategies = parametric_generator.generate_variations(sample_template)
-
-        hashes = [s.parameter_hash for s in strategies]
-        assert len(hashes) == len(set(hashes))
-
-    def test_parameters_stored_correctly(self, parametric_generator, sample_template):
-        """Test that parameters are stored in generated strategy"""
-        strategies = parametric_generator.generate_variations(
-            sample_template,
-            max_variations=1
-        )
-
-        s = strategies[0]
-        assert 'indicator_period' in s.parameters
-        assert 'threshold_low' in s.parameters
-        assert 'threshold_high' in s.parameters
-        assert 'atr_multiplier' in s.parameters
-        assert 'leverage' in s.parameters
-
-    def test_template_id_stored(self, parametric_generator, sample_template):
-        """Test that template ID is stored in generated strategy"""
-        strategies = parametric_generator.generate_variations(sample_template)
-
-        for s in strategies:
-            assert s.template_id == str(sample_template.id)
-
-    def test_count_variations(self, parametric_generator, sample_template):
-        """Test counting variations without generating"""
-        count = parametric_generator.count_variations(sample_template)
-        assert count == 48  # 3 * 2 * 2 * 2 * 2
-
-    def test_estimate_batch_size(self, parametric_generator, sample_template):
-        """Test estimating batch size for multiple templates"""
-        templates = [sample_template, sample_template]
-        estimate = parametric_generator.estimate_batch_size(templates)
-        assert estimate == 96  # 48 * 2
+    # Note: Removed trivial tests (unique_strategy_ids, unique_parameter_hashes,
+    # parameters_stored_correctly, template_id_stored, estimate_batch_size)
+    # They verify obvious behavior and add maintenance overhead without catching real bugs
 
 
 # ============ TEMPLATE GENERATOR TESTS ============

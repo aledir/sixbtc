@@ -54,7 +54,7 @@ class DirectPatternGenerator:
     STRATEGY_TEMPLATE = '''import pandas as pd
 import numpy as np
 import talib as ta
-from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType
+from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType, ExitType
 
 # =============================================================================
 # TIMEFRAME BAR MAPPINGS (precomputed for {timeframe})
@@ -76,72 +76,96 @@ from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitTy
 class Strategy_{strategy_type}_{strategy_id}(StrategyCore):
     """
     Pattern-based strategy: {pattern_name}
+    Target: {target_name}
 
     Direction: {direction} only
     Timeframe: {timeframe}
-    Holding Period: {holding_period}
+    Holding Period: {holding_period} ({holding_bars} bars)
+    Target Magnitude: {magnitude}%
 
     Pattern Edge: {edge:.2f}%
     Pattern Win Rate: {win_rate:.1f}%
 
+    EXIT STRATEGY:
+    - Take Profit at target magnitude ({magnitude}%)
+    - Stop Loss at 3× magnitude ({sl_pct_display}%) - Asymmetric R:R 1:3
+    - Time limit at {holding_bars} bars (backstop if TP not hit)
+
+    RISK MANAGEMENT:
+    Pattern-discovery validated this pattern has {edge:.1f}% edge.
+    Asymmetric SL (3×TP) lets winners run while cutting only catastrophic losses.
+    Expected profit per trade = magnitude × edge = {magnitude}% × {edge:.1f}% ≈ {expected_profit:.2f}%
+
     Generated via Direct Embedding (Mode A) - No AI translation.
     """
 
+    # =========================================================================
+    # STRATEGY PARAMETERS (read by backtester for vectorized execution)
+    # =========================================================================
+    direction = '{direction}'
+    sl_pct = {sl_pct}
+    tp_pct = {tp_pct}
     leverage = {leverage}
+    exit_after_bars = {holding_bars}
+    signal_column = 'entry_signal'
 
     # Indicator columns added by calculate_indicators()
-    indicator_columns = ['atr', 'pattern_signal']
+    indicator_columns = ['atr', 'entry_signal']
 
     def __init__(self, params: dict = None):
         super().__init__(params)
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Pre-calculate ATR and pattern signal.
+        Pre-calculate indicators and entry signal.
 
         The pattern function is called here ONCE on the full dataframe.
+        Populates 'entry_signal' column for backtester vectorized execution.
         """
         df = df.copy()
 
-        # ATR for stops
+        # ATR (may be used by pattern function)
         df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
 
         # Call pattern function ONCE on full dataframe
         try:
             pattern_result = {pattern_func_name}(df)
             if isinstance(pattern_result, pd.Series):
-                df['pattern_signal'] = pattern_result
+                df['entry_signal'] = pattern_result.astype(bool)
             else:
                 # Scalar result - apply to last bar only
-                df['pattern_signal'] = False
-                df.loc[df.index[-1], 'pattern_signal'] = pattern_result
+                df['entry_signal'] = False
+                df.loc[df.index[-1], 'entry_signal'] = bool(pattern_result)
         except Exception:
-            df['pattern_signal'] = False
+            df['entry_signal'] = False
 
         return df
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
-        """Generate {direction} signal from pre-calculated pattern."""
+        """
+        Generate {direction} signal from pre-calculated pattern.
+
+        For LIVE execution: reads entry_signal and returns Signal object.
+        For BACKTEST: backtester reads entry_signal array directly (no loop).
+        """
         min_bars = 100
         if len(df) < min_bars:
             return None
 
-        # Read pre-calculated values
-        current_atr = df['atr'].iloc[-1]
-        entry_condition = bool(df['pattern_signal'].iloc[-1])
-
-        if pd.isna(current_atr) or current_atr <= 0:
-            return None
+        # Read pre-calculated entry signal
+        entry_condition = bool(df['entry_signal'].iloc[-1])
 
         if entry_condition:
             return Signal(
-                direction='{direction}',
+                direction=self.direction,
                 leverage=self.leverage,
-                sl_type=StopLossType.{sl_type},
-                atr_stop_multiplier={sl_multiplier},
-                tp_type=TakeProfitType.RR_RATIO,
-                rr_ratio={rr_ratio},
-                reason="Pattern {pattern_name}: {pattern_readable}"
+                sl_type=StopLossType.PERCENTAGE,
+                sl_pct=self.sl_pct,
+                tp_type=TakeProfitType.PERCENTAGE,
+                tp_pct=self.tp_pct,
+                exit_type=ExitType.TIME_BASED,
+                exit_after_bars=self.exit_after_bars,
+                reason="Pattern {pattern_name} [{target_name}]: {pattern_readable}"
             )
 
         return None
@@ -211,6 +235,33 @@ class Strategy_{strategy_type}_{strategy_id}(StrategyCore):
                 pattern.name.replace('_', ' ')
             )
 
+            # Calculate holding_bars from holding_period and timeframe
+            holding_bars = self._calculate_holding_bars(
+                pattern.holding_period or "24h",
+                pattern.timeframe
+            )
+
+            # Get target magnitude from API (REQUIRED - no fallback)
+            target_name = pattern.target_name or "unknown"
+            magnitude = pattern.target_magnitude
+            if magnitude is None or magnitude <= 0:
+                raise ValueError(
+                    f"Pattern {pattern.name} missing target_magnitude from API. "
+                    f"Target: {target_name}. API must provide this field."
+                )
+
+            # Convert magnitude to decimal for tp_pct (5% -> 0.05)
+            tp_pct = magnitude / 100.0
+            # SL = 3× TP (asymmetric, lets winners run, cuts big losses)
+            # Pattern-discovery validates that the pattern has positive edge
+            # so we want to stay in trades longer and only exit on big moves
+            sl_pct = tp_pct * 3.0
+
+            # For docstring display
+            edge_pct = pattern.test_edge * 100
+            sl_pct_display = magnitude * 3.0
+            expected_profit = magnitude * edge_pct / 100  # magnitude × edge
+
             # Build complete strategy code
             code = self.STRATEGY_TEMPLATE.format(
                 helper_functions=helper_functions,
@@ -222,14 +273,18 @@ class Strategy_{strategy_type}_{strategy_id}(StrategyCore):
                 strategy_type=strategy_type,
                 strategy_id=strategy_id,
                 direction=pattern.target_direction,
-                holding_period=pattern.holding_period or "4h",
-                edge=pattern.test_edge * 100,
+                holding_period=pattern.holding_period or "24h",
+                holding_bars=holding_bars,
+                target_name=target_name,
+                edge=edge_pct,
                 win_rate=pattern.test_win_rate * 100,
                 leverage=leverage,
                 pattern_func_name=pattern_func_name,
-                sl_type=pattern.suggested_sl_type or "ATR",
-                sl_multiplier=pattern.suggested_sl_multiplier or 2.0,
-                rr_ratio=pattern.suggested_rr_ratio or 2.0,
+                magnitude=magnitude,
+                tp_pct=tp_pct,
+                sl_pct=sl_pct,
+                sl_pct_display=sl_pct_display,
+                expected_profit=expected_profit,
             )
 
             # Validate generated code
@@ -336,3 +391,40 @@ def bars_24h(): return 96"""
     def can_generate(self, pattern: Pattern) -> bool:
         """Check if pattern can be generated directly"""
         return bool(pattern.formula_source)
+
+    def _calculate_holding_bars(self, holding_period: str, timeframe: str) -> int:
+        """
+        Calculate holding period in bars based on timeframe.
+
+        Args:
+            holding_period: Period string like "4h", "24h"
+            timeframe: Strategy timeframe like "15m", "1h", "4h"
+
+        Returns:
+            Number of bars for the holding period
+        """
+        # Parse holding period to hours
+        period_lower = holding_period.lower()
+        if period_lower.endswith('h'):
+            hours = int(period_lower[:-1])
+        elif period_lower.endswith('d'):
+            hours = int(period_lower[:-1]) * 24
+        else:
+            hours = 24  # Default to 24h
+
+        # Parse timeframe to minutes per bar
+        tf_lower = timeframe.lower()
+        if tf_lower.endswith('m'):
+            minutes_per_bar = int(tf_lower[:-1])
+        elif tf_lower.endswith('h'):
+            minutes_per_bar = int(tf_lower[:-1]) * 60
+        elif tf_lower.endswith('d'):
+            minutes_per_bar = int(tf_lower[:-1]) * 24 * 60
+        else:
+            minutes_per_bar = 15  # Default to 15m
+
+        # Calculate bars
+        total_minutes = hours * 60
+        bars = total_minutes // minutes_per_bar
+
+        return max(1, bars)  # At least 1 bar

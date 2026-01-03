@@ -1,34 +1,48 @@
 """
 Example Strategies
 
-Hand-crafted strategies demonstrating the two-phase approach:
-1. calculate_indicators() - Pre-calculate all indicators ONCE
-2. generate_signal() - Read pre-calculated values and generate signal
+Hand-crafted strategies demonstrating the vectorized approach:
+1. calculate_indicators() - Pre-calculate indicators + populate entry_signal
+2. generate_signal() - For LIVE execution only (reads entry_signal[-1])
 
-These serve as templates for AI-generated strategies.
+Backtester reads entry_signal array directly (no per-bar loop).
+
+All strategies MUST have:
+- Class attributes: direction, sl_pct, tp_pct, leverage, exit_after_bars, signal_column
+- calculate_indicators() must populate the signal_column (default: 'entry_signal')
 """
 
 import pandas as pd
 import numpy as np
 import talib as ta
-from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType
+from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType, ExitType
 
 
 class Strategy_MOM_Example(StrategyCore):
     """
-    Simple RSI Momentum Strategy
+    Simple RSI Momentum Strategy (Long only)
 
     Entry:
         - LONG: RSI < 30 (oversold) + volume spike
-        - SHORT: RSI > 70 (overbought) + volume spike
 
     Exit:
-        - ATR-based stop loss (2x ATR)
-        - ATR-based take profit (3x ATR, 1.5:1 R:R)
+        - Stop Loss: 3% (percentage-based)
+        - Take Profit: 2% (percentage-based)
+        - Time Exit: 20 bars
     """
 
+    # =========================================================================
+    # STRATEGY PARAMETERS (read by backtester for vectorized execution)
+    # =========================================================================
+    direction = 'long'
+    sl_pct = 0.03       # 3% stop loss
+    tp_pct = 0.02       # 2% take profit
+    leverage = 1
+    exit_after_bars = 20
+    signal_column = 'entry_signal'
+
     # Indicator columns added by calculate_indicators()
-    indicator_columns = ['rsi', 'atr', 'volume_ma', 'volume_ratio']
+    indicator_columns = ['rsi', 'atr', 'volume_ma', 'volume_ratio', 'entry_signal']
 
     def __init__(self, params: dict = None):
         """Initialize with default parameters"""
@@ -37,13 +51,12 @@ class Strategy_MOM_Example(StrategyCore):
         # Strategy parameters
         self.rsi_period = self.params.get('rsi_period', 14)
         self.rsi_oversold = self.params.get('rsi_oversold', 30)
-        self.rsi_overbought = self.params.get('rsi_overbought', 70)
         self.volume_ma_period = self.params.get('volume_ma_period', 20)
         self.volume_spike_threshold = self.params.get('volume_spike_threshold', 1.5)
         self.atr_period = self.params.get('atr_period', 14)
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Pre-calculate all indicators"""
+        """Pre-calculate all indicators and entry_signal"""
         df = df.copy()
 
         # RSI
@@ -56,72 +69,61 @@ class Strategy_MOM_Example(StrategyCore):
         df['volume_ma'] = df['volume'].rolling(window=self.volume_ma_period).mean()
         df['volume_ratio'] = df['volume'] / df['volume_ma']
 
+        # Entry signal: RSI oversold + volume spike (vectorized)
+        rsi_condition = df['rsi'] < self.rsi_oversold
+        volume_condition = df['volume_ratio'] > self.volume_spike_threshold
+
+        df['entry_signal'] = (rsi_condition & volume_condition).astype(bool)
+
         return df
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
-        """Generate momentum signal based on pre-calculated indicators"""
-        # Minimum data requirement
-        min_bars = max(self.rsi_period, self.volume_ma_period, self.atr_period) + 10
+        """Generate signal for LIVE execution (reads pre-calculated entry_signal)"""
+        min_bars = 100
         if len(df) < min_bars:
             return None
 
-        # Read pre-calculated indicator values
-        current_rsi = df['rsi'].iloc[-1]
-        current_atr = df['atr'].iloc[-1]
-        volume_ratio = df['volume_ratio'].iloc[-1]
-
-        # Check for NaN values
-        if pd.isna(current_rsi) or pd.isna(current_atr) or pd.isna(volume_ratio):
+        # Read pre-calculated entry signal
+        if not df['entry_signal'].iloc[-1]:
             return None
 
-        # Check for volume spike
-        volume_spike = volume_ratio > self.volume_spike_threshold
-
-        # LONG entry: Oversold + volume spike
-        if current_rsi < self.rsi_oversold and volume_spike:
-            return Signal(
-                direction='long',
-                sl_type=StopLossType.ATR,
-                atr_stop_multiplier=2.0,
-                tp_type=TakeProfitType.ATR,
-                atr_take_multiplier=3.0,
-                reason=(
-                    f"RSI oversold at {current_rsi:.1f} "
-                    f"with volume spike {volume_ratio:.2f}x"
-                )
-            )
-
-        # SHORT entry: Overbought + volume spike
-        if current_rsi > self.rsi_overbought and volume_spike:
-            return Signal(
-                direction='short',
-                sl_type=StopLossType.ATR,
-                atr_stop_multiplier=2.0,
-                tp_type=TakeProfitType.ATR,
-                atr_take_multiplier=3.0,
-                reason=(
-                    f"RSI overbought at {current_rsi:.1f} "
-                    f"with volume spike {volume_ratio:.2f}x"
-                )
-            )
-
-        return None
+        return Signal(
+            direction=self.direction,
+            leverage=self.leverage,
+            sl_type=StopLossType.PERCENTAGE,
+            sl_pct=self.sl_pct,
+            tp_type=TakeProfitType.PERCENTAGE,
+            tp_pct=self.tp_pct,
+            exit_type=ExitType.TIME_BASED,
+            exit_after_bars=self.exit_after_bars,
+            reason=f"RSI oversold at {df['rsi'].iloc[-1]:.1f} with volume spike"
+        )
 
 
 class Strategy_REV_Example(StrategyCore):
     """
-    Bollinger Bands Mean Reversion Strategy
+    Bollinger Bands Mean Reversion Strategy (Long only)
 
     Entry:
         - LONG: Price touches lower band + RSI < 40
-        - SHORT: Price touches upper band + RSI > 60
 
     Exit:
-        - TP: ATR-based
-        - SL: 2x ATR
+        - Stop Loss: 4%
+        - Take Profit: 3%
+        - Time Exit: 30 bars
     """
 
-    indicator_columns = ['bb_upper', 'bb_middle', 'bb_lower', 'rsi', 'atr']
+    # =========================================================================
+    # STRATEGY PARAMETERS (read by backtester for vectorized execution)
+    # =========================================================================
+    direction = 'long'
+    sl_pct = 0.04       # 4% stop loss
+    tp_pct = 0.03       # 3% take profit
+    leverage = 1
+    exit_after_bars = 30
+    signal_column = 'entry_signal'
+
+    indicator_columns = ['bb_upper', 'bb_middle', 'bb_lower', 'rsi', 'atr', 'entry_signal']
 
     def __init__(self, params: dict = None):
         """Initialize with default parameters"""
@@ -133,7 +135,7 @@ class Strategy_REV_Example(StrategyCore):
         self.atr_period = self.params.get('atr_period', 14)
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Pre-calculate all indicators"""
+        """Pre-calculate all indicators and entry_signal"""
         df = df.copy()
 
         # Bollinger Bands
@@ -148,72 +150,61 @@ class Strategy_REV_Example(StrategyCore):
         # ATR
         df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod=self.atr_period)
 
+        # Entry signal: Price near lower band + oversold RSI (vectorized)
+        lower_distance = (df['close'] - df['bb_lower']).abs() / df['bb_lower']
+        price_at_lower = lower_distance < 0.01
+        rsi_oversold = df['rsi'] < 40
+
+        df['entry_signal'] = (price_at_lower & rsi_oversold).astype(bool)
+
         return df
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
-        """Generate mean reversion signal from pre-calculated indicators"""
-        min_bars = max(self.bb_period, self.rsi_period, self.atr_period) + 10
+        """Generate signal for LIVE execution (reads pre-calculated entry_signal)"""
+        min_bars = 100
         if len(df) < min_bars:
             return None
 
-        # Read pre-calculated values
-        current_price = df['close'].iloc[-1]
-        current_rsi = df['rsi'].iloc[-1]
-        current_upper = df['bb_upper'].iloc[-1]
-        current_lower = df['bb_lower'].iloc[-1]
-
-        # Check for NaN
-        if pd.isna(current_rsi) or pd.isna(current_upper) or pd.isna(current_lower):
+        if not df['entry_signal'].iloc[-1]:
             return None
 
-        # Calculate distance from bands
-        lower_distance = abs(current_price - current_lower) / current_lower
-        upper_distance = abs(current_price - current_upper) / current_upper
-
-        # LONG: Price near lower band + oversold RSI
-        if lower_distance < 0.01 and current_rsi < 40:
-            return Signal(
-                direction='long',
-                sl_type=StopLossType.ATR,
-                atr_stop_multiplier=2.0,
-                tp_type=TakeProfitType.ATR,
-                atr_take_multiplier=3.0,
-                reason=(
-                    f"Price at lower BB ({current_price:.2f} vs {current_lower:.2f}), "
-                    f"RSI {current_rsi:.1f}"
-                )
-            )
-
-        # SHORT: Price near upper band + overbought RSI
-        if upper_distance < 0.01 and current_rsi > 60:
-            return Signal(
-                direction='short',
-                sl_type=StopLossType.ATR,
-                atr_stop_multiplier=2.0,
-                tp_type=TakeProfitType.ATR,
-                atr_take_multiplier=3.0,
-                reason=(
-                    f"Price at upper BB ({current_price:.2f} vs {current_upper:.2f}), "
-                    f"RSI {current_rsi:.1f}"
-                )
-            )
-
-        return None
+        return Signal(
+            direction=self.direction,
+            leverage=self.leverage,
+            sl_type=StopLossType.PERCENTAGE,
+            sl_pct=self.sl_pct,
+            tp_type=TakeProfitType.PERCENTAGE,
+            tp_pct=self.tp_pct,
+            exit_type=ExitType.TIME_BASED,
+            exit_after_bars=self.exit_after_bars,
+            reason=f"Price at lower BB, RSI {df['rsi'].iloc[-1]:.1f}"
+        )
 
 
 class Strategy_TRN_Example(StrategyCore):
     """
-    EMA Crossover Trend Following Strategy
+    EMA Crossover Trend Following Strategy (Long only)
 
     Entry:
         - LONG: Fast EMA crosses above Slow EMA + ADX > 25
-        - SHORT: Fast EMA crosses below Slow EMA + ADX > 25
 
     Exit:
-        - ATR-based stops
+        - Stop Loss: 5%
+        - Take Profit: 4%
+        - Time Exit: 40 bars
     """
 
-    indicator_columns = ['ema_fast', 'ema_slow', 'adx', 'atr']
+    # =========================================================================
+    # STRATEGY PARAMETERS (read by backtester for vectorized execution)
+    # =========================================================================
+    direction = 'long'
+    sl_pct = 0.05       # 5% stop loss
+    tp_pct = 0.04       # 4% take profit
+    leverage = 1
+    exit_after_bars = 40
+    signal_column = 'entry_signal'
+
+    indicator_columns = ['ema_fast', 'ema_slow', 'adx', 'atr', 'entry_signal']
 
     def __init__(self, params: dict = None):
         """Initialize with default parameters"""
@@ -226,7 +217,7 @@ class Strategy_TRN_Example(StrategyCore):
         self.atr_period = self.params.get('atr_period', 14)
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Pre-calculate all indicators"""
+        """Pre-calculate all indicators and entry_signal"""
         df = df.copy()
 
         # EMAs
@@ -239,60 +230,34 @@ class Strategy_TRN_Example(StrategyCore):
         # ATR
         df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod=self.atr_period)
 
+        # Entry signal: Bullish crossover + strong trend (vectorized)
+        ema_fast_prev = df['ema_fast'].shift(1)
+        ema_slow_prev = df['ema_slow'].shift(1)
+
+        bullish_cross = (ema_fast_prev <= ema_slow_prev) & (df['ema_fast'] > df['ema_slow'])
+        strong_trend = df['adx'] > self.adx_threshold
+
+        df['entry_signal'] = (bullish_cross & strong_trend).astype(bool)
+
         return df
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
-        """Generate trend following signal from pre-calculated indicators"""
-        min_bars = max(self.slow_period, self.adx_period, self.atr_period) + 10
+        """Generate signal for LIVE execution (reads pre-calculated entry_signal)"""
+        min_bars = 100
         if len(df) < min_bars:
             return None
 
-        # Read pre-calculated values
-        current_fast = df['ema_fast'].iloc[-1]
-        current_slow = df['ema_slow'].iloc[-1]
-        prev_fast = df['ema_fast'].iloc[-2]
-        prev_slow = df['ema_slow'].iloc[-2]
-        current_adx = df['adx'].iloc[-1]
-
-        # Check for NaN
-        if pd.isna(current_fast) or pd.isna(current_slow) or pd.isna(current_adx):
-            return None
-        if pd.isna(prev_fast) or pd.isna(prev_slow):
+        if not df['entry_signal'].iloc[-1]:
             return None
 
-        # Check for crossover
-        bullish_cross = (prev_fast <= prev_slow) and (current_fast > current_slow)
-        bearish_cross = (prev_fast >= prev_slow) and (current_fast < current_slow)
-
-        # Strong trend requirement
-        strong_trend = current_adx > self.adx_threshold
-
-        # LONG: Bullish crossover + strong trend
-        if bullish_cross and strong_trend:
-            return Signal(
-                direction='long',
-                sl_type=StopLossType.ATR,
-                atr_stop_multiplier=2.5,
-                tp_type=TakeProfitType.ATR,
-                atr_take_multiplier=4.0,
-                reason=(
-                    f"Bullish EMA crossover (EMA{self.fast_period}={current_fast:.2f} > "
-                    f"EMA{self.slow_period}={current_slow:.2f}), ADX={current_adx:.1f}"
-                )
-            )
-
-        # SHORT: Bearish crossover + strong trend
-        if bearish_cross and strong_trend:
-            return Signal(
-                direction='short',
-                sl_type=StopLossType.ATR,
-                atr_stop_multiplier=2.5,
-                tp_type=TakeProfitType.ATR,
-                atr_take_multiplier=4.0,
-                reason=(
-                    f"Bearish EMA crossover (EMA{self.fast_period}={current_fast:.2f} < "
-                    f"EMA{self.slow_period}={current_slow:.2f}), ADX={current_adx:.1f}"
-                )
-            )
-
-        return None
+        return Signal(
+            direction=self.direction,
+            leverage=self.leverage,
+            sl_type=StopLossType.PERCENTAGE,
+            sl_pct=self.sl_pct,
+            tp_type=TakeProfitType.PERCENTAGE,
+            tp_pct=self.tp_pct,
+            exit_type=ExitType.TIME_BASED,
+            exit_after_bars=self.exit_after_bars,
+            reason=f"Bullish EMA crossover, ADX={df['adx'].iloc[-1]:.1f}"
+        )

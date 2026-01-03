@@ -67,13 +67,13 @@ class TrailingService:
         self.client = client
         self.config = config
 
-        # Extract trailing config with safe defaults
-        trailing_config = config.get('risk', {}).get('trailing', {})
+        # Extract trailing config - NO defaults (Fast Fail principle)
+        trailing_config = config['risk']['trailing']
 
-        self.enabled = trailing_config.get('enabled', False)
-        self.min_adjustment_pct = trailing_config.get('min_adjustment_pct', 0.005)
-        self.update_cooldown_sec = trailing_config.get('update_cooldown_sec', 10)
-        self.breakeven_buffer_pct = trailing_config.get('breakeven_buffer_pct', 0.002)
+        self.enabled = trailing_config['enabled']
+        self.min_adjustment_pct = trailing_config['min_adjustment_pct']
+        self.update_cooldown_sec = trailing_config['update_cooldown_sec']
+        self.breakeven_buffer_pct = trailing_config['breakeven_buffer_pct']
 
         # State tracking
         self.trailing_states: Dict[str, TrailingState] = {}  # key = "coin:subaccount_id"

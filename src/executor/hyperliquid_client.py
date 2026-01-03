@@ -284,10 +284,13 @@ class HyperliquidClient:
 
         Returns:
             Available balance in USD
+
+        Raises:
+            ValueError: If wallet address not configured
+            RuntimeError: If API call fails (do NOT mask - critical for position sizing)
         """
         if not self.wallet_address:
-            logger.error("No wallet address configured")
-            return 0.0
+            raise ValueError("No wallet address configured")
 
         try:
             self._wait_rate_limit()
@@ -297,8 +300,9 @@ class HyperliquidClient:
             return account_value
 
         except Exception as e:
+            # Critical error - do NOT mask with return 0.0 (would break position sizing)
             logger.error(f"Failed to get account balance: {e}")
-            return 0.0
+            raise RuntimeError(f"Failed to get account balance: {e}") from e
 
     def get_account_state(self, address: Optional[str] = None) -> Dict[str, Any]:
         """

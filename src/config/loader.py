@@ -286,6 +286,6 @@ if __name__ == "__main__":
         print(f"Database name: {config.get('database.database')}")
         print("\n" + "="*60)
     except Exception as e:
-        print(f"\n❌ Configuration loading failed:")
+        print(f"\n[ERROR] Configuration loading failed:")
         print(f"   {e}")
         raise

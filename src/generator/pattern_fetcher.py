@@ -32,6 +32,7 @@ class TargetResult:
     n_signals: int
     direction: str  # 'long' or 'short'
     hold_hours: int  # 1, 4, 24, etc.
+    magnitude: Optional[float] = None  # Target price move in % (e.g., 2.0 for 2%)
     is_valid: bool = False
     quality_score: float = 0.0
 
@@ -53,6 +54,7 @@ class Pattern:
     # New fields from pattern-discovery API
     timeframe: str = "15m"  # Pattern timeframe
     holding_period: Optional[str] = None  # Expected hold time (4h, 24h)
+    target_magnitude: Optional[float] = None  # Target price move in % (e.g., 2.0 for 2%)
     strategy_type: Optional[str] = None  # MOM, REV, TRN, BRE, VOL
     formula_readable: Optional[str] = None  # Human-readable formula
 
@@ -339,6 +341,7 @@ class PatternFetcher:
                     n_signals=tr_data.get('n_signals', 0),
                     direction=tr_data.get('direction', 'long'),
                     hold_hours=tr_data.get('hold_hours', 24),
+                    magnitude=tr_data.get('magnitude'),  # Target price move in %
                     is_valid=tr_data.get('is_valid', False),
                     quality_score=tr_data.get('quality_score', 0.0)
                 )
@@ -361,6 +364,7 @@ class PatternFetcher:
             # New fields from pattern-discovery API
             timeframe=data.get('timeframe', '15m'),
             holding_period=data.get('holding_period'),
+            target_magnitude=data.get('target_magnitude'),  # From API
             strategy_type=data.get('strategy_type'),
             formula_readable=data.get('formula_readable'),
 
@@ -475,6 +479,7 @@ class PatternFetcher:
                 quality_score=target.quality_score or pattern.quality_score,
                 timeframe=pattern.timeframe,
                 holding_period=f"{target.hold_hours}h",
+                target_magnitude=target.magnitude,  # Target price move in % (e.g., 2.0)
                 strategy_type=pattern.strategy_type,
                 formula_readable=pattern.formula_readable,
                 suggested_sl_type=pattern.suggested_sl_type,

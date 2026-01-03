@@ -263,13 +263,20 @@ class StrategyBuilder:
             template_name = 'generate_from_pattern_v2.j2'
             helpers_context = self.helper_fetcher.get_helpers(pattern.timeframe)
 
+            # Calculate holding_bars from holding_period and timeframe
+            holding_bars = self._calculate_holding_bars(
+                pattern.holding_period or "24h",
+                pattern.timeframe
+            )
+
             template = self.template_env.get_template(template_name)
             prompt = template.render(
                 pattern=pattern,
                 strategy_id=strategy_id,
                 leverage=leverage,
                 helpers=helpers_context.helper_functions if helpers_context else {},
-                timeframe_bars=helpers_context.timeframe_bars if helpers_context else {}
+                timeframe_bars=helpers_context.timeframe_bars if helpers_context else {},
+                holding_bars=holding_bars
             )
         else:
             # Original template: AI must translate formula
@@ -976,3 +983,40 @@ class {strategy_name}(StrategyCore):
 
         logger.warning(f"Failed to fix code after {max_attempts} attempts - returning None")
         return None  # Return None if fixing failed (do NOT save invalid code)
+
+    def _calculate_holding_bars(self, holding_period: str, timeframe: str) -> int:
+        """
+        Calculate holding period in bars based on timeframe.
+
+        Args:
+            holding_period: Period string like "4h", "24h"
+            timeframe: Strategy timeframe like "15m", "1h", "4h"
+
+        Returns:
+            Number of bars for the holding period
+        """
+        # Parse holding period to hours
+        period_lower = holding_period.lower()
+        if period_lower.endswith('h'):
+            hours = int(period_lower[:-1])
+        elif period_lower.endswith('d'):
+            hours = int(period_lower[:-1]) * 24
+        else:
+            hours = 24  # Default to 24h
+
+        # Parse timeframe to minutes per bar
+        tf_lower = timeframe.lower()
+        if tf_lower.endswith('m'):
+            minutes_per_bar = int(tf_lower[:-1])
+        elif tf_lower.endswith('h'):
+            minutes_per_bar = int(tf_lower[:-1]) * 60
+        elif tf_lower.endswith('d'):
+            minutes_per_bar = int(tf_lower[:-1]) * 24 * 60
+        else:
+            minutes_per_bar = 15  # Default to 15m
+
+        # Calculate bars
+        total_minutes = hours * 60
+        bars = total_minutes // minutes_per_bar
+
+        return max(1, bars)  # At least 1 bar

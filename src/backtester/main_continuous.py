@@ -24,14 +24,15 @@ from src.config import load_config
 from src.database import get_session, Strategy, BacktestResult, StrategyProcessor
 from src.backtester.backtest_engine import BacktestEngine
 from src.backtester.data_loader import BacktestDataLoader
-from src.data.pairs_updater import get_current_pairs
+from src.backtester.parametric_backtest import ParametricBacktester
+from src.data.pairs_updater import get_current_pairs, get_coins_last_updated
 from src.utils import get_logger, setup_logging
 
 # Initialize logging at module load
-_config = load_config()._raw_config
+_config = load_config()
 setup_logging(
     log_file='logs/backtester.log',
-    log_level=_config.get('logging', {}).get('level', 'INFO'),
+    log_level=_config.get_required('logging.level'),
 )
 
 logger = get_logger(__name__)
@@ -46,27 +47,35 @@ class ContinuousBacktesterProcess:
     Strategies that pass thresholds are promoted to TESTED.
     """
 
-    def __init__(self):
-        """Initialize the backtester process"""
-        self.config = load_config()._raw_config
+    def __init__(
+        self,
+        engine: Optional[BacktestEngine] = None,
+        data_loader: Optional[BacktestDataLoader] = None,
+        processor: Optional[StrategyProcessor] = None,
+        parametric_backtester: Optional[ParametricBacktester] = None
+    ):
+        """
+        Initialize the backtester process with dependency injection.
+
+        Args:
+            engine: BacktestEngine instance (created if not provided)
+            data_loader: BacktestDataLoader instance (created if not provided)
+            processor: StrategyProcessor instance (created if not provided)
+            parametric_backtester: ParametricBacktester instance (created if enabled and not provided)
+        """
+        self.config = load_config()
         self.shutdown_event = threading.Event()
         self.force_exit = False
 
-        # Process configuration (from backtesting section)
-        backtesting_config = self.config.get('backtesting', {})
-        self.parallel_threads = backtesting_config.get('parallel_threads', 10)
+        # Process configuration - NO defaults (Fast Fail principle)
+        self.parallel_threads = self.config.get_required('backtesting.parallel_threads')
 
         # Pipeline backpressure configuration (downstream = TESTED queue)
-        pipeline_config = self.config.get('pipeline', {})
-        queue_limits = pipeline_config.get('queue_limits', {})
-        backpressure_config = pipeline_config.get('backpressure', {})
-        monitoring_config = pipeline_config.get('monitoring', {})
-
-        self.tested_limit = queue_limits.get('tested', 30)
-        self.base_cooldown = backpressure_config.get('base_cooldown', 30)
-        self.max_cooldown = backpressure_config.get('max_cooldown', 120)
-        self.cooldown_increment = backpressure_config.get('cooldown_increment', 2)
-        self.log_interval = monitoring_config.get('log_interval', 30)
+        self.tested_limit = self.config.get_required('pipeline.queue_limits.tested')
+        self.base_cooldown = self.config.get_required('pipeline.backpressure.base_cooldown')
+        self.max_cooldown = self.config.get_required('pipeline.backpressure.max_cooldown')
+        self.cooldown_increment = self.config.get_required('pipeline.backpressure.cooldown_increment')
+        self.log_interval = self.config.get_required('pipeline.monitoring.log_interval')
         self._last_log_time = datetime.min
 
         # ThreadPoolExecutor for parallel backtesting
@@ -75,43 +84,66 @@ class ContinuousBacktesterProcess:
             thread_name_prefix="Backtester"
         )
 
-        # Tracking
-        self.active_futures: Dict[Future, str] = {}
+        # Tracking: Future -> (strategy_id, strategy_name)
+        self.active_futures: Dict[Future, Tuple[str, str]] = {}
 
-        # Components
-        self.engine = BacktestEngine(self.config)
-        # Use data.cache_dir (where BinanceDataDownloader saves files) or default to data/binance
-        cache_dir = self.config.get('data', {}).get('cache_dir', 'data/binance')
-        self.data_loader = BacktestDataLoader(cache_dir)
-        self.processor = StrategyProcessor(process_id=f"backtester-{os.getpid()}")
+        # Components - use injected or create new (Dependency Injection pattern)
+        self.engine = engine or BacktestEngine(self.config._raw_config)
+        cache_dir = self.config.get_required('directories.data') + '/binance'
+        self.data_loader = data_loader or BacktestDataLoader(cache_dir)
+        self.processor = processor or StrategyProcessor(process_id=f"backtester-{os.getpid()}")
 
-        # Backtest thresholds
-        bt_config = self.config.get('backtesting', {})
-        thresholds = bt_config.get('thresholds', {})
-        self.min_sharpe = thresholds.get('min_sharpe', 1.0)
-        self.min_win_rate = thresholds.get('min_win_rate', 0.55)
-        self.max_drawdown = thresholds.get('max_drawdown', 0.30)
-        self.min_trades = thresholds.get('min_total_trades', 100)
-        self.min_expectancy = thresholds.get('min_expectancy', 0.02)
+        # Parametric backtester - use injected or create new (Dependency Injection)
+        self.parametric_enabled = self.config.get_required('generation.parametric.enabled')
+        self.parametric_top_k = self.config.get_required('generation.parametric.top_k')
+        if self.parametric_enabled:
+            self.parametric_backtester = parametric_backtester or ParametricBacktester(self.config._raw_config)
+            # Override parameter space from config if provided (only if we created it)
+            if parametric_backtester is None:
+                param_space = self.config.get('generation.parametric.parameter_space', {})
+                if param_space:
+                    self.parametric_backtester.set_parameter_space(param_space)
+            logger.info(
+                f"Parametric backtesting ENABLED: "
+                f"{self.parametric_backtester._count_combinations()} combinations, "
+                f"top {self.parametric_top_k} saved"
+            )
+        else:
+            self.parametric_backtester = None
 
-        # Timeframes
-        self.timeframes = self.config.get('trading', {}).get('timeframes', {}).get('available', ['15m', '1h', '4h'])
+        # Backtest thresholds - NO defaults
+        self.min_sharpe = self.config.get_required('backtesting.thresholds.min_sharpe')
+        self.min_win_rate = self.config.get_required('backtesting.thresholds.min_win_rate')
+        self.max_drawdown = self.config.get_required('backtesting.thresholds.max_drawdown')
+        self.min_trades = self.config.get_required('backtesting.thresholds.min_total_trades')
+        self.min_expectancy = self.config.get_required('backtesting.thresholds.min_expectancy')
 
-        # Pairs count (from backtesting section, NOT data_scheduler)
-        self.pairs_count = bt_config.get('backtest_pairs_count', 100)
+        # Timeframes (top-level in config) - NO defaults
+        self.timeframes = self.config.get_required('timeframes')
 
-        # Training/Holdout configuration (unified approach)
-        self.training_days = bt_config.get('training_days', 365)
-        self.holdout_days = bt_config.get('holdout_days', 30)
+        # Pairs count (from backtesting section)
+        self.pairs_count = self.config.get_required('backtesting.backtest_pairs_count')
+
+        # Training/Holdout configuration
+        self.training_days = self.config.get_required('backtesting.training_days')
+        self.holdout_days = self.config.get_required('backtesting.holdout_days')
 
         # Holdout validation thresholds
-        holdout_config = bt_config.get('holdout', {})
-        self.holdout_max_degradation = holdout_config.get('max_degradation', 0.50)
-        self.holdout_min_sharpe = holdout_config.get('min_sharpe', 0.3)
-        self.holdout_recency_weight = holdout_config.get('recency_weight', 0.60)
+        self.holdout_max_degradation = self.config.get_required('backtesting.holdout.max_degradation')
+        self.holdout_min_sharpe = self.config.get_required('backtesting.holdout.min_sharpe')
+        self.holdout_recency_weight = self.config.get_required('backtesting.holdout.recency_weight')
+        self.min_holdout_trades = self.config.get_required('backtesting.holdout.min_trades')
+
+        # Initial capital for expectancy normalization
+        self.initial_capital = self.config.get_required('backtesting.initial_capital')
 
         # Preloaded data cache: {(symbols_hash, timeframe): data}
         self._data_cache: Dict[str, Dict[str, any]] = {}
+
+        # Pairs cache (shared across threads, invalidated when DB updates)
+        self._pairs_cache: Optional[List[str]] = None
+        self._pairs_cache_updated_at: Optional[datetime] = None
+        self._pairs_cache_lock = threading.Lock()
 
         logger.info(
             f"ContinuousBacktesterProcess initialized: "
@@ -119,24 +151,53 @@ class ContinuousBacktesterProcess:
             f"downstream limit {self.tested_limit} TESTED"
         )
 
+    def _get_cached_pairs(self) -> List[str]:
+        """
+        Get pairs from cache, refreshing if DB was updated.
+
+        Cache invalidation is based on coins.updated_at timestamp.
+        When data_scheduler updates the coins table, the cache is
+        automatically invalidated on next access.
+
+        Thread-safe via lock.
+
+        Returns:
+            List of active symbol names ordered by volume
+        """
+        with self._pairs_cache_lock:
+            # Check if cache needs refresh
+            db_updated_at = get_coins_last_updated()
+
+            if (
+                self._pairs_cache is None
+                or self._pairs_cache_updated_at is None
+                or (db_updated_at and db_updated_at > self._pairs_cache_updated_at)
+            ):
+                # Cache miss or stale - refresh from DB
+                self._pairs_cache = get_current_pairs()
+                self._pairs_cache_updated_at = db_updated_at or datetime.now()
+                logger.info(
+                    f"Pairs cache refreshed: {len(self._pairs_cache)} pairs "
+                    f"(db_updated_at={db_updated_at})"
+                )
+
+            return self._pairs_cache
+
     def _get_backtest_pairs(self) -> List[str]:
         """
-        Load top N pairs from database (coins table).
+        Load top N pairs from cache.
 
         Returns:
             List of symbol names (e.g., ['BTC', 'ETH', ...])
         """
-        pairs = get_current_pairs()
+        pairs = self._get_cached_pairs()
 
         if not pairs:
             logger.warning("No pairs in database, using default pairs")
             return ['BTC', 'ETH', 'SOL', 'ARB', 'AVAX']
 
         # Take top N pairs
-        pairs = pairs[:self.pairs_count]
-
-        logger.info(f"Loaded {len(pairs)} pairs from database")
-        return pairs
+        return pairs[:self.pairs_count]
 
     def _validate_pattern_coins(
         self,
@@ -168,8 +229,8 @@ class ContinuousBacktesterProcess:
             'coin_selection', {}
         ).get('min_tradable_coins', 10)
 
-        # Level 1: Liquidity filter (active trading pairs from DB)
-        active_coins = set(get_current_pairs())
+        # Level 1: Liquidity filter (active trading pairs from cache)
+        active_coins = set(self._get_cached_pairs())
         liquid_coins = [c for c in pattern_coins if c in active_coins]
 
         if len(liquid_coins) < min_coins:
@@ -308,15 +369,15 @@ class ContinuousBacktesterProcess:
                     done_futures.append(f)
 
             for future in done_futures:
-                strategy_id = self.active_futures.pop(future)
+                strategy_id, strategy_name = self.active_futures.pop(future)
                 try:
                     success, reason = future.result()
                     if success:
-                        logger.info(f"Strategy {strategy_id} TESTED")
+                        logger.info(f"Strategy {strategy_name} TESTED")
                     else:
-                        logger.info(f"Strategy {strategy_id} FAILED: {reason}")
+                        logger.info(f"Strategy {strategy_name} FAILED: {reason}")
                 except Exception as e:
-                    logger.error(f"Backtest error for {strategy_id}: {e}")
+                    logger.error(f"Backtest error for {strategy_name}: {e}")
 
             # Check downstream backpressure (TESTED queue)
             tested_count = self.processor.count_available("TESTED")
@@ -359,7 +420,7 @@ class ContinuousBacktesterProcess:
                 strategy.timeframe,
                 strategy.pattern_coins
             )
-            self.active_futures[future] = str(strategy.id)
+            self.active_futures[future] = (str(strategy.id), strategy.name)
 
             await asyncio.sleep(0.1)
 
@@ -404,6 +465,7 @@ class ContinuousBacktesterProcess:
             tf_results = {}
             tf_backtest_ids = {}
             tf_validated_coins = {}  # Track which coins were used per TF
+            tf_optimal_params = {}  # Track optimal params per TF (from parametric)
 
             for tf in self.timeframes:
                 # Validate pattern coins for this timeframe (3-level validation)
@@ -442,9 +504,31 @@ class ContinuousBacktesterProcess:
 
                 # Run TRAINING period backtest
                 try:
-                    training_result = self._run_multi_symbol_backtest(
-                        strategy_instance, training_data, tf
-                    )
+                    if self.parametric_enabled:
+                        # Parametric: test multiple SL/TP/leverage combinations
+                        parametric_results = self._run_parametric_backtest(
+                            strategy_instance, training_data, tf
+                        )
+                        if not parametric_results:
+                            logger.warning(f"No parametric results for {tf}")
+                            continue
+                        # Use best result (first in sorted list)
+                        training_result = parametric_results[0]
+                        # Store optimal params for later update
+                        optimal_params = training_result.get('params', {})
+                        logger.info(
+                            f"[{strategy_name}] {tf}: Parametric found optimal params: "
+                            f"SL={optimal_params.get('sl_pct', 0):.1%}, "
+                            f"TP={optimal_params.get('tp_pct', 0):.1%}, "
+                            f"leverage={optimal_params.get('leverage', 1)}, "
+                            f"exit_bars={optimal_params.get('exit_bars', 0)}"
+                        )
+                    else:
+                        # Standard: use strategy's original parameters
+                        training_result = self._run_multi_symbol_backtest(
+                            strategy_instance, training_data, tf
+                        )
+                        optimal_params = None
                 except Exception as e:
                     logger.error(f"Training backtest failed for {tf}: {e}")
                     continue
@@ -479,6 +563,10 @@ class ContinuousBacktesterProcess:
                 )
 
                 tf_results[tf] = final_result
+
+                # Store optimal params if parametric was used
+                if optimal_params:
+                    tf_optimal_params[tf] = optimal_params
 
                 # Save training backtest result
                 training_backtest_id = self._save_backtest_result(
@@ -526,8 +614,13 @@ class ContinuousBacktesterProcess:
             # Get validated coins for optimal TF (these are the coins to use in live trading)
             optimal_tf_coins = tf_validated_coins.get(optimal_tf, [])
 
-            # Update strategy with optimal TF and its validated coins
-            self._update_strategy_optimal_tf(strategy_id, optimal_tf, optimal_tf_coins)
+            # Get optimal params for optimal TF (from parametric backtest)
+            optimal_params_for_tf = tf_optimal_params.get(optimal_tf)
+
+            # Update strategy with optimal TF, validated coins, and optimal params
+            self._update_strategy_optimal_tf(
+                strategy_id, optimal_tf, optimal_tf_coins, optimal_params_for_tf
+            )
 
             # Mark optimal backtest
             if optimal_tf in tf_backtest_ids:
@@ -584,7 +677,7 @@ class ContinuousBacktesterProcess:
 
         # Use backtest_portfolio for realistic position-limited simulation
         try:
-            result = self.engine.backtest_portfolio(
+            result = self.engine.backtest(
                 strategy=strategy_instance,
                 data=valid_data,
                 max_positions=None  # Uses config value
@@ -594,6 +687,153 @@ class ContinuousBacktesterProcess:
             import traceback
             logger.error(f"Portfolio backtest failed: {e}\n{traceback.format_exc()}")
             return {'total_trades': 0}
+
+    def _run_parametric_backtest(
+        self,
+        strategy_instance,
+        data: Dict[str, any],
+        timeframe: str
+    ) -> List[Dict]:
+        """
+        Run parametric backtest testing multiple SL/TP/leverage/exit combinations.
+
+        Extracts entry signals from the strategy once, then tests N parameter
+        combinations using the Numba-optimized ParametricBacktester.
+
+        Args:
+            strategy_instance: StrategyCore instance
+            data: Dict mapping symbol -> DataFrame
+            timeframe: Timeframe being tested
+
+        Returns:
+            List of top K results with different parameters
+        """
+        import numpy as np
+
+        if not self.parametric_enabled or self.parametric_backtester is None:
+            # Fallback to single backtest with strategy's original params
+            result = self._run_multi_symbol_backtest(strategy_instance, data, timeframe)
+            return [result] if result.get('total_trades', 0) > 0 else []
+
+        # Filter out empty/insufficient data
+        valid_data = {
+            symbol: df for symbol, df in data.items()
+            if not df.empty and len(df) >= 100
+        }
+
+        if not valid_data:
+            return []
+
+        # Sort symbols for consistent ordering
+        symbols = sorted(valid_data.keys())
+        n_symbols = len(symbols)
+
+        # Find common index (intersection of all symbol indices)
+        common_index = None
+        for symbol in symbols:
+            df = valid_data[symbol]
+            if common_index is None:
+                common_index = df.index
+            else:
+                common_index = common_index.intersection(df.index)
+
+        if len(common_index) < 100:
+            logger.warning(f"Insufficient common data for parametric backtest: {len(common_index)} bars")
+            return []
+
+        n_bars = len(common_index)
+
+        # Build aligned 2D arrays (n_bars, n_symbols)
+        close_2d = np.zeros((n_bars, n_symbols), dtype=np.float64)
+        high_2d = np.zeros((n_bars, n_symbols), dtype=np.float64)
+        low_2d = np.zeros((n_bars, n_symbols), dtype=np.float64)
+        entries_2d = np.zeros((n_bars, n_symbols), dtype=np.bool_)
+        directions_2d = np.zeros((n_bars, n_symbols), dtype=np.int8)
+
+        # Get strategy direction
+        direction = getattr(strategy_instance, 'direction', 'long')
+        dir_value = 1 if direction == 'long' else -1
+
+        for j, symbol in enumerate(symbols):
+            df = valid_data[symbol].loc[common_index].copy()
+
+            # Calculate indicators and extract signals
+            try:
+                df_with_indicators = strategy_instance.calculate_indicators(df)
+                signal_column = getattr(strategy_instance, 'signal_column', 'entry_signal')
+
+                if signal_column in df_with_indicators.columns:
+                    entries_2d[:, j] = df_with_indicators[signal_column].values.astype(bool)
+                else:
+                    entries_2d[:, j] = False
+            except Exception as e:
+                logger.warning(f"Failed to calculate indicators for {symbol}: {e}")
+                entries_2d[:, j] = False
+
+            # Fill OHLC data
+            close_2d[:, j] = df['close'].values
+            high_2d[:, j] = df['high'].values
+            low_2d[:, j] = df['low'].values
+            directions_2d[:, j] = dir_value
+
+        # Apply warmup (first 100 bars = no signal)
+        entries_2d[:100, :] = False
+
+        # Count signals
+        total_signals = entries_2d.sum()
+        if total_signals == 0:
+            logger.warning("No entry signals found for parametric backtest")
+            return []
+
+        logger.info(
+            f"Running parametric backtest: {n_bars} bars, {n_symbols} symbols, "
+            f"{total_signals} signals, {self.parametric_backtester._count_combinations()} combinations"
+        )
+
+        # Run parametric backtest
+        try:
+            results_df = self.parametric_backtester.backtest_pattern(
+                pattern_signals=entries_2d,
+                ohlc_data={'close': close_2d, 'high': high_2d, 'low': low_2d},
+                directions=directions_2d,
+            )
+        except Exception as e:
+            logger.error(f"Parametric backtest failed: {e}")
+            return []
+
+        # Get top K results
+        top_results = self.parametric_backtester.get_top_k(results_df, self.parametric_top_k)
+
+        # Convert to list of dicts matching expected format
+        results = []
+        for _, row in top_results.iterrows():
+            result = {
+                'sharpe_ratio': row['sharpe'],
+                'max_drawdown': row['max_drawdown'],
+                'win_rate': row['win_rate'],
+                'expectancy': row['expectancy'],
+                'total_trades': int(row['total_trades']),
+                'total_return': row['total_return'],
+                'parametric_score': row['score'],
+                # Store the parameters used
+                'params': {
+                    'sl_pct': row['sl_pct'],
+                    'tp_pct': row['tp_pct'],
+                    'leverage': int(row['leverage']),
+                    'exit_bars': int(row['exit_bars']),
+                },
+            }
+            results.append(result)
+
+        if results:
+            best = results[0]
+            logger.info(
+                f"Parametric backtest complete: {len(results)} combinations passed | "
+                f"Best: Sharpe={best['sharpe_ratio']:.2f}, Trades={best['total_trades']}, "
+                f"SL={best['params']['sl_pct']:.1%}, TP={best['params']['tp_pct']:.1%}"
+            )
+
+        return results
 
     def _validate_holdout(
         self,
@@ -607,29 +847,46 @@ class ContinuousBacktesterProcess:
         1. Anti-overfitting: reject if holdout crashes vs training
         2. Recency: good holdout = strategy in form now
 
+        CRITICAL: Training must have positive Sharpe first - if training Sharpe
+        is negative or below threshold, strategy has no edge regardless of holdout.
+
         Returns:
             Dict with 'passed', 'reason', 'degradation', 'holdout_bonus'
         """
         training_sharpe = training_result.get('sharpe_ratio', 0)
 
-        # If no holdout data, pass but with neutral score
-        if holdout_result is None or holdout_result.get('total_trades', 0) == 0:
+        # CRITICAL: Training must show edge first
+        # If training Sharpe is negative, strategy has no edge - reject early
+        if training_sharpe < self.min_sharpe:
             return {
-                'passed': True,
-                'reason': 'No holdout data (neutral)',
+                'passed': False,
+                'reason': f'Training Sharpe too low: {training_sharpe:.2f} < {self.min_sharpe}',
                 'degradation': 0.0,
                 'holdout_bonus': 0.0,
+            }
+
+        # Require minimum trades in holdout period
+        holdout_trades = holdout_result.get('total_trades', 0) if holdout_result else 0
+        if holdout_trades < self.min_holdout_trades:
+            return {
+                'passed': False,
+                'reason': f'Insufficient holdout trades: {holdout_trades} < {self.min_holdout_trades}',
+                'degradation': 0.5,
+                'holdout_bonus': -0.20,
             }
 
         holdout_sharpe = holdout_result.get('sharpe_ratio', 0)
 
         # Calculate degradation (how much worse is holdout vs training)
-        if training_sharpe > 0:
-            degradation = (training_sharpe - holdout_sharpe) / training_sharpe
+        # Guard against division by zero when training_sharpe is exactly 0
+        if training_sharpe == 0:
+            # No edge in training = cannot calculate degradation meaningfully
+            # Treat as neutral (no degradation, no bonus)
+            degradation = 0.0
         else:
-            degradation = 0.0 if holdout_sharpe >= 0 else 1.0
+            degradation = (training_sharpe - holdout_sharpe) / training_sharpe
 
-        # Anti-overfitting check: reject if holdout crashes
+        # Anti-overfitting check: reject if holdout crashes vs training
         if degradation > self.holdout_max_degradation:
             return {
                 'passed': False,
@@ -638,7 +895,7 @@ class ContinuousBacktesterProcess:
                 'holdout_bonus': 0.0,
             }
 
-        # Check minimum holdout Sharpe
+        # Check minimum holdout Sharpe (must also show edge in recent period)
         if holdout_sharpe < self.holdout_min_sharpe:
             return {
                 'passed': False,
@@ -685,9 +942,12 @@ class ContinuousBacktesterProcess:
         training_expectancy = training_result.get('expectancy', 0)
 
         # Calculate training base score
+        # Normalize expectancy to percentage of initial capital
+        training_expectancy_pct = (training_expectancy / self.initial_capital) * 100 if self.initial_capital > 0 else 0
+
         training_score = (
             0.5 * training_sharpe +
-            0.3 * training_expectancy * 100 +
+            0.3 * training_expectancy_pct +
             0.2 * training_win_rate
         )
 
@@ -697,9 +957,11 @@ class ContinuousBacktesterProcess:
             holdout_win_rate = holdout_result.get('win_rate', 0)
             holdout_expectancy = holdout_result.get('expectancy', 0)
 
+            # Normalize expectancy to percentage of initial capital
+            holdout_expectancy_pct = (holdout_expectancy / self.initial_capital) * 100 if self.initial_capital > 0 else 0
             holdout_score = (
                 0.5 * holdout_sharpe +
-                0.3 * holdout_expectancy * 100 +
+                0.3 * holdout_expectancy_pct +
                 0.2 * holdout_win_rate
             )
         else:
@@ -906,9 +1168,21 @@ class ContinuousBacktesterProcess:
         self,
         strategy_id,
         optimal_tf: str,
-        pairs: List[str]
+        pairs: List[str],
+        optimal_params: Optional[Dict] = None
     ):
-        """Update strategy with optimal TF and audit trail"""
+        """
+        Update strategy with optimal TF, pairs, and parameters from parametric backtest.
+
+        If optimal_params is provided (from parametric backtest), updates the strategy's
+        sl_pct, tp_pct, leverage, and exit_after_bars in the code.
+
+        Args:
+            strategy_id: Strategy UUID
+            optimal_tf: Best performing timeframe
+            pairs: Validated coins for this timeframe
+            optimal_params: Dict with sl_pct, tp_pct, leverage, exit_bars (from parametric)
+        """
         try:
             with get_session() as session:
                 strategy = session.query(Strategy).filter(
@@ -920,14 +1194,92 @@ class ContinuousBacktesterProcess:
                     strategy.backtest_pairs = pairs
                     strategy.backtest_date = datetime.utcnow()
                     strategy.tested_at = datetime.utcnow()
+
+                    # Update strategy code with optimal params from parametric backtest
+                    if optimal_params:
+                        updated_code = self._update_strategy_params(
+                            strategy.code, optimal_params
+                        )
+                        if updated_code:
+                            strategy.code = updated_code
+
                     session.commit()
+
+                    params_str = ""
+                    if optimal_params:
+                        params_str = (
+                            f", params: SL={optimal_params.get('sl_pct', 0):.1%}, "
+                            f"TP={optimal_params.get('tp_pct', 0):.1%}, "
+                            f"lev={optimal_params.get('leverage', 1)}"
+                        )
 
                     logger.info(
                         f"Updated strategy {strategy.name}: "
-                        f"optimal_tf={optimal_tf}, pairs={len(pairs)}"
+                        f"optimal_tf={optimal_tf}, pairs={len(pairs)}{params_str}"
                     )
         except Exception as e:
             logger.error(f"Failed to update strategy: {e}")
+
+    def _update_strategy_params(self, code: str, params: Dict) -> Optional[str]:
+        """
+        Update strategy class attributes with optimal parameters from parametric backtest.
+
+        Replaces the class-level sl_pct, tp_pct, leverage, exit_after_bars with
+        the values found during parametric optimization.
+
+        Args:
+            code: Strategy source code
+            params: Dict with sl_pct, tp_pct, leverage, exit_bars
+
+        Returns:
+            Updated code or None if update failed
+        """
+        import re
+
+        try:
+            updated = code
+
+            # Update sl_pct
+            if 'sl_pct' in params:
+                updated = re.sub(
+                    r'(\s+sl_pct\s*=\s*)[\d.]+',
+                    rf'\g<1>{params["sl_pct"]}',
+                    updated
+                )
+
+            # Update tp_pct
+            if 'tp_pct' in params:
+                updated = re.sub(
+                    r'(\s+tp_pct\s*=\s*)[\d.]+',
+                    rf'\g<1>{params["tp_pct"]}',
+                    updated
+                )
+
+            # Update leverage
+            if 'leverage' in params:
+                updated = re.sub(
+                    r'(\s+leverage\s*=\s*)\d+',
+                    rf'\g<1>{int(params["leverage"])}',
+                    updated
+                )
+
+            # Update exit_after_bars
+            if 'exit_bars' in params:
+                updated = re.sub(
+                    r'(\s+exit_after_bars\s*=\s*)\d+',
+                    rf'\g<1>{int(params["exit_bars"])}',
+                    updated
+                )
+
+            # Verify syntax is still valid
+            import ast
+            ast.parse(updated)
+
+            return updated
+
+        except Exception as e:
+            logger.warning(f"Failed to update strategy params: {e}")
+            return None
 
     def _mark_optimal_backtest(self, backtest_id: str):
         """Mark a backtest result as optimal TF"""

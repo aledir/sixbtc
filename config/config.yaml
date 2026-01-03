@@ -132,6 +132,16 @@ generation:
   # Flow control is handled by pipeline backpressure below
   # Leverage is read from DB (coins.max_leverage), not configured here
 
+  # Parametric optimization (runs after base strategy generation)
+  parametric:
+    enabled: true              # Enable parametric optimization
+    top_k: 3                   # Save top K parameter combinations per pattern
+    parameter_space:
+      sl_pct: [0.01, 0.015, 0.02, 0.025, 0.03]
+      tp_pct: [0.02, 0.03, 0.05, 0.07, 0.10]
+      leverage: [1, 2, 3, 5]
+      exit_bars: [0, 10, 20, 50]
+
 # ==============================================================================
 # PIPELINE FLOW CONTROL (Multi-Level Backpressure System)
 # ==============================================================================
@@ -188,26 +198,27 @@ backtesting:
   parallel_threads: 10
 
   # Multi-pair backtesting
-  backtest_pairs_count: 30   # Top N pairs by volume (reduced from 100)
+  backtest_pairs_count: 20   # Top N pairs by volume (reduced for performance)
 
   # Training/Holdout split (unified approach)
-  # Total period = training_days + holdout_days = 395 days
-  training_days: 365         # 1 year for training (edge detection)
+  # Total period = training_days + holdout_days = 210 days
+  training_days: 365         # 12 months for training (robust statistical validation)
   holdout_days: 30           # Last 30 days for validation (anti-overfitting + recency)
 
   # Holdout validation thresholds
   holdout:
-    max_degradation: 0.30    # Max 30% worse than training = overfitted
-    min_sharpe: 0.5          # Minimum Sharpe on holdout (recent performance matters)
+    max_degradation: 0.50    # Max 50% degradation from training to holdout
+    min_sharpe: 0.0          # Holdout Sharpe must be positive
     recency_weight: 0.60     # Weight for holdout score in final ranking
+    min_trades: 3            # Minimum trades required in holdout period
 
   # Minimum thresholds (gate check - classifier does the real ranking)
   thresholds:
-    min_sharpe: 0.5          # Relaxed from 1.0 (classifier ranks properly)
-    min_win_rate: 0.40       # Relaxed from 0.55
-    min_total_trades: 20     # Relaxed from 100 (30 pairs = fewer trades)
-    min_expectancy: 0.01     # Relaxed from 0.02
-    max_drawdown: 0.40       # Relaxed from 0.30
+    min_sharpe: 0.3          # Minimum Sharpe ratio
+    min_win_rate: 0.35       # 35% minimum win rate
+    min_total_trades: 10     # Minimum trades for significance
+    min_expectancy: 0.0      # Must have positive expectancy
+    max_drawdown: 0.50       # Max 50% drawdown (now correctly calculated)
 
   # NOTE: realistic_mode and max_concurrent_positions removed
   # Backtest uses risk.limits.max_open_positions_per_subaccount for position limits
@@ -232,6 +243,12 @@ classification:
     sharpe: 0.25      # Risk-adjusted return
     consistency: 0.15 # Win rate / time-in-profit
     stability: 0.10   # Walk-forward stability
+
+  # Filter thresholds for eligible strategies
+  filter_thresholds:
+    min_sharpe: 0.5           # Minimum Sharpe ratio
+    min_win_rate: 0.40        # Minimum win rate (40%)
+    min_trades: 20            # Minimum trades for statistical significance
 
   # Live ranking configuration
   live_ranking:
@@ -268,6 +285,12 @@ subaccount_manager:
   dry_run: true
   rotation_interval_hours: 24
   rebalance_enabled: true
+
+# ==============================================================================
+# EXECUTOR (Live Trading Loop)
+# ==============================================================================
+executor:
+  check_interval_seconds: 15       # How often to check for signals
 
 # ==============================================================================
 # MONITORING

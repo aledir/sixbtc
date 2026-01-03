@@ -30,8 +30,9 @@ from src.utils import get_logger
 
 logger = get_logger(__name__)
 
-# Default timeout for stale processing claims (5 minutes)
-DEFAULT_PROCESSING_TIMEOUT_SECONDS = 300
+# Default timeout for stale processing claims (15 minutes)
+# Must be longer than max expected processing time (6 TFs x ~60s each + overhead)
+DEFAULT_PROCESSING_TIMEOUT_SECONDS = 900
 
 
 class StrategyProcessor:

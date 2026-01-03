@@ -25,9 +25,19 @@ VectorBTBacktester = BacktestEngine
 
 
 class MockStrategy(StrategyCore):
-    """Mock strategy for testing"""
+    """Mock strategy for testing - vectorized approach"""
 
-    indicator_columns = ['sma_fast', 'sma_slow']
+    # =========================================================================
+    # STRATEGY PARAMETERS (read by backtester for vectorized execution)
+    # =========================================================================
+    direction = 'long'
+    sl_pct = 0.02       # 2% stop loss
+    tp_pct = 0.03       # 3% take profit
+    leverage = 1
+    exit_after_bars = 20
+    signal_column = 'entry_signal'
+
+    indicator_columns = ['sma_fast', 'sma_slow', 'entry_signal']
 
     def __init__(self, **params):
         super().__init__(params)
@@ -35,33 +45,31 @@ class MockStrategy(StrategyCore):
         self.symbol = 'BTC'
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Pre-calculate indicators"""
+        """Pre-calculate indicators and entry_signal"""
         df = df.copy()
         df['sma_fast'] = df['close'].rolling(10).mean()
         df['sma_slow'] = df['close'].rolling(20).mean()
+
+        # Entry signal: fast > slow (vectorized)
+        df['entry_signal'] = (df['sma_fast'] > df['sma_slow']).astype(bool)
+
         return df
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
-        """Simple momentum strategy using pre-calculated indicators"""
-        if len(df) < 20:
+        """Generate signal for LIVE execution (reads entry_signal)"""
+        if len(df) < 100:
             return None
 
-        # Read pre-calculated indicators
-        sma_fast = df['sma_fast'].iloc[-1] if 'sma_fast' in df.columns else df['close'].rolling(10).mean().iloc[-1]
-        sma_slow = df['sma_slow'].iloc[-1] if 'sma_slow' in df.columns else df['close'].rolling(20).mean().iloc[-1]
-
-        if pd.isna(sma_fast) or pd.isna(sma_slow):
+        if not df['entry_signal'].iloc[-1]:
             return None
 
-        if sma_fast > sma_slow:
-            return Signal(
-                direction='long',
-                atr_stop_multiplier=2.0,
-                atr_take_multiplier=3.0,
-                reason="Fast SMA > Slow SMA"
-            )
-
-        return None
+        return Signal(
+            direction=self.direction,
+            leverage=self.leverage,
+            sl_pct=self.sl_pct,
+            tp_pct=self.tp_pct,
+            reason="Fast SMA > Slow SMA"
+        )
 
 
 @pytest.fixture

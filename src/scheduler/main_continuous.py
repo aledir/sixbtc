@@ -21,10 +21,10 @@ from src.database import get_session, Strategy, StrategyProcessor
 from src.utils import get_logger, setup_logging
 
 # Initialize logging at module load
-_config = load_config()._raw_config
+_config = load_config()
 setup_logging(
     log_file='logs/scheduler.log',
-    log_level=_config.get('logging', {}).get('level', 'INFO'),
+    log_level=_config.get_required('logging.level'),
 )
 
 logger = get_logger(__name__)
@@ -39,7 +39,7 @@ class ContinuousSchedulerProcess:
 
     def __init__(self):
         """Initialize the scheduler process"""
-        self.config = load_config()._raw_config
+        self.config = load_config()
         self.shutdown_event = threading.Event()
         self.force_exit = False
 
@@ -175,11 +175,11 @@ class ContinuousSchedulerProcess:
         try:
             from src.backtester.data_loader import BacktestDataLoader
 
-            cache_dir = self.config.get('data', {}).get('cache_dir', 'data/binance')
+            cache_dir = self.config.get_required('directories.data') + '/binance'
             loader = BacktestDataLoader(cache_dir=cache_dir)
 
-            # Refresh BTC data for configured timeframes only
-            timeframes = self.config.get('timeframes', ['15m', '1h', '4h'])
+            # Refresh BTC data for configured timeframes only - NO defaults
+            timeframes = self.config.get_required('timeframes')
 
             for tf in timeframes:
                 try:

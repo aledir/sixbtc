@@ -34,9 +34,17 @@ class StrategyScorer:
         if config and 'classification' in config:
             # NO defaults - use config values directly (Fast Fail)
             self.weights = config['classification']['score_weights']
+            # Load filter thresholds from config (with sensible defaults)
+            filter_config = config['classification'].get('filter_thresholds', {})
+            self.filter_min_sharpe = filter_config.get('min_sharpe', 0.5)
+            self.filter_min_win_rate = filter_config.get('min_win_rate', 0.40)
+            self.filter_min_trades = filter_config.get('min_trades', 20)
         elif config and 'score_weights' in config:
             # Direct config (for tests)
             self.weights = config['score_weights']
+            self.filter_min_sharpe = config.get('filter_min_sharpe', 0.5)
+            self.filter_min_win_rate = config.get('filter_min_win_rate', 0.40)
+            self.filter_min_trades = config.get('filter_min_trades', 20)
         elif config is None:
             # Allow None for unit tests only
             # In production, config is REQUIRED
@@ -46,6 +54,9 @@ class StrategyScorer:
                 'consistency': 0.20,
                 'stability': 0.10
             }
+            self.filter_min_sharpe = 0.5
+            self.filter_min_win_rate = 0.40
+            self.filter_min_trades = 20
         else:
             raise ValueError("StrategyScorer requires config with 'classification.score_weights'")
 
@@ -81,6 +92,23 @@ class StrategyScorer:
 
         # Scale to 0-100
         return min(max(score * 100, 0), 100)
+
+    def score_strategy(self, strategy: Dict) -> float:
+        """
+        Calculate score for a strategy dict
+
+        This is a convenience wrapper around score() that extracts
+        metrics from the strategy dict.
+
+        Args:
+            strategy: Strategy dict with 'metrics' or 'backtest_results' key
+
+        Returns:
+            Composite score (0-100 scale)
+        """
+        # Support both 'backtest_results' and 'metrics' keys
+        metrics = strategy.get('backtest_results') or strategy.get('metrics', {})
+        return self.score(metrics)
 
     def _normalize_edge(self, edge: float, min_val: float = 0, max_val: float = 0.10) -> float:
         """
@@ -132,11 +160,11 @@ class StrategyScorer:
             # Get metrics from either 'backtest_results' or 'metrics'
             metrics = strategy.get('backtest_results') or strategy.get('metrics', {})
 
-            # Check minimum thresholds
+            # Check minimum thresholds (from config)
             if (
-                metrics.get('sharpe_ratio', 0) >= 1.0 and
-                metrics.get('win_rate', 0) >= 0.55 and
-                metrics.get('total_trades', 0) >= 100
+                metrics.get('sharpe_ratio', 0) >= self.filter_min_sharpe and
+                metrics.get('win_rate', 0) >= self.filter_min_win_rate and
+                metrics.get('total_trades', 0) >= self.filter_min_trades
             ):
                 filtered.append(strategy)
 

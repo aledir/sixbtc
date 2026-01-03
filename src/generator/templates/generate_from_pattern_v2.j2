@@ -5,6 +5,7 @@ You are an expert quantitative trader. Create a StrategyCore class that uses the
 Name: {{ pattern.name }}
 Direction: {{ pattern.target_direction | upper }} ONLY
 Timeframe: {{ pattern.timeframe }}
+Target: {{ pattern.target_name }}
 Holding Period: {{ pattern.holding_period or "4h" }}
 
 Performance:
@@ -52,27 +53,24 @@ These helper functions may be required by the pattern:
 {% endfor %}
 {% endif %}
 
-=== TRADING PARAMETERS ===
+=== EXIT STRATEGY (CRITICAL) ===
 
-{% if pattern.suggested_sl_type %}
-Stop Loss: {{ pattern.suggested_sl_type }} (multiplier: {{ pattern.suggested_sl_multiplier or 2.0 }})
-{% else %}
-Stop Loss: ATR-based with multiplier 2.0
-{% endif %}
+Pattern-discovery validated this pattern with TIME-BASED exit after {{ pattern.holding_period or "24h" }}.
+The strategy MUST use ExitType.TIME_BASED with the correct holding period.
 
-{% if pattern.suggested_rr_ratio %}
-Risk/Reward: {{ pattern.suggested_rr_ratio }}
-{% else %}
-Risk/Reward: 2.0
-{% endif %}
+A protective stop loss is added to prevent catastrophic losses, but it should be WIDE enough
+to not interfere with normal market movements during the holding period.
+
+Holding period in bars: {{ holding_bars or 96 }} bars (for {{ pattern.timeframe }} timeframe)
 
 === STRICT REQUIREMENTS ===
 
 1. DIRECTION: Generate signals ONLY for {{ pattern.target_direction | upper }}
 2. LEVERAGE: Use leverage = {{ leverage }}
 3. PATTERN CODE: Use the EXACT formula_source code provided above
-4. HELPERS: Include the bars_*() functions before the pattern function
-5. NO MODIFICATIONS: Do NOT change the pattern logic - it was validated with this exact code
+4. EXIT: Use TIME_BASED exit with {{ holding_bars or 96 }} bars (matching pattern-discovery validation)
+5. STOP LOSS: Wide protective stop (3x ATR) to avoid premature exits
+6. NO MODIFICATIONS: Do NOT change the pattern logic - it was validated with this exact code
 
 === OUTPUT FORMAT ===
 
@@ -82,7 +80,7 @@ Generate ONLY the Python code block. No explanations.
 import pandas as pd
 import numpy as np
 import talib as ta
-from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType
+from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType, ExitType
 
 # =============================================================================
 # TIMEFRAME BAR MAPPINGS (precomputed for {{ pattern.timeframe }})
@@ -111,11 +109,17 @@ def bars_{{ period }}(): return {{ bars }}
 class Strategy_{{ pattern.strategy_type or "GEN" }}_{{ strategy_id }}(StrategyCore):
     """
     Pattern-based strategy: {{ pattern.name }}
+    Target: {{ pattern.target_name }}
     Direction: {{ pattern.target_direction | upper }} only
     Timeframe: {{ pattern.timeframe }}
+    Holding Period: {{ pattern.holding_period or "24h" }} ({{ holding_bars or 96 }} bars)
 
     Pattern Edge: {{ "%.2f"|format(pattern.test_edge * 100) }}%
     Pattern Win Rate: {{ "%.1f"|format(pattern.test_win_rate * 100) }}%
+
+    EXIT STRATEGY: Time-based exit after holding period.
+    Pattern-discovery validated with hold-and-check-target approach.
+    Wide protective stop (3x ATR) to avoid premature exits.
 
     Uses two-phase approach:
     1. calculate_indicators() - Pre-calculate ATR and pattern result
@@ -138,7 +142,7 @@ class Strategy_{{ pattern.strategy_type or "GEN" }}_{{ strategy_id }}(StrategyCo
         """
         df = df.copy()
 
-        # ATR for stops
+        # ATR for protective stop
         df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
 
         # Call pattern function ONCE on full dataframe
@@ -156,7 +160,12 @@ class Strategy_{{ pattern.strategy_type or "GEN" }}_{{ strategy_id }}(StrategyCo
         return df
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
-        """Generate {{ pattern.target_direction }} signal from pre-calculated pattern."""
+        """
+        Generate {{ pattern.target_direction }} signal from pre-calculated pattern.
+
+        Uses TIME_BASED exit matching pattern-discovery validation.
+        Protective stop at 3x ATR to prevent catastrophic losses.
+        """
         min_bars = 100
         if len(df) < min_bars:
             return None
@@ -172,11 +181,13 @@ class Strategy_{{ pattern.strategy_type or "GEN" }}_{{ strategy_id }}(StrategyCo
             return Signal(
                 direction='{{ pattern.target_direction }}',
                 leverage=self.leverage,
-                sl_type=StopLossType.{{ pattern.suggested_sl_type or "ATR" }},
-                atr_stop_multiplier={{ pattern.suggested_sl_multiplier or 2.0 }},
-                tp_type=TakeProfitType.RR_RATIO,
-                rr_ratio={{ pattern.suggested_rr_ratio or 2.0 }},
-                reason="Pattern {{ pattern.name }}: {{ pattern.formula_readable or 'condition met' }}"
+                # Wide protective stop - 3x ATR to avoid premature exits
+                sl_type=StopLossType.ATR,
+                atr_stop_multiplier=3.0,
+                # TIME-BASED exit matching pattern-discovery validation
+                exit_type=ExitType.TIME_BASED,
+                exit_after_bars={{ holding_bars or 96 }},
+                reason="Pattern {{ pattern.name }} [{{ pattern.target_name }}]: {{ pattern.formula_readable or 'condition met' }}"
             )
 
         return None

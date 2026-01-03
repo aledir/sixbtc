@@ -83,36 +83,16 @@ def setup_logging(
     # Standard format for all handlers
     log_format = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
+    plain_formatter = logging.Formatter(fmt=log_format, datefmt=date_format)
 
     # =========================================================================
-    # FILE HANDLER (Plain text, no colors, parseable)
+    # SINGLE STDOUT HANDLER (Supervisor captures stdout and writes to log file)
+    # Using redirect_stderr=true in supervisor config, all output goes to stdout
     # =========================================================================
-    file_formatter = logging.Formatter(fmt=log_format, datefmt=date_format)
-
-    file_handler = RotatingFileHandler(
-        filename=log_file,
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding='utf-8'
-    )
-    file_handler.setLevel(getattr(logging, log_level.upper()))
-    file_handler.setFormatter(file_formatter)
-    root_logger.addHandler(file_handler)
-
-    # =========================================================================
-    # CONSOLE HANDLER (Colors only if interactive terminal)
-    # =========================================================================
-    console_handler = logging.StreamHandler(sys.stderr)
-    console_handler.setLevel(getattr(logging, log_level.upper()))
-
-    if sys.stderr.isatty():
-        # Interactive terminal: use colors
-        console_handler.setFormatter(ColoredFormatter(fmt=log_format, datefmt=date_format))
-    else:
-        # Non-interactive (piped, redirected): plain text
-        console_handler.setFormatter(logging.Formatter(fmt=log_format, datefmt=date_format))
-
-    root_logger.addHandler(console_handler)
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(getattr(logging, log_level.upper()))
+    stdout_handler.setFormatter(plain_formatter)
+    root_logger.addHandler(stdout_handler)
 
     # =========================================================================
     # PER-MODULE LOG LEVELS

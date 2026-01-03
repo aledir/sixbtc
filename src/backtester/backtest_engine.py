@@ -15,12 +15,7 @@ import time
 from numba import jit, prange
 from numba.typed import List as NumbaList
 
-from src.strategies.base import StrategyCore, Signal, StopLossType, ExitType
-from src.backtester.signal_vectorizer import (
-    SignalVectorizer,
-    CursorDataFrame,
-    PrecomputedDataFrame
-)
+from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType, ExitType
 from src.utils.logger import get_logger
 from src.config.loader import load_config
 from src.executor.risk_manager import RiskManager
@@ -38,6 +33,7 @@ logger = get_logger(__name__)
 def _simulate_portfolio_numba(
     close_2d: np.ndarray,           # (n_bars, n_symbols) float64
     high_2d: np.ndarray,            # (n_bars, n_symbols) float64
+    low_2d: np.ndarray,             # (n_bars, n_symbols) float64
     entries_2d: np.ndarray,         # (n_bars, n_symbols) bool
     exits_2d: np.ndarray,           # (n_bars, n_symbols) bool
     sizes_2d: np.ndarray,           # (n_bars, n_symbols) float64 - position size as % of equity
@@ -169,6 +165,8 @@ def _simulate_portfolio_numba(
                 continue
 
             current_price = close_2d[i, j]
+            current_high = high_2d[i, j]
+            current_low = low_2d[i, j]
             direction = pos_direction[j]
             should_close = False
             exit_price = current_price
@@ -181,24 +179,26 @@ def _simulate_portfolio_numba(
                     should_close = True
                     exit_reason = 3  # time
 
-            # Check stop loss
+            # Check stop loss using LOW for longs, HIGH for shorts
+            # This correctly detects intrabar SL hits
             if not should_close:
-                if direction == 1 and current_price <= pos_sl[j]:
+                if direction == 1 and current_low <= pos_sl[j]:
                     should_close = True
                     exit_price = pos_sl[j]
                     exit_reason = 0  # sl
-                elif direction == -1 and current_price >= pos_sl[j]:
+                elif direction == -1 and current_high >= pos_sl[j]:
                     should_close = True
                     exit_price = pos_sl[j]
                     exit_reason = 0  # sl
 
-            # Check take profit
+            # Check take profit using HIGH for longs, LOW for shorts
+            # This correctly detects intrabar TP hits (critical for pattern-based strategies)
             if not should_close and pos_tp[j] > 0:
-                if direction == 1 and current_price >= pos_tp[j]:
+                if direction == 1 and current_high >= pos_tp[j]:
                     should_close = True
                     exit_price = pos_tp[j]
                     exit_reason = 1  # tp
-                elif direction == -1 and current_price <= pos_tp[j]:
+                elif direction == -1 and current_low <= pos_tp[j]:
                     should_close = True
                     exit_price = pos_tp[j]
                     exit_reason = 1  # tp
@@ -491,24 +491,35 @@ class BacktestEngine:
         equity = self.initial_capital
         equity_curve = [equity]
 
-        # Generate signals for all symbols upfront
+        # Generate signals for all symbols upfront (parallelized by symbol)
         _t0 = time.perf_counter()
         all_signals = {}
-        for symbol in symbols:
+
+        def process_symbol(symbol):
             df = aligned_data[symbol]
-            entries, exits, sizes, sl_pcts, tp_pcts, signal_meta = self._generate_signals_with_atr(
+            entries, exits, sizes, sl_pcts, tp_pcts, signal_meta = self._generate_signals_fast(
                 strategy, df, symbol
             )
-            all_signals[symbol] = {
+            return symbol, {
                 'entries': entries,
                 'exits': exits,
                 'sizes': sizes,
                 'sl_pcts': sl_pcts,
                 'tp_pcts': tp_pcts,
                 'close': df['close'],
-                'high': df['high'],  # For trailing high water mark
-                'signal_meta': signal_meta,  # Trailing and TIME_BASED info
+                'high': df['high'],
+                'low': df['low'],
+                'signal_meta': signal_meta,
             }
+
+        # Use ThreadPoolExecutor for parallel signal generation
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(len(symbols), 8)) as executor:
+            results = list(executor.map(process_symbol, symbols))
+
+        for symbol, signals_dict in results:
+            all_signals[symbol] = signals_dict
+
         _t_signals = time.perf_counter() - _t0
 
         # Prepare 2D arrays for Numba simulation
@@ -523,6 +534,7 @@ class BacktestEngine:
          trade_leverage, trade_exit_reason, n_trades) = _simulate_portfolio_numba(
             arrays['close'],
             arrays['high'],
+            arrays['low'],
             arrays['entries'],
             arrays['exits'],
             arrays['sizes'],
@@ -596,6 +608,7 @@ class BacktestEngine:
         # Initialize arrays
         close_2d = np.zeros((n_bars, n_symbols), dtype=np.float64)
         high_2d = np.zeros((n_bars, n_symbols), dtype=np.float64)
+        low_2d = np.zeros((n_bars, n_symbols), dtype=np.float64)
         entries_2d = np.zeros((n_bars, n_symbols), dtype=np.bool_)
         exits_2d = np.zeros((n_bars, n_symbols), dtype=np.bool_)
         sizes_2d = np.zeros((n_bars, n_symbols), dtype=np.float64)
@@ -616,6 +629,7 @@ class BacktestEngine:
             # Price data
             close_2d[:, j] = sig['close'].values
             high_2d[:, j] = sig['high'].values
+            low_2d[:, j] = sig['low'].values
 
             # Signals
             entries_2d[:, j] = sig['entries'].values
@@ -654,6 +668,7 @@ class BacktestEngine:
         return {
             'close': close_2d,
             'high': high_2d,
+            'low': low_2d,
             'entries': entries_2d,
             'exits': exits_2d,
             'sizes': sizes_2d,
@@ -794,7 +809,7 @@ class BacktestEngine:
         all_signals = {}
         for symbol in symbols:
             df = aligned_data[symbol]
-            entries, exits, sizes, sl_pcts, tp_pcts, signal_meta = self._generate_signals_with_atr(
+            entries, exits, sizes, sl_pcts, tp_pcts, signal_meta = self._generate_signals_fast(
                 strategy, df, symbol
             )
             all_signals[symbol] = {
@@ -805,6 +820,7 @@ class BacktestEngine:
                 'tp_pcts': tp_pcts,
                 'close': df['close'],
                 'high': df['high'],
+                'low': df['low'],
                 'signal_meta': signal_meta,
             }
         _t_signals = time.perf_counter() - _t0
@@ -858,6 +874,8 @@ class BacktestEngine:
             for symbol, pos in open_positions.items():
                 sig = all_signals[symbol]
                 current_price = sig['close'].iloc[i]
+                current_high = sig['high'].iloc[i]
+                current_low = sig['low'].iloc[i]
                 direction = pos.get('direction', 'long')
 
                 # Check TIME_BASED exit first
@@ -871,25 +889,27 @@ class BacktestEngine:
                         positions_to_close.append((symbol, current_price, 'time_exit', pnl))
                         continue
 
-                # Check stop loss (direction-aware)
+                # Check stop loss using LOW for longs, HIGH for shorts
+                # This correctly detects intrabar SL hits
                 if direction == 'long':
-                    if current_price <= pos['sl']:
+                    if current_low <= pos['sl']:
                         pnl = (pos['sl'] - pos['entry_price']) * pos['size']
                         positions_to_close.append((symbol, pos['sl'], 'sl', pnl))
                         continue
                 else:  # short
-                    if current_price >= pos['sl']:
+                    if current_high >= pos['sl']:
                         pnl = (pos['entry_price'] - pos['sl']) * pos['size']
                         positions_to_close.append((symbol, pos['sl'], 'sl', pnl))
                         continue
 
-                # Check take profit (direction-aware)
+                # Check take profit using HIGH for longs, LOW for shorts
+                # This correctly detects intrabar TP hits (critical for pattern-based strategies)
                 if pos['tp'] is not None:
-                    if direction == 'long' and current_price >= pos['tp']:
+                    if direction == 'long' and current_high >= pos['tp']:
                         pnl = (pos['tp'] - pos['entry_price']) * pos['size']
                         positions_to_close.append((symbol, pos['tp'], 'tp', pnl))
                         continue
-                    elif direction == 'short' and current_price <= pos['tp']:
+                    elif direction == 'short' and current_low <= pos['tp']:
                         pnl = (pos['entry_price'] - pos['tp']) * pos['size']
                         positions_to_close.append((symbol, pos['tp'], 'tp', pnl))
                         continue
@@ -1153,17 +1173,33 @@ class BacktestEngine:
         # Expectancy
         avg_win = np.mean([p for p in pnls if p > 0]) if winning_trades > 0 else 0
         avg_loss = abs(np.mean([p for p in pnls if p < 0])) if (total_trades - winning_trades) > 0 else 0
+        # Sanitize avg_win/avg_loss to avoid NaN propagation
+        avg_win = float(np.nan_to_num(avg_win, nan=0.0))
+        avg_loss = float(np.nan_to_num(avg_loss, nan=0.0))
         expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
 
-        # Drawdown
+        # Drawdown - protect against division by zero and negative equity
         equity_arr = np.array(equity_curve)
+        # Ensure equity never goes below 0 for drawdown calculation
+        equity_arr = np.maximum(equity_arr, 0.0)
         running_max = np.maximum.accumulate(equity_arr)
-        drawdowns = (equity_arr - running_max) / running_max
-        max_drawdown = abs(drawdowns.min())
+        with np.errstate(divide='ignore', invalid='ignore'):
+            # Correct formula: (peak - current) / peak = positive when underwater
+            drawdowns = np.where(running_max > 0,
+                                 (running_max - equity_arr) / running_max,
+                                 0.0)
+        # Max drawdown is the maximum value (already positive)
+        max_drawdown = np.nanmax(drawdowns)
+        # Clamp to [0, 1] range
+        max_drawdown = min(max(max_drawdown, 0.0), 1.0)
 
-        # Sharpe (simplified - daily returns)
-        returns = np.diff(equity_arr) / equity_arr[:-1]
-        sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) > 0 else 0
+        # Sharpe (simplified - daily returns) - protect against division by zero
+        with np.errstate(divide='ignore', invalid='ignore'):
+            returns = np.where(equity_arr[:-1] > 0,
+                               np.diff(equity_arr) / equity_arr[:-1],
+                               0.0)
+        returns = np.nan_to_num(returns, nan=0.0, posinf=0.0, neginf=0.0)
+        sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) > 0 else 0.0
 
         # Profit factor
         gross_profit = sum(p for p in pnls if p > 0)
@@ -1187,160 +1223,102 @@ class BacktestEngine:
             'trades': trades,
         }
 
-    def _generate_signals_with_atr(
+    def _generate_signals_fast(
         self,
         strategy: StrategyCore,
         data: pd.DataFrame,
-        symbol: str = None,
-        use_precomputed: bool = True
+        symbol: str = None
     ) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series, Dict]:
         """
-        Generate entry/exit signals with ATR-based SL/TP percentages
+        Generate entry/exit signals from strategy class attributes.
 
-        Uses TWO-PHASE approach for maximum performance:
-        1. calculate_indicators(df) - Called ONCE on full dataframe
-        2. generate_signal(df_with_indicators) - Called per bar, reads pre-calculated values
+        VECTORIZED: Reads signals from entry_signal column and parameters
+        from strategy class attributes. No per-bar Python loops.
 
-        This gives O(n) indicator calculation instead of O(n^2), and enables
-        Freqtrade-style lookahead bias detection by comparing indicator values.
-
-        Supports multiple exit mechanisms:
-        1. sl_stop/tp_stop - VectorBT native percentage stops
-        2. exits - indicator-based exit signals (direction='close')
-        3. time_exit - exit after N bars (via exit_type=TIME_BASED)
-        4. trailing - trailing stop with activation threshold
+        All strategies MUST:
+        1. Populate 'entry_signal' column in calculate_indicators()
+        2. Have class attributes: direction, sl_pct, tp_pct, leverage, exit_after_bars
 
         Args:
             strategy: StrategyCore instance
             data: OHLCV DataFrame with high, low, close columns
-            symbol: Symbol name for per-coin leverage
-            use_precomputed: Ignored (kept for API compatibility).
-                           Two-phase approach always uses strategy's own indicators.
+            symbol: Symbol name for logging
 
         Returns:
-            (entries, exits, sizes, sl_pcts, tp_pcts, signal_meta) where signal_meta
-            contains per-bar trailing/time_based info for realistic backtest
+            (entries, exits, sizes, sl_pcts, tp_pcts, signal_meta)
         """
-        import talib as ta
-
         n = len(data)
-        entries = pd.Series(False, index=data.index)
-        exits = pd.Series(False, index=data.index)  # Indicator-based exits
-        sizes = pd.Series(0.0, index=data.index)
-        sl_pcts = pd.Series(np.nan, index=data.index)  # SL as % of price
-        tp_pcts = pd.Series(np.nan, index=data.index)  # TP as % of price
 
-        # Extra metadata for trailing/time_based (indexed by bar number)
+        # Initialize output arrays
+        entries_arr = np.zeros(n, dtype=bool)
+        exits_arr = np.zeros(n, dtype=bool)
+        sizes_arr = np.zeros(n, dtype=np.float64)
+        sl_pcts_arr = np.full(n, np.nan, dtype=np.float64)
+        tp_pcts_arr = np.full(n, np.nan, dtype=np.float64)
         signal_meta = {}
 
         # PHASE 1: Calculate indicators ONCE on full dataframe
-        # This is the key optimization - O(n) instead of O(n^2)
         try:
-            df_with_indicators = strategy.calculate_indicators(data)
-            logger.debug(f"Calculated indicators for {symbol}: {strategy.indicator_columns}")
+            df = strategy.calculate_indicators(data)
         except Exception as e:
-            logger.warning(f"Strategy.calculate_indicators() failed, using raw data: {e}")
-            df_with_indicators = data.copy()
+            logger.error(f"calculate_indicators() failed for {symbol}: {e}")
+            raise ValueError(f"Strategy calculate_indicators() failed: {e}")
 
-        # Pre-calculate ATR for position sizing (always needed)
-        if 'atr' in df_with_indicators.columns:
-            atr = df_with_indicators['atr']
-        elif all(col in df_with_indicators.columns for col in ['high', 'low', 'close']):
-            atr = ta.ATR(
-                df_with_indicators['high'],
-                df_with_indicators['low'],
-                df_with_indicators['close'],
-                timeperiod=14
+        # Read strategy class attributes (REQUIRED - no fallbacks)
+        signal_column = getattr(strategy, 'signal_column', 'entry_signal')
+        direction = getattr(strategy, 'direction', 'long')
+        sl_pct = getattr(strategy, 'sl_pct', None)
+        tp_pct = getattr(strategy, 'tp_pct', None)
+        leverage = getattr(strategy, 'leverage', 1)
+        exit_after_bars = getattr(strategy, 'exit_after_bars', 20)
+
+        # Validate signal column exists
+        if signal_column not in df.columns:
+            raise ValueError(
+                f"Strategy must populate '{signal_column}' column in calculate_indicators(). "
+                f"Available columns: {list(df.columns)}"
             )
-        else:
-            # Fallback: estimate ATR from close only
-            atr = df_with_indicators['close'].rolling(14).std() * 1.5
 
-        # Use CursorDataFrame for efficient iteration
-        # Cursor moves through df_with_indicators (already has all indicators)
-        cursor_df = CursorDataFrame(df_with_indicators)
+        # Read entry signals as boolean array
+        entry_signal = df[signal_column].values.astype(bool)
 
-        warmup = 50  # Minimum bars before signal generation
-        fallback_mode = False  # Track if we need to use copy fallback
+        # Apply warmup (first 100 bars = no signal)
+        warmup_bars = 100
+        entry_signal[:warmup_bars] = False
 
-        # PHASE 2: Generate signals by iterating through bars
-        # generate_signal() only READS pre-calculated indicator values
-        for i in range(warmup, n):
-            # Move cursor to current bar (O(1) operation)
-            cursor_df.set_cursor(i)
+        # Set entries array
+        entries_arr = entry_signal
 
-            # Generate signal using cursor view (strategy sees df.iloc[:i+1])
-            try:
-                if fallback_mode:
-                    # Strategy doesn't support cursor view, use copy
-                    df_slice = df_with_indicators.iloc[:i+1].copy()
-                    signal = strategy.generate_signal(df_slice, symbol)
-                else:
-                    signal = strategy.generate_signal(cursor_df, symbol)
-            except Exception as e:
-                # Some strategies may fail on cursor view, fallback to copy
-                if not fallback_mode:
-                    logger.debug(f"Strategy needs DataFrame copy, switching to fallback: {e}")
-                    fallback_mode = True
-                df_slice = df_with_indicators.iloc[:i+1].copy()
-                signal = strategy.generate_signal(df_slice, symbol)
+        # Get entry indices for vectorized operations
+        entry_indices = np.where(entries_arr)[0]
 
-            if signal is None:
-                continue
+        # Fill arrays for all entries (same params for all)
+        sl_pcts_arr[entry_indices] = sl_pct
+        tp_pcts_arr[entry_indices] = tp_pct
 
-            # Process entry signals
-            if signal.direction in ['long', 'short']:
-                entries.iloc[i] = True
+        # Position sizing: risk_pct / sl_pct, capped at 1.0
+        risk_pct = self.risk_manager.risk_per_trade_pct
+        position_size = min(risk_pct / sl_pct, 1.0)
+        sizes_arr[entry_indices] = position_size
 
-                current_price = df_with_indicators['close'].iloc[i]
-                current_atr = atr.iloc[i] if not np.isnan(atr.iloc[i]) else current_price * 0.02
+        # Build metadata dict for all entries (same params)
+        base_meta = {
+            'direction': direction,
+            'sl_type': StopLossType.PERCENTAGE,
+            'exit_type': ExitType.TIME_BASED,
+            'exit_after_bars': exit_after_bars,
+            'leverage': leverage,
+        }
 
-                # Use RiskManager for position sizing - SAME logic as live executor
-                # Pass actual df_slice for VOLATILITY type SL calculation
-                df_slice = df_with_indicators.iloc[:i+1]
-                position_size, stop_loss, take_profit = self.risk_manager.calculate_position_size(
-                    signal=signal,
-                    account_balance=self.initial_capital,
-                    current_price=current_price,
-                    atr=current_atr,
-                    df=df_slice
-                )
+        for i in entry_indices:
+            signal_meta[i] = base_meta.copy()
 
-                # Convert absolute SL/TP to percentages for VectorBT
-                sl_pct = abs(current_price - stop_loss) / current_price
-                sl_pcts.iloc[i] = sl_pct
-
-                # Position size from RiskManager is in coin units, convert to % of capital
-                position_notional = position_size * current_price
-                sizes.iloc[i] = position_notional / self.initial_capital
-
-                # TP as percentage (only if strategy has take_profit enabled)
-                if signal.tp_type is not None:
-                    tp_pct = abs(take_profit - current_price) / current_price
-                    tp_pcts.iloc[i] = tp_pct
-
-                # Store extra metadata for trailing, time-based exits, and leverage
-                meta = {
-                    'direction': signal.direction,
-                    'sl_type': getattr(signal, 'sl_type', StopLossType.ATR),
-                    'exit_type': getattr(signal, 'exit_type', None),
-                    'leverage': getattr(signal, 'leverage', 1),
-                }
-
-                # Trailing SL metadata
-                if meta['sl_type'] == StopLossType.TRAILING:
-                    meta['trailing_stop_pct'] = getattr(signal, 'trailing_stop_pct', 0.02)
-                    meta['trailing_activation_pct'] = getattr(signal, 'trailing_activation_pct', 0.01)
-
-                # Time-based exit metadata
-                if meta['exit_type'] == ExitType.TIME_BASED:
-                    meta['exit_after_bars'] = getattr(signal, 'exit_after_bars', 20)
-
-                signal_meta[i] = meta
-
-            # Process exit signals (indicator-based close)
-            elif signal.direction == 'close':
-                exits.iloc[i] = True
+        # Convert to pandas Series for compatibility
+        entries = pd.Series(entries_arr, index=data.index)
+        exits = pd.Series(exits_arr, index=data.index)
+        sizes = pd.Series(sizes_arr, index=data.index)
+        sl_pcts = pd.Series(sl_pcts_arr, index=data.index)
+        tp_pcts = pd.Series(tp_pcts_arr, index=data.index)
 
         return entries, exits, sizes, sl_pcts, tp_pcts, signal_meta
 

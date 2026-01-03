@@ -214,12 +214,15 @@ class ParametricGenerator:
             logger.error(f"Template rendering failed: {e}")
             return None
 
-        # Assign random leverage (NOT from AI)
-        leverage = random.randint(self.leverage_min, self.leverage_max)
-        code = self._assign_leverage(code, leverage)
+        # Assign leverage: use from params if present, otherwise random
+        if 'leverage' in params:
+            leverage = params['leverage']
+            params_with_leverage = params
+        else:
+            leverage = random.randint(self.leverage_min, self.leverage_max)
+            params_with_leverage = {**params, 'leverage': leverage}
 
-        # Add leverage to params for tracking
-        params_with_leverage = {**params, 'leverage': leverage}
+        code = self._assign_leverage(code, leverage)
 
         # Generate unique ID based on template + params (including leverage)
         strategy_id = self._generate_id(template.name, params_with_leverage)
@@ -299,9 +302,9 @@ class ParametricGenerator:
         # Extract template short ID
         template_short = template_name.split('_')[-1] if '_' in template_name else template_name[:8]
 
-        # Hash parameters
-        param_str = '_'.join(f"{k}{v}" for k, v in sorted(params.items()))
-        param_hash = hashlib.md5(param_str.encode()).hexdigest()[:6]
+        # Hash parameters - use 8 chars to avoid collisions
+        param_str = '_'.join(f"{k}:{v}" for k, v in sorted(params.items()))
+        param_hash = hashlib.sha256(param_str.encode()).hexdigest()[:8]
 
         return f"{template_short}_{param_hash}"
 

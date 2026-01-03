@@ -40,11 +40,10 @@ def get_engine():
 
         db_url = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
-        # Create engine with connection pool
-        pool_config = config.get('database.pool', {})
-        min_conn = pool_config.get('min_connections', 5)
-        max_conn = pool_config.get('max_connections', 50)
-        pool_recycle = pool_config.get('pool_recycle', 3600)
+        # Create engine with connection pool - NO defaults (Fast Fail)
+        min_conn = config.get_required('database.pool.min_connections')
+        max_conn = config.get_required('database.pool.max_connections')
+        pool_recycle = config.get_required('database.pool.pool_recycle')
 
         _engine = create_engine(
             db_url,
