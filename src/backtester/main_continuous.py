@@ -95,7 +95,6 @@ class ContinuousBacktesterProcess:
 
         # Parametric backtester - use injected or create new (Dependency Injection)
         self.parametric_enabled = self.config.get_required('generation.parametric.enabled')
-        self.parametric_top_k = self.config.get_required('generation.parametric.top_k')
         if self.parametric_enabled:
             self.parametric_backtester = parametric_backtester or ParametricBacktester(self.config._raw_config)
             # Override parameter space from config if provided (only if we created it)
@@ -106,7 +105,7 @@ class ContinuousBacktesterProcess:
             logger.info(
                 f"Parametric backtesting ENABLED: "
                 f"{self.parametric_backtester._count_combinations()} combinations, "
-                f"top {self.parametric_top_k} saved"
+                f"all passing threshold saved"
             )
         else:
             self.parametric_backtester = None
@@ -436,6 +435,7 @@ class ContinuousBacktesterProcess:
             tf_backtest_ids = {}
             tf_validated_coins = {}  # Track which coins were used per TF
             tf_optimal_params = {}  # Track optimal params per TF (from parametric)
+            tf_all_parametric_results = {}  # Track ALL valid parametric results per TF
 
             for tf in self.timeframes:
                 # Validate pattern coins for this timeframe (3-level validation)
@@ -539,6 +539,8 @@ class ContinuousBacktesterProcess:
                 # Store optimal params if parametric was used
                 if optimal_params:
                     tf_optimal_params[tf] = optimal_params
+                    # Also store ALL parametric results for this TF (for creating clones later)
+                    tf_all_parametric_results[tf] = parametric_results
 
                 # Save training backtest result
                 training_backtest_id = self._save_backtest_result(
@@ -594,6 +596,39 @@ class ContinuousBacktesterProcess:
             self._update_strategy_optimal_tf(
                 strategy_id, optimal_tf, optimal_tf_coins, optimal_params_for_tf
             )
+
+            # Create clones for additional parametric results (if any)
+            additional_results = tf_all_parametric_results.get(optimal_tf, [])[1:]  # Skip first
+            if additional_results:
+                logger.info(
+                    f"Creating {len(additional_results)} strategy clones for "
+                    f"additional parametric combinations that passed threshold"
+                )
+
+                for i, param_result in enumerate(additional_results, start=2):
+                    # Create clone with these params
+                    clone_id = self._create_strategy_clone(
+                        strategy_id,
+                        param_result['params'],
+                        variant_num=i
+                    )
+
+                    if clone_id:
+                        # Save training backtest result for clone
+                        # Note: No holdout validation for clones (computational efficiency)
+                        # Classifier will see training metrics only
+                        clone_backtest_id = self._save_backtest_result(
+                            clone_id,
+                            param_result,  # Training metrics with these params
+                            optimal_tf_coins,
+                            optimal_tf,
+                            period='training'
+                        )
+
+                        # Update clone with optimal TF and pairs
+                        self._update_strategy_optimal_tf(
+                            clone_id, optimal_tf, optimal_tf_coins, None
+                        )
 
             # Mark optimal backtest
             if optimal_tf in tf_backtest_ids:
@@ -811,13 +846,19 @@ class ContinuousBacktesterProcess:
             logger.error(f"Parametric backtest failed: {e}")
             return []
 
-        # Get top K results
-        top_results = self.parametric_backtester.get_top_k(results_df, self.parametric_top_k)
+        # Filter by threshold - save ALL combinations that pass
+        valid_results = results_df[
+            (results_df['sharpe'] >= self.min_sharpe) &
+            (results_df['win_rate'] >= self.min_win_rate) &
+            (results_df['expectancy'] >= self.min_expectancy) &
+            (results_df['max_drawdown'] <= self.max_drawdown) &
+            (results_df['total_trades'] >= self.min_trades)
+        ].copy()
 
         # Convert to list of dicts matching expected format
         # Use float() to convert np.float64 to native Python float (required for DB)
         results = []
-        for _, row in top_results.iterrows():
+        for _, row in valid_results.iterrows():
             result = {
                 'sharpe_ratio': float(row['sharpe']),
                 'max_drawdown': float(row['max_drawdown']),
@@ -1299,6 +1340,78 @@ class ContinuousBacktesterProcess:
                     )
         except Exception as e:
             logger.error(f"Failed to update strategy: {e}")
+
+    def _create_strategy_clone(
+        self,
+        original_strategy_id: UUID,
+        params: Dict,
+        variant_num: int
+    ) -> Optional[UUID]:
+        """
+        Create a clone of a strategy with different parametric parameters.
+
+        Used when parametric backtest finds multiple valid combinations.
+        Each combination becomes an independent strategy for ranking.
+
+        Args:
+            original_strategy_id: UUID of original strategy
+            params: Dict with sl_pct, tp_pct, leverage, exit_bars
+            variant_num: Variant number (2, 3, 4, ...)
+
+        Returns:
+            UUID of cloned strategy, or None if failed
+        """
+        try:
+            from uuid import uuid4
+            from src.database.models import Strategy
+
+            with get_session() as session:
+                # Get original strategy
+                original = session.query(Strategy).filter(
+                    Strategy.id == original_strategy_id
+                ).first()
+
+                if not original:
+                    logger.error(f"Original strategy {original_strategy_id} not found")
+                    return None
+
+                # Create clone
+                clone = Strategy()
+                clone.id = uuid4()
+                clone.name = f"{original.name}_v{variant_num}"
+                clone.strategy_type = original.strategy_type
+                clone.ai_provider = original.ai_provider
+                clone.timeframe = original.timeframe  # Will be updated with optimal TF
+                clone.status = "TESTED"  # Already tested via parametric backtest
+
+                # Update code with new params
+                updated_code = self._update_strategy_params(original.code, params)
+                if not updated_code:
+                    logger.warning(f"Failed to update code for clone {clone.name}")
+                    return None
+
+                clone.code = updated_code
+                clone.template_id = original.template_id
+                clone.pattern_ids = original.pattern_ids
+                clone.backtest_pairs = original.backtest_pairs
+                clone.optimal_timeframe = original.optimal_timeframe
+                clone.tested_at = datetime.now(UTC)
+
+                session.add(clone)
+                session.commit()
+
+                logger.info(
+                    f"Created strategy clone {clone.name} with params: "
+                    f"SL={params.get('sl_pct', 0):.1%}, "
+                    f"TP={params.get('tp_pct', 0):.1%}, "
+                    f"lev={params.get('leverage', 1)}"
+                )
+
+                return clone.id
+
+        except Exception as e:
+            logger.error(f"Failed to create strategy clone: {e}")
+            return None
 
     def _update_strategy_params(self, code: str, params: Dict) -> Optional[str]:
         """
