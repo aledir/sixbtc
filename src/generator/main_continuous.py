@@ -335,13 +335,13 @@ class ContinuousGeneratorProcess:
             # Smart pattern selection
             use_patterns, selected_patterns = self._should_use_patterns()
 
-            # Generate variations with capacity limit
+            # Generate strategies with capacity limit
             results = self.strategy_builder.generate_strategies(
                 strategy_type=strategy_type,
                 timeframe=timeframe,
                 use_patterns=use_patterns,
                 patterns=selected_patterns,
-                max_variations=remaining_capacity
+                max_strategies=remaining_capacity
             )
 
             if not results:

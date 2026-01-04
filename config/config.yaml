@@ -135,8 +135,8 @@ generation:
   # Parametric optimization (runs after base strategy generation)
   parametric:
     enabled: true              # Enable parametric optimization
-    # No top_k limit: ALL combinations that pass thresholds are saved
-    # This maximizes ROI of computational work (if we test 400, save all valid ones)
+    # No top_k limit: ALL strategies that pass thresholds are saved
+    # This maximizes ROI of computational work (if we generate 400, save all valid ones)
     parameter_space:
       sl_pct: [0.01, 0.015, 0.02, 0.025, 0.03]
       tp_pct: [0.02, 0.03, 0.05, 0.07, 0.10]
@@ -151,9 +151,9 @@ generation:
 # System self-regulates: slow backtester -> queues fill -> upstream pauses
 pipeline:
   queue_limits:
-    generated: 100      # Max GENERATED strategies waiting for validation
+    generated: 500      # Max GENERATED strategies (supports one parametric batch ~400)
     validated: 50       # Max VALIDATED strategies waiting for backtest
-    tested: 100         # Max TESTED strategies waiting for classification (increased from 30)
+    tested: 400         # Max TESTED strategies waiting for classification (increased from 300 to reduce backpressure)
 
   backpressure:
     check_interval: 10        # Seconds between backpressure checks
@@ -196,7 +196,7 @@ validation:
 # ==============================================================================
 backtesting:
   initial_capital: 10000
-  parallel_threads: 10
+  parallel_threads: 5  # Reduced from 10 to avoid server saturation
 
   # Coins per backtest (applies to BOTH pattern and AI strategies)
   # Pattern: selects top N coins by edge from pattern's coin_performance
@@ -238,7 +238,7 @@ trading:
 # CLASSIFICATION & SELECTION
 # ==============================================================================
 classification:
-  frequency_hours: 1
+  frequency_hours: 0.25  # Every 15 minutes (increased from 1 hour to reduce bottleneck)
 
   # Backtest scoring weights (expectancy is dominant)
   score_weights:
@@ -303,6 +303,35 @@ executor:
 monitoring:
   snapshot_interval_minutes: 15
   check_interval_seconds: 30
+
+# ==============================================================================
+# METRICS & ANALYTICS
+# ==============================================================================
+metrics:
+  # Collection interval for pipeline snapshots
+  collection_interval: 300        # 5 minutes (300 seconds)
+
+  # Data retention policies
+  retention:
+    raw_days: 7                   # Keep 5-min snapshots for 7 days
+    hourly_days: 30               # Keep hourly aggregates for 30 days
+    daily_forever: true           # Keep daily aggregates forever
+
+  # Alert thresholds
+  alerts:
+    enabled: true
+
+    backpressure:
+      threshold: 0.90             # 90% queue utilization
+      duration_minutes: 60        # Sustained for 1 hour
+
+    throughput_degradation:
+      min_strategies_per_hour: 5
+      duration_hours: 2
+
+    quality_degradation:
+      min_sharpe: 0.3
+      duration_hours: 24
 
 # ==============================================================================
 # LOGGING

@@ -105,7 +105,7 @@ class ContinuousBacktesterProcess:
                     self.parametric_backtester.set_parameter_space(param_space)
             logger.info(
                 f"Parametric backtesting ENABLED: "
-                f"{self.parametric_backtester._count_combinations()} combinations, "
+                f"{self.parametric_backtester._count_strategies()} candidate strategies, "
                 f"all passing threshold saved"
             )
         else:
@@ -149,25 +149,102 @@ class ContinuousBacktesterProcess:
             f"downstream limit {self.tested_limit} TESTED"
         )
 
-    def _get_backtest_pairs(self) -> List[str]:
+    def _scroll_down_coverage(
+        self,
+        coins: List[str],
+        timeframe: str,
+        target_count: int = None,
+        min_count: int = 5
+    ) -> Tuple[Optional[List[str]], str]:
         """
-        Load top N pairs from CoinRegistry.
+        UNIFIED scroll-down logic for both Pattern and AI strategies.
 
-        CoinRegistry handles:
-        - Caching with automatic invalidation
-        - Volume filtering (min $1M by default)
-        - Sorting by volume descending
+        Iterates through coins (ordered by edge OR volume) and selects
+        first N coins with sufficient data coverage.
+
+        Args:
+            coins: List of coins to check (already filtered for liquidity + cache)
+            timeframe: Timeframe to validate
+            target_count: Target number of pairs (default: self.max_coins = 30)
+            min_count: Minimum acceptable pairs (default: 5)
 
         Returns:
-            List of symbol names (e.g., ['BTC', 'ETH', ...])
+            (validated_coins, status) - validated_coins is None if rejected
         """
-        pairs = get_active_pairs(limit=self.max_coins)
+        if target_count is None:
+            target_count = self.max_coins  # 30
+
+        # Get cache reader
+        from src.backtester.cache_reader import BacktestCacheReader
+        cache_reader = BacktestCacheReader(self.data_loader.cache_dir)
+
+        # Check coverage for ALL coins (scroll-down logic)
+        total_days = self.training_days + self.holdout_days
+        min_coverage = 0.90
+
+        validated_coins = []
+        for coin in coins:  # Iterate ALL coins (no early break)
+            info = cache_reader.get_cache_info(coin, timeframe)
+            if info and info.get('days', 0) >= total_days * min_coverage:
+                validated_coins.append(coin)
+
+        # Check minimum threshold
+        if len(validated_coins) < min_count:
+            return None, f"insufficient_coverage:{len(validated_coins)}/{min_count}"
+
+        # Limit to target_count (but accept less if that's all we have)
+        final_coins = validated_coins[:target_count]
+
+        return final_coins, "validated"
+
+    def _get_backtest_pairs(self, timeframe: str) -> Tuple[Optional[List[str]], str]:
+        """
+        Load pairs for AI-based backtesting with UNIFIED scroll-down logic.
+
+        Gets extended list (2x target), filters for liquidity + cache,
+        then uses unified scroll-down to find 30 with sufficient coverage.
+
+        Returns:
+            (validated_pairs, status) - pairs is None if rejected
+        """
+        target_count = self.max_coins  # 30
+        extended_limit = target_count * 2  # 60 pairs buffer
+
+        # Get volume-sorted pairs from CoinRegistry
+        pairs = get_active_pairs(limit=extended_limit)
 
         if not pairs:
             logger.warning("No pairs in CoinRegistry, using default pairs")
-            return ['BTC', 'ETH', 'SOL', 'ARB', 'AVAX']
+            pairs = ['BTC', 'ETH', 'SOL', 'ARB', 'AVAX']
 
-        return pairs
+        # Filter for cache existence
+        from src.backtester.cache_reader import BacktestCacheReader, CacheNotFoundError
+        try:
+            cache_reader = BacktestCacheReader(self.data_loader.cache_dir)
+            cached_symbols = set(cache_reader.list_cached_symbols(timeframe))
+        except CacheNotFoundError:
+            return None, "cache_not_found"
+
+        cached_pairs = [p for p in pairs if p in cached_symbols]
+
+        if not cached_pairs:
+            return None, "no_cached_pairs"
+
+        # UNIFIED scroll-down logic (same as Pattern strategies)
+        validated_pairs, status = self._scroll_down_coverage(
+            coins=cached_pairs,
+            timeframe=timeframe,
+            target_count=target_count,
+            min_count=5
+        )
+
+        if validated_pairs:
+            logger.info(
+                f"AI pair selection: {len(validated_pairs)} pairs validated "
+                f"(from {len(pairs)} volume-sorted, target: {target_count})"
+            )
+
+        return validated_pairs, status
 
     def _validate_pattern_coins(
         self,
@@ -227,30 +304,27 @@ class ContinuousBacktesterProcess:
             )
             return None, f"insufficient_cache:{len(cached_coins)}/{min_coins}"
 
-        # Level 3: Coverage filter (>= 90% data for training+holdout period)
-        total_days = self.training_days + self.holdout_days
-        min_coverage = 0.90
+        # Level 3: Coverage filter using UNIFIED scroll-down logic
+        target_count = self.max_coins  # 30 pairs target
+        min_count = max(min_coins, 5)  # Minimum 5 pairs threshold
 
-        validated_coins = []
-        for coin in cached_coins:
-            info = cache_reader.get_cache_info(coin, timeframe)
-            if info and info.get('days', 0) >= total_days * min_coverage:
-                validated_coins.append(coin)
+        validated_coins, status = self._scroll_down_coverage(
+            coins=cached_coins,
+            timeframe=timeframe,
+            target_count=target_count,
+            min_count=min_count
+        )
 
-            if len(validated_coins) >= self.max_coins:
-                # Have enough coins for backtest, stop checking (preserve edge order)
-                break
-
-        if len(validated_coins) < min_coins:
+        if not validated_coins:
             logger.warning(
-                f"Coverage filter: {len(validated_coins)}/{len(cached_coins)} coins with "
-                f">= {min_coverage:.0%} coverage for {total_days}d (need {min_coins})"
+                f"Coverage filter: {status} for pattern coins "
+                f"(from {len(cached_coins)} cached)"
             )
-            return None, f"insufficient_coverage:{len(validated_coins)}/{min_coins}"
+            return None, status
 
         logger.info(
             f"Validated {len(validated_coins)} pattern coins "
-            f"(from {len(pattern_coins)} original, {min_coins} required)"
+            f"(from {len(pattern_coins)} edge-sorted, target: {target_count})"
         )
 
         return validated_coins, "validated"
@@ -289,7 +363,8 @@ class ContinuousBacktesterProcess:
                 symbols=pairs,
                 timeframe=timeframe,
                 training_days=self.training_days,
-                holdout_days=self.holdout_days
+                holdout_days=self.holdout_days,
+                target_count=self.max_coins  # Scroll through pairs to find 30 with valid data
             )
 
             self._data_cache[training_cache_key] = training_data
@@ -439,7 +514,24 @@ class ContinuousBacktesterProcess:
             tf_all_parametric_results = {}  # Track ALL valid parametric results per TF
             tf_holdout_data = {}  # Track holdout data per TF (for additional parametric validation)
 
-            for tf in self.timeframes:
+            # Determine timeframes to test based on strategy type
+            if pattern_coins:
+                # Pattern-based: test ONLY original_tf (from pattern.timeframe)
+                # Pattern Discovery validated this pattern on this specific timeframe
+                # Testing on other timeframes invalidates that validation
+                timeframes_to_test = [original_tf]
+                logger.info(
+                    f"[{strategy_name}] Pattern-based: testing only {original_tf} "
+                    f"(pattern validated on this timeframe)"
+                )
+            else:
+                # AI-based: test ALL timeframes to find optimal
+                timeframes_to_test = self.timeframes
+                logger.info(
+                    f"[{strategy_name}] AI-based: testing all {len(self.timeframes)} timeframes"
+                )
+
+            for tf in timeframes_to_test:
                 # Validate pattern coins for this timeframe (3-level validation)
                 if pattern_coins:
                     validated_coins, validation_reason = self._validate_pattern_coins(
@@ -455,10 +547,12 @@ class ContinuousBacktesterProcess:
                         f"[{strategy_name}] {tf}: Using {len(pairs)} validated pattern coins"
                     )
                 else:
-                    # Non-pattern strategy: use volume-based pairs
-                    pairs = self._get_backtest_pairs()
+                    # Non-pattern strategy: use volume-based pairs with UNIFIED scroll-down
+                    pairs, status = self._get_backtest_pairs(tf)
                     if not pairs:
-                        logger.warning(f"[{strategy_name}] {tf}: No pairs available")
+                        logger.info(
+                            f"[{strategy_name}] {tf}: SKIPPED - {status}"
+                        )
                         continue
 
                 logger.info(f"[{strategy_name}] Testing {tf} on {len(pairs)} pairs (training/holdout)...")
@@ -477,7 +571,7 @@ class ContinuousBacktesterProcess:
                 # Run TRAINING period backtest
                 try:
                     if self.parametric_enabled:
-                        # Parametric: test multiple SL/TP/leverage combinations
+                        # Parametric: generate strategies with different SL/TP/leverage parameters
                         # Pass is_pattern_based to select appropriate parameter space
                         is_pattern_based = pattern_coins is not None and len(pattern_coins) > 0
                         parametric_results = self._run_parametric_backtest(
@@ -602,8 +696,39 @@ class ContinuousBacktesterProcess:
                 strategy_id, optimal_tf, optimal_tf_coins, optimal_params_for_tf
             )
 
+            # Run walk-forward analysis for stability validation
+            logger.info(
+                f"[{strategy_name}] Running walk-forward analysis on {optimal_tf} "
+                f"for stability validation"
+            )
+
+            wf_stability = self._run_walk_forward_analysis(
+                strategy_instance=strategy_instance,
+                optimal_tf=optimal_tf,
+                validated_coins=optimal_tf_coins,
+                optimal_params=optimal_params_for_tf
+            )
+
+            if wf_stability is not None:
+                # Update the optimal TF backtest result with walk-forward stability
+                optimal_tf_backtest_id = tf_backtest_ids.get(optimal_tf)
+                if optimal_tf_backtest_id:
+                    self._update_backtest_with_walkforward(
+                        optimal_tf_backtest_id,
+                        wf_stability
+                    )
+
+                    logger.info(
+                        f"[{strategy_name}] Walk-forward stability: {wf_stability:.3f} "
+                        f"({'stable' if wf_stability < 0.15 else 'unstable'})"
+                    )
+                else:
+                    logger.warning(f"[{strategy_name}] No backtest ID found for optimal TF {optimal_tf}")
+            else:
+                logger.warning(f"[{strategy_name}] Walk-forward analysis failed")
+
             # Process additional parametric strategies (if any)
-            # Each parametric combination becomes an independent strategy
+            # Each parameter set generates an independent strategy
             additional_results = tf_all_parametric_results.get(optimal_tf, [])[1:]  # Skip first
             if additional_results:
                 logger.info(
@@ -617,7 +742,7 @@ class ContinuousBacktesterProcess:
                     logger.warning(f"No holdout data for {optimal_tf}, skipping additional parametric validation")
                 else:
                     for i, param_result in enumerate(additional_results, start=2):
-                        # Run holdout validation for this parameter combination
+                        # Run holdout validation for this strategy
                         try:
                             # Load strategy instance and apply these params
                             strategy_instance_for_holdout = self._load_strategy_instance(code, class_name)
@@ -643,27 +768,30 @@ class ContinuousBacktesterProcess:
 
                             if not validation_for_params['passed']:
                                 logger.info(
-                                    f"Parametric strategy variant {i} REJECTED on holdout: "
+                                    f"Parametric strategy #{i} REJECTED on holdout: "
                                     f"{validation_for_params['reason']}"
                                 )
-                                continue  # Skip this combination (overfitted)
+                                continue  # Skip this strategy (overfitted)
 
                             # Calculate final metrics (training + holdout)
                             final_result_for_params = self._calculate_final_metrics(
                                 param_result, holdout_result_for_params, validation_for_params
                             )
 
-                            # Create independent strategy for this parameter combination
-                            variant_id = self._create_parametric_strategy(
+                            # Create independent strategy from parameter set
+                            parametric_strategy_id = self._create_parametric_strategy(
                                 strategy_id,
                                 params,
-                                variant_num=i
+                                strategy_num=i,
+                                param_result=param_result,
+                                holdout_result=holdout_result_for_params,
+                                validation=validation_for_params
                             )
 
-                            if variant_id:
+                            if parametric_strategy_id:
                                 # Save training backtest
                                 training_bt_id = self._save_backtest_result(
-                                    variant_id,
+                                    parametric_strategy_id,
                                     param_result,
                                     optimal_tf_coins,
                                     optimal_tf,
@@ -673,7 +801,7 @@ class ContinuousBacktesterProcess:
                                 # Save holdout backtest
                                 if holdout_result_for_params:
                                     holdout_bt_id = self._save_backtest_result(
-                                        variant_id,
+                                        parametric_strategy_id,
                                         holdout_result_for_params,
                                         optimal_tf_coins,
                                         optimal_tf,
@@ -689,7 +817,7 @@ class ContinuousBacktesterProcess:
 
                                 # Update strategy with optimal TF and pairs
                                 self._update_strategy_optimal_tf(
-                                    variant_id, optimal_tf, optimal_tf_coins, None
+                                    parametric_strategy_id, optimal_tf, optimal_tf_coins, None
                                 )
 
                                 logger.info(
@@ -698,7 +826,7 @@ class ContinuousBacktesterProcess:
                                 )
 
                         except Exception as e:
-                            logger.error(f"Failed to validate parametric variant {i}: {e}")
+                            logger.error(f"Failed to validate parametric strategy #{i}: {e}")
                             continue
 
             # Mark optimal backtest
@@ -776,10 +904,10 @@ class ContinuousBacktesterProcess:
         is_pattern_based: bool = False
     ) -> List[Dict]:
         """
-        Run parametric backtest testing multiple SL/TP/leverage/exit combinations.
+        Run parametric backtest generating strategies with different SL/TP/leverage/exit.
 
-        Extracts entry signals from the strategy once, then tests N parameter
-        combinations using the Numba-optimized ParametricBacktester.
+        Extracts entry signals from the strategy once, then tests N parameter sets
+        using the Numba-optimized ParametricBacktester to generate candidate strategies.
 
         TWO APPROACHES based on strategy origin:
 
@@ -903,7 +1031,7 @@ class ContinuousBacktesterProcess:
 
         logger.info(
             f"Running parametric backtest: {n_bars} bars, {n_symbols} symbols, "
-            f"{total_signals} signals, {self.parametric_backtester._count_combinations()} combinations"
+            f"{total_signals} signals, {self.parametric_backtester._count_strategies()} candidate strategies"
         )
 
         # Run parametric backtest
@@ -917,7 +1045,7 @@ class ContinuousBacktesterProcess:
             logger.error(f"Parametric backtest failed: {e}")
             return []
 
-        # Filter by threshold - save ALL combinations that pass
+        # Filter by threshold - save ALL strategies that pass
         valid_results = results_df[
             (results_df['sharpe'] >= self.min_sharpe) &
             (results_df['win_rate'] >= self.min_win_rate) &
@@ -951,7 +1079,7 @@ class ContinuousBacktesterProcess:
         if results:
             best = results[0]
             logger.info(
-                f"Parametric backtest complete: {len(results)} combinations passed | "
+                f"Parametric: generated {len(results)} strategies | "
                 f"Best: Sharpe={best['sharpe_ratio']:.2f}, Trades={best['total_trades']}, "
                 f"SL={best['params']['sl_pct']:.1%}, TP={best['params']['tp_pct']:.1%}"
             )
@@ -1263,6 +1391,159 @@ class ContinuousBacktesterProcess:
 
         return best_tf
 
+    def _run_walk_forward_analysis(
+        self,
+        strategy_instance,
+        optimal_tf: str,
+        validated_coins: List[str],
+        optimal_params: Optional[Dict]
+    ) -> Optional[float]:
+        """
+        Run walk-forward analysis to calculate strategy stability.
+
+        Creates 4 expanding windows to test consistency across time:
+        - Window 1: Train 75%, Test 6.25%
+        - Window 2: Train 81.25%, Test 6.25%
+        - Window 3: Train 87.5%, Test 6.25%
+        - Window 4: Train 93.75%, Test 6.25%
+
+        Stability = std_dev(edge across windows) - lower is better
+
+        Args:
+            strategy_instance: Strategy to test
+            optimal_tf: Optimal timeframe
+            validated_coins: Coins that passed validation
+            optimal_params: Optimal parameters from parametric backtest
+
+        Returns:
+            Stability score (std dev of edge) or None if failed
+        """
+        try:
+            import numpy as np
+            from src.backtester.cache_reader import BacktestCacheReader
+
+            # Create cache reader for loading training data
+            cache_reader = BacktestCacheReader(self.data_loader.cache_dir)
+
+            # Load full training data for all validated coins
+            training_data = {}
+            for symbol in validated_coins:
+                df = cache_reader.read(
+                    symbol=symbol,
+                    timeframe=optimal_tf,
+                    days=self.training_days
+                )
+                if not df.empty:
+                    training_data[symbol] = df
+
+            if len(training_data) < 5:
+                logger.warning("Walk-forward: insufficient symbols (need >= 5)")
+                return None
+
+            # Apply optimal params to strategy if available
+            if optimal_params:
+                strategy_instance.sl_pct = optimal_params.get('sl_pct', 0.02)
+                strategy_instance.tp_pct = optimal_params.get('tp_pct', 0.03)
+                strategy_instance.leverage = optimal_params.get('leverage', 1)
+                strategy_instance.exit_after_bars = optimal_params.get('exit_bars', 0)
+
+            # OPTIMIZED: Run walk-forward on ALL symbols together (4 backtests total, not 120)
+            # Pick a reference symbol to split the time windows
+            reference_symbol = list(training_data.keys())[0]
+            reference_df = training_data[reference_symbol]
+
+            # Create 4 expanding windows based on time
+            windows_splits = self.data_loader.walk_forward_split(reference_df, n_windows=4)
+
+            # Extract timestamps for each window
+            window_timestamps = []
+            for train_df, test_df in windows_splits:
+                if len(test_df) > 0:
+                    test_start = test_df['timestamp'].min()
+                    test_end = test_df['timestamp'].max()
+                    window_timestamps.append((test_start, test_end))
+
+            if len(window_timestamps) < 4:
+                logger.warning("Walk-forward: insufficient time windows")
+                return None
+
+            # Run 4 backtests (one per window, all symbols together)
+            edge_per_window = []
+            valid_windows = 0
+
+            for window_idx, (test_start, test_end) in enumerate(window_timestamps):
+                # Filter all symbols to this time window
+                window_data = {}
+                for symbol, df in training_data.items():
+                    window_df = df[(df['timestamp'] >= test_start) & (df['timestamp'] <= test_end)]
+                    if not window_df.empty:
+                        window_data[symbol] = window_df
+
+                if len(window_data) < 5:  # Need minimum symbols
+                    continue
+
+                # Backtest this window on all symbols
+                result = self._run_multi_symbol_backtest(
+                    strategy_instance,
+                    window_data,
+                    optimal_tf
+                )
+
+                # Accept if we have at least 1 trade (relaxed from 3)
+                if result and result.get('total_trades', 0) >= 1:
+                    edge = result.get('expectancy', 0)
+                    edge_per_window.append(edge)
+                    valid_windows += 1
+                    logger.debug(f"Walk-forward window {window_idx+1}: edge={edge:.3f}, trades={result.get('total_trades', 0)}")
+
+            # Need at least 3 valid windows (relaxed from 4)
+            if valid_windows < 3:
+                logger.warning(f"Walk-forward: only {valid_windows}/4 windows completed (need >= 3)")
+                return None
+
+            # Stability = standard deviation of edge across windows
+            # Lower is better (consistent performance across time)
+            stability = float(np.std(edge_per_window))
+
+            logger.info(
+                f"Walk-forward edges: {[f'{e:.2%}' for e in edge_per_window]}, "
+                f"stability: {stability:.3f} ({valid_windows}/4 windows)"
+            )
+
+            return stability
+
+        except Exception as e:
+            logger.error(f"Walk-forward analysis failed: {e}")
+            return None
+
+    def _update_backtest_with_walkforward(
+        self,
+        backtest_id: str,
+        wf_stability: float
+    ):
+        """
+        Update backtest result with walk-forward stability.
+
+        Args:
+            backtest_id: BacktestResult UUID
+            wf_stability: Walk-forward stability score
+        """
+        try:
+            from src.database.models import BacktestResult
+            with get_session() as session:
+                bt = session.query(BacktestResult).filter(
+                    BacktestResult.id == backtest_id
+                ).first()
+
+                if bt:
+                    bt.walk_forward_stability = wf_stability
+                    bt.weighted_walk_forward_stability = wf_stability
+                    session.commit()
+                    logger.debug(f"Updated backtest {backtest_id} with walk-forward stability: {wf_stability:.3f}")
+
+        except Exception as e:
+            logger.error(f"Failed to update walk-forward stability: {e}")
+
     def _to_python_type(self, value):
         """
         Convert numpy types to Python native types for database storage.
@@ -1386,6 +1667,8 @@ class ContinuousBacktesterProcess:
                     strategy.backtest_pairs = pairs
                     strategy.backtest_date = datetime.now(UTC)
                     strategy.tested_at = datetime.now(UTC)
+                    strategy.backtest_completed_at = datetime.now(UTC)
+                    strategy.processing_completed_at = datetime.now(UTC)
 
                     # Update strategy code with optimal params from parametric backtest
                     if optimal_params:
@@ -1416,18 +1699,24 @@ class ContinuousBacktesterProcess:
         self,
         template_strategy_id: UUID,
         params: Dict,
-        variant_num: int
+        strategy_num: int,
+        param_result: Optional[Dict] = None,
+        holdout_result: Optional[Dict] = None,
+        validation: Optional[Dict] = None
     ) -> Optional[UUID]:
         """
-        Create an independent strategy from a parameter combination.
+        Create an independent strategy from a parameter set.
 
-        Each parameter combination is a unique, independent strategy.
+        Each parameter set generates a unique, independent strategy.
         Name is generated using hash of parameters for uniqueness.
 
         Args:
             template_strategy_id: UUID of template strategy (code source)
             params: Dict with sl_pct, tp_pct, leverage, exit_bars
-            variant_num: Sequence number (for logging only)
+            strategy_num: Sequence number (for logging only)
+            param_result: Training backtest metrics (optional)
+            holdout_result: Holdout backtest metrics (optional)
+            validation: Holdout validation results (optional)
 
         Returns:
             UUID of new strategy, or None if failed
@@ -1454,11 +1743,12 @@ class ContinuousBacktesterProcess:
                 # Create independent strategy
                 strategy = Strategy()
                 strategy.id = uuid4()
-                strategy.name = f"{template.name}_p{param_hash}"  # p = parameters hash
+                # Single UUID naming: Strategy_TYPE_HASH (consistent with pattern-based)
+                strategy.name = f"Strategy_{template.strategy_type}_{param_hash}"
                 strategy.strategy_type = template.strategy_type
                 strategy.ai_provider = template.ai_provider
                 strategy.timeframe = template.timeframe  # Will be updated with optimal TF
-                strategy.status = "TESTED"  # Already tested via parametric backtest
+                strategy.status = "GENERATED"  # Must go through validator → backtester pipeline
 
                 # Update code with these parameters
                 updated_code = self._update_strategy_params(template.code, params)
@@ -1467,11 +1757,24 @@ class ContinuousBacktesterProcess:
                     return None
 
                 strategy.code = updated_code
+
+                # Store parametric backtest metrics as metadata (for comparison with official backtest)
+                if param_result and validation:
+                    strategy.parametric_backtest_metrics = {
+                        'training_sharpe': param_result.get('sharpe'),
+                        'training_win_rate': param_result.get('win_rate'),
+                        'training_expectancy': param_result.get('expectancy'),
+                        'holdout_sharpe': holdout_result.get('sharpe') if holdout_result else None,
+                        'holdout_degradation': validation.get('degradation_pct'),
+                        'tested_at': datetime.now(UTC).isoformat()
+                    }
+
                 strategy.template_id = template.template_id
                 strategy.pattern_ids = template.pattern_ids
-                strategy.backtest_pairs = template.backtest_pairs
-                strategy.optimal_timeframe = template.optimal_timeframe
-                strategy.tested_at = datetime.now(UTC)
+                strategy.generation_mode = 'template'  # Mark as template-generated
+                strategy.parameters = params  # Store parameters used
+                strategy.created_at = datetime.now(UTC)
+                # Other timestamps (tested_at, backtest_completed_at) will be set by validator/backtester
 
                 session.add(strategy)
                 session.commit()

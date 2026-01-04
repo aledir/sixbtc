@@ -1,8 +1,8 @@
 """
-Parametric Generator - Generate Strategy Variations from Templates
+Parametric Generator - Generate Multiple Strategies from Templates
 
 Takes a StrategyTemplate with Jinja2 placeholders and generates
-multiple concrete strategies by applying parameter combinations.
+multiple concrete strategies by varying parameters across different sets.
 
 Leverage is assigned randomly from the database coins table:
 - min = MIN(coins.max_leverage) from active coins
@@ -75,7 +75,7 @@ class ParametricGenerator:
     Generates concrete strategies from parameterized templates
 
     No AI calls - just Jinja2 template rendering with
-    different parameter combinations.
+    different parameter sets to create multiple strategies.
 
     Leverage is assigned randomly based on database coins table:
     - min = MIN(coins.max_leverage) from active coins
@@ -105,37 +105,37 @@ class ParametricGenerator:
             f"{self.leverage_min}x - {self.leverage_max}x (from coins table)"
         )
 
-    def generate_variations(
+    def generate_strategies(
         self,
         template: StrategyTemplate,
-        max_variations: Optional[int] = None
+        max_strategies: Optional[int] = None
     ) -> list[GeneratedStrategy]:
         """
-        Generate all parameter variations for a template
+        Generate all parametric strategies for a template
 
         Args:
             template: StrategyTemplate with Jinja2 placeholders
-            max_variations: Optional limit on number of variations
+            max_strategies: Optional limit on number of strategies
 
         Returns:
             List of GeneratedStrategy objects
         """
         strategies = []
 
-        # Generate all parameter combinations
-        combinations = self._generate_combinations(template.parameters_schema)
+        # Generate all parameter sets
+        param_sets = self._generate_parameter_sets(template.parameters_schema)
 
-        if max_variations and len(combinations) > max_variations:
+        if max_strategies and len(param_sets) > max_strategies:
             logger.info(
-                f"Limiting {len(combinations)} combinations to {max_variations}"
+                f"Limiting to {max_strategies} parameter sets (from {len(param_sets)})"
             )
-            combinations = combinations[:max_variations]
+            param_sets = param_sets[:max_strategies]
 
         logger.info(
-            f"Generating {len(combinations)} variations for template {template.name}"
+            f"Generating {len(param_sets)} strategies from template {template.name}"
         )
 
-        for i, params in enumerate(combinations):
+        for i, params in enumerate(param_sets):
             try:
                 strategy = self._generate_single(template, params)
                 if strategy:
@@ -283,15 +283,15 @@ class ParametricGenerator:
 
         return code
 
-    def _generate_combinations(self, schema: dict) -> list[dict]:
+    def _generate_parameter_sets(self, schema: dict) -> list[dict]:
         """
-        Generate all parameter combinations from schema
+        Generate all parameter sets from schema (each becomes a strategy)
 
         Args:
             schema: Parameters schema with values lists
 
         Returns:
-            List of parameter dicts
+            List of parameter dicts (each will create an independent strategy)
         """
         if not schema:
             return [{}]
@@ -299,11 +299,11 @@ class ParametricGenerator:
         param_names = list(schema.keys())
         param_values = [schema[p]['values'] for p in param_names]
 
-        combinations = []
+        param_sets = []
         for combo in itertools.product(*param_values):
-            combinations.append(dict(zip(param_names, combo)))
+            param_sets.append(dict(zip(param_names, combo)))
 
-        return combinations
+        return param_sets
 
     def _generate_id(self, template_name: str, params: dict) -> str:
         """
@@ -389,8 +389,8 @@ class ParametricGenerator:
 
         return (len(errors) == 0, errors)
 
-    def count_variations(self, template: StrategyTemplate) -> int:
-        """Count total possible variations for a template"""
+    def count_strategies(self, template: StrategyTemplate) -> int:
+        """Count total possible strategies for a template"""
         total = 1
         for param_def in template.parameters_schema.values():
             total *= len(param_def.get('values', [1]))
@@ -401,4 +401,4 @@ class ParametricGenerator:
         templates: list[StrategyTemplate]
     ) -> int:
         """Estimate total strategies from a batch of templates"""
-        return sum(self.count_variations(t) for t in templates)
+        return sum(self.count_strategies(t) for t in templates)

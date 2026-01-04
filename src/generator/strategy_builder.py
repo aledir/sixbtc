@@ -372,11 +372,11 @@ class StrategyBuilder:
         if self.template_generator:
             template = self.template_generator.generate_template(strategy_type, timeframe)
             if template:
-                # Generate ALL variations (no artificial limit)
-                variations = self.parametric_generator.generate_variations(template)
-                if variations:
+                # Generate ALL strategies (no artificial limit)
+                strategies = self.parametric_generator.generate_strategies(template)
+                if strategies:
                     # Return first for backward compatibility
-                    return self._convert_parametric_strategy(variations[0], template)
+                    return self._convert_parametric_strategy(strategies[0], template)
 
         logger.error("No generation method available (no patterns, no template generator)")
         return None
@@ -387,20 +387,20 @@ class StrategyBuilder:
         timeframe: str,
         use_patterns: bool = True,
         patterns: Optional[list] = None,
-        max_variations: Optional[int] = None
+        max_strategies: Optional[int] = None
     ) -> list[GeneratedStrategy]:
         """
-        Generate strategy variations from a template
+        Generate multiple strategies from a template
 
         Unlike generate_strategy() which returns a single strategy,
-        this method returns parametric variations up to max_variations.
+        this method returns parametric strategies up to max_strategies.
 
         Args:
             strategy_type: Type of strategy (MOM, REV, TRN, etc.)
             timeframe: Target timeframe ('5m', '15m', '1h', etc.)
             use_patterns: Whether to use pattern-discovery patterns
             patterns: Pre-selected patterns (if provided, uses first one)
-            max_variations: Maximum number of variations to generate (backpressure)
+            max_strategies: Maximum number of strategies to generate (backpressure)
 
         Returns:
             List of GeneratedStrategy objects
@@ -417,19 +417,19 @@ class StrategyBuilder:
                 result = self.generate_from_pattern(fetched_patterns[0])
                 return [result] if result else []
 
-        # Template-based generation: return variations up to limit
+        # Template-based generation: return strategies up to limit
         logger.info(f"No patterns available, using template-based generation")
         if self.template_generator:
             template = self.template_generator.generate_template(strategy_type, timeframe)
             if template:
-                variations = self.parametric_generator.generate_variations(
+                strategies = self.parametric_generator.generate_strategies(
                     template,
-                    max_variations=max_variations
+                    max_strategies=max_strategies
                 )
                 return [
-                    self._convert_parametric_strategy(v, template)
-                    for v in variations
-                    if v.validation_passed
+                    self._convert_parametric_strategy(s, template)
+                    for s in strategies
+                    if s.validation_passed
                 ]
 
         logger.error("No generation method available (no patterns, no template generator)")
@@ -520,12 +520,12 @@ class StrategyBuilder:
                         break
 
                     remaining = count - generated_count
-                    variations = self.parametric_generator.generate_variations(
+                    strategies = self.parametric_generator.generate_strategies(
                         template,
-                        max_variations=remaining
+                        max_strategies=remaining
                     )
 
-                    for ps in variations:
+                    for ps in strategies:
                         if generated_count >= count:
                             break
                         strategy = self._convert_parametric_strategy(ps, template)
@@ -579,7 +579,7 @@ class StrategyBuilder:
     def generate_from_templates(
         self,
         templates: list[StrategyTemplate],
-        max_variations_per_template: Optional[int] = None
+        max_strategies_per_template: Optional[int] = None
     ) -> list[GeneratedStrategy]:
         """
         Generate strategies from templates using parametric variations
@@ -588,7 +588,7 @@ class StrategyBuilder:
 
         Args:
             templates: List of StrategyTemplate objects
-            max_variations_per_template: Limit variations per template (None = all)
+            max_strategies_per_template: Limit strategies per template (None = all)
 
         Returns:
             List of GeneratedStrategy objects
@@ -597,10 +597,10 @@ class StrategyBuilder:
 
         for template in templates:
             try:
-                # Generate parametric variations
-                parametric_strategies = self.parametric_generator.generate_variations(
+                # Generate parametric strategies
+                parametric_strategies = self.parametric_generator.generate_strategies(
                     template,
-                    max_variations=max_variations_per_template
+                    max_strategies=max_strategies_per_template
                 )
 
                 # Convert to GeneratedStrategy format
@@ -609,7 +609,7 @@ class StrategyBuilder:
                     all_strategies.append(strategy)
 
                 logger.info(
-                    f"Generated {len(parametric_strategies)} variations from "
+                    f"Generated {len(parametric_strategies)} strategies from "
                     f"template {template.name}"
                 )
 
@@ -651,20 +651,20 @@ class StrategyBuilder:
         self,
         new_templates_count: int = 20,
         existing_templates: Optional[list[StrategyTemplate]] = None,
-        max_variations_per_template: Optional[int] = None
+        max_strategies_per_template: Optional[int] = None
     ) -> tuple[list[StrategyTemplate], list[GeneratedStrategy]]:
         """
-        Daily generation cycle: new templates + parametric variations
+        Daily generation cycle: new templates + parametric strategies
 
         This is the main entry point for the template-based pipeline:
         1. Generate new AI templates (~20/day)
-        2. Generate parametric variations from ALL templates
+        2. Generate parametric strategies from ALL templates
         3. Walk-forward validation filters overfitting (done by backtester)
 
         Args:
             new_templates_count: Number of new templates to generate
             existing_templates: Existing templates from database
-            max_variations_per_template: Limit variations (None = all)
+            max_strategies_per_template: Limit strategies per template (None = all)
 
         Returns:
             Tuple of (new_templates, all_strategies)
@@ -677,12 +677,12 @@ class StrategyBuilder:
 
         # Step 2: Combine with existing templates
         all_templates = list(existing_templates or []) + new_templates
-        logger.info(f"Total templates for variation generation: {len(all_templates)}")
+        logger.info(f"Total templates for strategy generation: {len(all_templates)}")
 
-        # Step 3: Generate parametric variations from ALL templates
+        # Step 3: Generate parametric strategies from ALL templates
         all_strategies = self.generate_from_templates(
             templates=all_templates,
-            max_variations_per_template=max_variations_per_template
+            max_strategies_per_template=max_strategies_per_template
         )
 
         # Summary
@@ -695,7 +695,7 @@ class StrategyBuilder:
 
         return new_templates, all_strategies
 
-    def estimate_variations(
+    def estimate_strategies(
         self,
         templates: list[StrategyTemplate]
     ) -> int:

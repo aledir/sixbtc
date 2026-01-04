@@ -157,6 +157,7 @@ class Strategy(Base):
     # If generated from template, link to parent template
     generation_mode = Column(String(20), default="ai")  # "ai", "pattern", "template"
     parameters = Column(JSON)  # Parameters used if template-based
+    parametric_backtest_metrics = Column(JSONB, nullable=True)  # Stores training/holdout metrics from parametric optimization
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -287,6 +288,71 @@ class BacktestResult(Base):
 
     def __repr__(self):
         return f"<BacktestResult(strategy={self.strategy_id}, sharpe={self.sharpe_ratio:.2f}, trades={self.total_trades})>"
+
+
+# ==============================================================================
+# PIPELINE METRICS SNAPSHOTS
+# ==============================================================================
+
+class PipelineMetricsSnapshot(Base):
+    """
+    Time-series snapshots of pipeline metrics.
+
+    Collected every 5 minutes by metrics collector service.
+    Used for historical analysis and trend visualization.
+    """
+    __tablename__ = 'pipeline_metrics_snapshots'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+
+    # Queue depths (counts)
+    queue_generated = Column(Integer, nullable=False, default=0)
+    queue_validated = Column(Integer, nullable=False, default=0)
+    queue_tested = Column(Integer, nullable=False, default=0)
+    queue_selected = Column(Integer, nullable=False, default=0)
+    queue_live = Column(Integer, nullable=False, default=0)
+    queue_retired = Column(Integer, nullable=False, default=0)
+    queue_failed = Column(Integer, nullable=False, default=0)
+
+    # Throughput (strategies/hour for each stage)
+    throughput_generation = Column(Float, nullable=True)  # NULL = not calculated
+    throughput_validation = Column(Float, nullable=True)
+    throughput_backtesting = Column(Float, nullable=True)
+    throughput_classification = Column(Float, nullable=True)
+
+    # Utilization (0.0-1.0, percentage of queue limit used)
+    utilization_generated = Column(Float, nullable=True)
+    utilization_validated = Column(Float, nullable=True)
+    utilization_tested = Column(Float, nullable=True)
+
+    # Success rates (0.0-1.0)
+    success_rate_validation = Column(Float, nullable=True)
+    success_rate_backtesting = Column(Float, nullable=True)
+
+    # Bottleneck detection
+    bottleneck_stage = Column(String(50), nullable=True)  # 'validation', 'backtesting', etc.
+
+    # Overall system status
+    overall_status = Column(String(20), nullable=False)  # 'healthy', 'degraded', 'critical'
+
+    # Quality metrics (from TESTED strategies)
+    avg_sharpe = Column(Float, nullable=True)
+    avg_win_rate = Column(Float, nullable=True)
+    avg_expectancy = Column(Float, nullable=True)
+
+    # Pattern vs AI breakdown
+    pattern_count = Column(Integer, nullable=False, default=0)
+    ai_count = Column(Integer, nullable=False, default=0)
+
+    # Indexes for time-series queries
+    __table_args__ = (
+        Index('idx_metrics_timestamp', 'timestamp'),
+        Index('idx_metrics_status_time', 'overall_status', 'timestamp'),
+    )
+
+    def __repr__(self):
+        return f"<PipelineMetricsSnapshot(timestamp={self.timestamp}, status={self.overall_status})>"
 
 
 # ==============================================================================
