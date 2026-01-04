@@ -623,7 +623,7 @@ class ContinuousBacktesterProcess:
                             param_result,  # Training metrics with these params
                             optimal_tf_coins,
                             optimal_tf,
-                            period='training'
+                            period_type='training'
                         )
 
                         # Update clone with optimal TF and pairs
