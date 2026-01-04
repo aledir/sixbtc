@@ -654,7 +654,7 @@ class ContinuousBacktesterProcess:
                             )
 
                             # Create independent strategy for this parameter combination
-                            variant_id = self._create_strategy_clone(
+                            variant_id = self._create_parametric_strategy(
                                 strategy_id,
                                 params,
                                 variant_num=i
@@ -1412,20 +1412,20 @@ class ContinuousBacktesterProcess:
         except Exception as e:
             logger.error(f"Failed to update strategy: {e}")
 
-    def _create_strategy_clone(
+    def _create_parametric_strategy(
         self,
-        original_strategy_id: UUID,
+        template_strategy_id: UUID,
         params: Dict,
         variant_num: int
     ) -> Optional[UUID]:
         """
-        Create an independent strategy with different parametric parameters.
+        Create an independent strategy from a parameter combination.
 
-        Each parameter combination is a unique strategy, not a "variant" or "clone".
-        Name is generated using hash of parameters for independence.
+        Each parameter combination is a unique, independent strategy.
+        Name is generated using hash of parameters for uniqueness.
 
         Args:
-            original_strategy_id: UUID of template strategy
+            template_strategy_id: UUID of template strategy (code source)
             params: Dict with sl_pct, tp_pct, leverage, exit_bars
             variant_num: Sequence number (for logging only)
 
@@ -1437,53 +1437,53 @@ class ContinuousBacktesterProcess:
             from src.database.models import Strategy
 
             with get_session() as session:
-                # Get original strategy
-                original = session.query(Strategy).filter(
-                    Strategy.id == original_strategy_id
+                # Get template strategy (source of code)
+                template = session.query(Strategy).filter(
+                    Strategy.id == template_strategy_id
                 ).first()
 
-                if not original:
-                    logger.error(f"Original strategy {original_strategy_id} not found")
+                if not template:
+                    logger.error(f"Template strategy {template_strategy_id} not found")
                     return None
 
                 # Generate parameter hash for unique name
-                # Hash based on actual parameter values, not variant number
+                # Hash based on actual parameter values
                 param_str = f"{params.get('sl_pct', 0):.4f}_{params.get('tp_pct', 0):.4f}_{params.get('leverage', 1)}_{params.get('exit_bars', 0)}"
                 param_hash = hashlib.sha256(param_str.encode()).hexdigest()[:8]
 
                 # Create independent strategy
-                clone = Strategy()
-                clone.id = uuid4()
-                clone.name = f"{original.name}_p{param_hash}"  # p = parameters hash
-                clone.strategy_type = original.strategy_type
-                clone.ai_provider = original.ai_provider
-                clone.timeframe = original.timeframe  # Will be updated with optimal TF
-                clone.status = "TESTED"  # Already tested via parametric backtest
+                strategy = Strategy()
+                strategy.id = uuid4()
+                strategy.name = f"{template.name}_p{param_hash}"  # p = parameters hash
+                strategy.strategy_type = template.strategy_type
+                strategy.ai_provider = template.ai_provider
+                strategy.timeframe = template.timeframe  # Will be updated with optimal TF
+                strategy.status = "TESTED"  # Already tested via parametric backtest
 
-                # Update code with new params
-                updated_code = self._update_strategy_params(original.code, params)
+                # Update code with these parameters
+                updated_code = self._update_strategy_params(template.code, params)
                 if not updated_code:
-                    logger.warning(f"Failed to update code for clone {clone.name}")
+                    logger.warning(f"Failed to update code for strategy {strategy.name}")
                     return None
 
-                clone.code = updated_code
-                clone.template_id = original.template_id
-                clone.pattern_ids = original.pattern_ids
-                clone.backtest_pairs = original.backtest_pairs
-                clone.optimal_timeframe = original.optimal_timeframe
-                clone.tested_at = datetime.now(UTC)
+                strategy.code = updated_code
+                strategy.template_id = template.template_id
+                strategy.pattern_ids = template.pattern_ids
+                strategy.backtest_pairs = template.backtest_pairs
+                strategy.optimal_timeframe = template.optimal_timeframe
+                strategy.tested_at = datetime.now(UTC)
 
-                session.add(clone)
+                session.add(strategy)
                 session.commit()
 
                 logger.info(
-                    f"Created parametric strategy {clone.name} with params: "
+                    f"Created parametric strategy {strategy.name} with params: "
                     f"SL={params.get('sl_pct', 0):.1%}, "
                     f"TP={params.get('tp_pct', 0):.1%}, "
                     f"lev={params.get('leverage', 1)}"
                 )
 
-                return clone.id
+                return strategy.id
 
         except Exception as e:
             logger.error(f"Failed to create parametric strategy: {e}")
