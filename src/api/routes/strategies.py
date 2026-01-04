@@ -13,10 +13,16 @@ from sqlalchemy import desc
 
 from src.api.schemas import (
     BacktestMetrics,
+    DegradationPoint,
+    DegradationResponse,
+    RankedStrategy,
+    RankingResponse,
     StrategiesResponse,
     StrategyDetail,
     StrategyListItem,
 )
+from src.classifier.dual_ranker import DualRanker
+from src.config import load_config
 from src.database import Strategy, BacktestResult, Trade, get_session
 from src.utils import get_logger
 
@@ -95,6 +101,155 @@ async def list_strategies(
 
     except Exception as e:
         logger.error(f"Error listing strategies: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/strategies/rankings/backtest", response_model=RankingResponse)
+async def get_backtest_ranking(
+    limit: int = Query(50, ge=1, le=200, description="Max results to return"),
+):
+    """
+    Get backtest ranking for TESTED and SELECTED strategies.
+
+    Returns strategies ordered by backtest score (combination of Sharpe,
+    Expectancy, Consistency, and Walk-Forward Stability).
+    """
+    try:
+        config = load_config()._raw_config
+        ranker = DualRanker(config)
+
+        # Get ranking from DualRanker
+        ranking = ranker.get_backtest_ranking(limit=limit)
+
+        # Calculate averages
+        avg_score = sum(s['score'] or 0 for s in ranking) / max(len(ranking), 1)
+        avg_sharpe = sum(s['sharpe'] or 0 for s in ranking) / max(len(ranking), 1)
+
+        return RankingResponse(
+            ranking_type="backtest",
+            count=len(ranking),
+            strategies=ranking,
+            avg_score=avg_score,
+            avg_sharpe=avg_sharpe,
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting backtest ranking: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/strategies/rankings/live", response_model=RankingResponse)
+async def get_live_ranking(
+    limit: int = Query(20, ge=1, le=100, description="Max results to return"),
+):
+    """
+    Get live ranking for LIVE strategies.
+
+    Returns strategies ordered by live score (based on actual trading performance).
+    Only includes strategies with minimum number of trades.
+    """
+    try:
+        config = load_config()._raw_config
+        ranker = DualRanker(config)
+
+        # Get ranking from DualRanker
+        ranking = ranker.get_live_ranking(limit=limit)
+
+        # Calculate averages
+        avg_score = sum(s['score'] or 0 for s in ranking) / max(len(ranking), 1)
+        avg_sharpe = sum(s['sharpe'] or 0 for s in ranking) / max(len(ranking), 1)
+        avg_pnl = sum(s.get('total_pnl') or 0 for s in ranking) / max(len(ranking), 1)
+
+        return RankingResponse(
+            ranking_type="live",
+            count=len(ranking),
+            strategies=ranking,
+            avg_score=avg_score,
+            avg_sharpe=avg_sharpe,
+            avg_pnl=avg_pnl,
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting live ranking: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/strategies/degradation", response_model=DegradationResponse)
+async def get_degradation_analysis(
+    threshold: float = Query(0.3, ge=0, le=1, description="Degradation threshold (default 30%)"),
+):
+    """
+    Get degradation analysis for LIVE strategies.
+
+    Returns:
+    - Scatter plot data (backtest_score vs live_score)
+    - Worst degraders (degradation > threshold)
+    - Strategies that should potentially be retired
+    """
+    try:
+        with get_session() as session:
+            # Get all LIVE strategies with both backtest and live scores
+            live_strategies = (
+                session.query(Strategy)
+                .filter(
+                    Strategy.status == 'LIVE',
+                    Strategy.score_backtest.isnot(None),
+                    Strategy.score_live.isnot(None),
+                )
+                .all()
+            )
+
+            # Build data points
+            all_points = []
+            degrading = []
+            total_degradation = 0.0
+
+            for s in live_strategies:
+                # Calculate degradation if not already calculated
+                degradation = s.live_degradation_pct
+                if degradation is None and s.score_backtest and s.score_live:
+                    degradation = (s.score_backtest - s.score_live) / s.score_backtest
+
+                point = DegradationPoint(
+                    id=s.id,
+                    name=s.name,
+                    strategy_type=s.strategy_type,
+                    timeframe=s.timeframe,
+                    score_backtest=s.score_backtest,
+                    score_live=s.score_live,
+                    degradation_pct=degradation,
+                    total_pnl=s.total_pnl_live,
+                    total_trades_live=s.total_trades_live,
+                    live_since=s.live_since,
+                )
+
+                all_points.append(point)
+
+                if degradation is not None:
+                    total_degradation += degradation
+                    if degradation > threshold:
+                        degrading.append(point)
+
+            # Calculate average
+            avg_degradation = total_degradation / max(len(live_strategies), 1)
+
+            # Sort worst degraders by degradation (descending)
+            worst = sorted(
+                [p for p in all_points if p.degradation_pct is not None],
+                key=lambda p: p.degradation_pct or 0,
+                reverse=True,
+            )[:10]  # Top 10 worst
+
+            return DegradationResponse(
+                total_live_strategies=len(live_strategies),
+                degrading_count=len(degrading),
+                avg_degradation=avg_degradation,
+                worst_degraders=worst,
+                all_points=all_points,
+            )
+
+    except Exception as e:
+        logger.error(f"Error getting degradation analysis: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

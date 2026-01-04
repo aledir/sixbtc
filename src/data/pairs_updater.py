@@ -20,7 +20,8 @@ import requests
 
 from src.config.loader import load_config
 from src.data.binance_downloader import BinanceDataDownloader
-from src.database import get_session, Coin
+from src.database import get_session, Coin, PairsUpdateLog
+from src.scheduler.task_tracker import track_task_execution
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +191,7 @@ class PairsUpdater:
 
         return top_pairs
 
-    def save_coins_to_db(self, pairs: List[Dict[str, Any]]) -> int:
+    def save_coins_to_db(self, pairs: List[Dict[str, Any]]) -> dict:
         """
         Save coins to database (upsert).
 
@@ -198,13 +199,28 @@ class PairsUpdater:
             pairs: List of pair dicts from get_top_pairs_by_volume()
 
         Returns:
-            Number of coins saved
+            Dict with counts: total_pairs, new_pairs, updated_pairs, deactivated_pairs
         """
         now = datetime.now(timezone.utc)
+        new_pairs = 0
+        updated_pairs = 0
+        deactivated_pairs = 0
 
         with get_session() as session:
-            # First, mark all existing coins as inactive
+            # Track currently active coins before update
+            previously_active = session.query(Coin.symbol).filter(
+                Coin.is_active == True
+            ).all()
+            previously_active_symbols = {c.symbol for c in previously_active}
+
+            # Mark all existing coins as inactive
             session.query(Coin).update({Coin.is_active: False})
+
+            # Track which symbols will be active after update
+            new_active_symbols = {p['symbol'] for p in pairs}
+
+            # Calculate deactivated count
+            deactivated_pairs = len(previously_active_symbols - new_active_symbols)
 
             # Upsert each coin
             for pair in pairs:
@@ -219,6 +235,7 @@ class PairsUpdater:
                     existing.price = pair['price']
                     existing.is_active = True
                     existing.updated_at = now
+                    updated_pairs += 1
                 else:
                     # Insert new
                     coin = Coin(
@@ -230,39 +247,80 @@ class PairsUpdater:
                         updated_at=now
                     )
                     session.add(coin)
+                    new_pairs += 1
 
-        logger.info(f"Saved {len(pairs)} coins to database")
-        return len(pairs)
+        logger.info(
+            f"Saved {len(pairs)} coins to database: "
+            f"{new_pairs} new, {updated_pairs} updated, {deactivated_pairs} deactivated"
+        )
 
-    def update(self, n_pairs: Optional[int] = None) -> List[Dict[str, Any]]:
+        return {
+            'total_pairs': len(pairs),
+            'new_pairs': new_pairs,
+            'updated_pairs': updated_pairs,
+            'deactivated_pairs': deactivated_pairs
+        }
+
+    def update(
+        self,
+        n_pairs: Optional[int] = None,
+        triggered_by: str = 'system'
+    ) -> dict:
         """
         Full update: fetch markets, select top N, save to database.
 
         Args:
             n_pairs: Number of pairs (defaults to config value)
+            triggered_by: Who triggered the update ('system', 'user:email', 'api')
 
         Returns:
-            List of saved pair dicts
+            Dict with update results
         """
-        logger.info("Starting pairs update...")
+        with track_task_execution(
+            'update_pairs',
+            task_type='data_update',
+            triggered_by=triggered_by
+        ) as tracker:
+            logger.info("Starting pairs update...")
 
-        # Get top pairs
-        top_pairs = self.get_top_pairs_by_volume(n_pairs)
+            # Get top pairs
+            top_pairs = self.get_top_pairs_by_volume(n_pairs)
 
-        if not top_pairs:
-            raise ValueError("No pairs found - check API connectivity and volume threshold")
+            if not top_pairs:
+                raise ValueError("No pairs found - check API connectivity and volume threshold")
 
-        # Save to database
-        self.save_coins_to_db(top_pairs)
+            # Save to database and get detailed results
+            result = self.save_coins_to_db(top_pairs)
 
-        # Log summary
-        total_volume = sum(p['volume_24h'] for p in top_pairs)
-        logger.info(
-            f"Pairs update complete: {len(top_pairs)} pairs, "
-            f"total 24h volume: ${total_volume:,.0f}"
-        )
+            # Add metadata to tracker
+            tracker.add_metadata('total_pairs', result['total_pairs'])
+            tracker.add_metadata('new_pairs', result['new_pairs'])
+            tracker.add_metadata('updated_pairs', result['updated_pairs'])
+            tracker.add_metadata('deactivated_pairs', result['deactivated_pairs'])
 
-        return top_pairs
+            # Save detailed log
+            with get_session() as session:
+                log = PairsUpdateLog(
+                    execution_id=tracker.execution_id,
+                    total_pairs=result['total_pairs'],
+                    new_pairs=result['new_pairs'],
+                    updated_pairs=result['updated_pairs'],
+                    deactivated_pairs=result['deactivated_pairs'],
+                    top_10_symbols=[p['symbol'] for p in top_pairs[:10]]
+                )
+                session.add(log)
+                session.commit()
+
+            # Log summary
+            total_volume = sum(p['volume_24h'] for p in top_pairs)
+            logger.info(
+                f"Pairs update complete: {len(top_pairs)} pairs, "
+                f"total 24h volume: ${total_volume:,.0f}"
+            )
+
+            # Return detailed results
+            result['pair_whitelist'] = [p['symbol'] for p in top_pairs]
+            return result
 
     def get_pair_whitelist(self) -> List[str]:
         """

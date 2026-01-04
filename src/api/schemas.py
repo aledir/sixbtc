@@ -241,6 +241,87 @@ class ConfigResponse(BaseModel):
 
 
 # =============================================================================
+# PIPELINE HEALTH
+# =============================================================================
+
+class PipelineStageHealth(BaseModel):
+    """Health metrics for a single pipeline stage"""
+    stage: str  # "generation", "validation", "backtesting", "classification"
+    status: str  # "healthy", "backpressure", "stalled", "error"
+    queue_depth: int  # Current strategies in this stage
+    queue_limit: int  # Configured limit from config
+    utilization_pct: float  # queue_depth / queue_limit * 100
+
+    # Processing metrics (last 1 hour)
+    processing_rate: float  # Strategies/hour
+    avg_processing_time: Optional[float] = None  # Seconds per strategy
+    active_workers: int  # Current parallel processes
+    max_workers: int  # Configured parallelism
+
+    # Quality metrics
+    success_rate: float  # % strategies passing this stage
+    failure_rate: float  # % failing
+
+    # Recent activity
+    processed_last_hour: int
+    processed_last_24h: int
+    failed_last_hour: int
+
+
+class PipelineHealthResponse(BaseModel):
+    """Full pipeline health status"""
+    timestamp: datetime
+    overall_status: str  # "healthy", "degraded", "critical"
+    stages: List[PipelineStageHealth]
+    bottleneck: Optional[str] = None  # Stage name if identified
+    throughput_strategies_per_hour: float  # End-to-end
+    critical_issues: List[str] = []  # Actionable alerts
+
+
+class PipelineTimeSeriesPoint(BaseModel):
+    """Single data point in pipeline time series"""
+    timestamp: datetime
+    stage: str
+    throughput: float  # Strategies/hour
+    avg_processing_time: Optional[float] = None  # Seconds
+    queue_depth: int
+    failures: int
+
+
+class PipelineStatsResponse(BaseModel):
+    """Historical pipeline statistics"""
+    period_hours: int
+    data_points: List[PipelineTimeSeriesPoint]
+    total_generated: int
+    total_validated: int
+    total_backtested: int
+    total_selected: int
+    overall_throughput: float
+    bottleneck_stage: str
+
+
+class QualityBucket(BaseModel):
+    """Strategy count in quality range"""
+    range: str  # "0-20", "20-40", "40-60", "60-80", "80-100"
+    count: int
+    avg_sharpe: float
+    avg_win_rate: float
+
+
+class QualityDistribution(BaseModel):
+    """Quality distribution for one stage"""
+    stage: str  # "TESTED", "SELECTED", "LIVE"
+    buckets: List[QualityBucket]
+    by_type: Dict[str, int]  # {"MOM": 45, "REV": 23, ...}
+    by_timeframe: Dict[str, int]  # {"15m": 30, "1h": 25, ...}
+
+
+class QualityDistributionResponse(BaseModel):
+    """Quality distribution across stages"""
+    distributions: List[QualityDistribution]
+
+
+# =============================================================================
 # EQUITY / PERFORMANCE
 # =============================================================================
 
@@ -257,3 +338,178 @@ class EquityResponse(BaseModel):
     start_equity: float
     current_equity: float
     total_return_pct: float
+
+
+# =============================================================================
+# STRATEGY RANKINGS
+# =============================================================================
+
+class RankedStrategy(BaseModel):
+    """Single ranked strategy"""
+    id: UUID
+    name: str
+    strategy_type: str
+    timeframe: str
+    status: str
+    score: Optional[float] = None
+    sharpe: Optional[float] = None
+    expectancy: Optional[float] = None
+    win_rate: Optional[float] = None
+    total_trades: Optional[int] = None
+    max_drawdown: Optional[float] = None
+    ranking_type: str  # "backtest" or "live"
+
+    # Live-specific fields
+    score_backtest: Optional[float] = None
+    total_pnl: Optional[float] = None
+    degradation_pct: Optional[float] = None
+    last_update: Optional[datetime] = None
+
+
+class RankingResponse(BaseModel):
+    """Strategy ranking response"""
+    ranking_type: str  # "backtest" or "live"
+    count: int
+    strategies: List[RankedStrategy]
+    avg_score: float
+    avg_sharpe: Optional[float] = None
+    avg_pnl: Optional[float] = None  # Live only
+
+
+# =============================================================================
+# DEGRADATION MONITORING
+# =============================================================================
+
+class DegradationPoint(BaseModel):
+    """Single strategy degradation data point"""
+    id: UUID
+    name: str
+    strategy_type: str
+    timeframe: str
+    score_backtest: Optional[float] = None
+    score_live: Optional[float] = None
+    degradation_pct: Optional[float] = None
+    total_pnl: Optional[float] = None
+    total_trades_live: Optional[int] = None
+    live_since: Optional[datetime] = None
+
+
+class DegradationResponse(BaseModel):
+    """Degradation analysis response"""
+    total_live_strategies: int
+    degrading_count: int  # degradation > threshold
+    avg_degradation: float
+    worst_degraders: List[DegradationPoint]
+    all_points: List[DegradationPoint]  # For scatter plot
+
+
+# ============================================================================
+# Performance Analytics Schemas
+# ============================================================================
+
+
+class EquityPoint(BaseModel):
+    """Single point in equity curve"""
+
+    timestamp: str
+    equity: float
+    balance: float
+    unrealized_pnl: float
+    realized_pnl: float
+    total_pnl: float
+
+
+class PerformanceEquityResponse(BaseModel):
+    """Equity curve with performance metrics"""
+
+    period: str  # "24h", "7d", etc.
+    subaccount_id: int | None = None
+    data_points: List[EquityPoint]
+
+    # Summary metrics
+    start_equity: float
+    end_equity: float
+    peak_equity: float
+    max_drawdown: float  # As decimal (0.15 = 15% drawdown)
+    current_drawdown: float
+    total_return: float  # As decimal (0.05 = 5% return)
+
+
+# ============================================================================
+# Scheduled Tasks Schemas
+# ============================================================================
+
+class TaskExecutionDetailResponse(BaseModel):
+    """Single task execution detail"""
+    id: str
+    task_name: str
+    task_type: str
+    status: str
+    started_at: str
+    completed_at: Optional[str] = None
+    duration_seconds: Optional[float] = None
+    error_message: Optional[str] = None
+    metadata: dict = {}
+    triggered_by: str = 'system'
+
+
+class TaskExecutionListResponse(BaseModel):
+    """List of task executions"""
+    executions: List[TaskExecutionDetailResponse]
+    total: int
+
+
+class TaskStatsResponse(BaseModel):
+    """Statistics for a specific task"""
+    task_name: str
+    period_hours: int
+    total_executions: int
+    successful_executions: int
+    failed_executions: int
+    avg_duration_seconds: Optional[float] = None
+    failure_rate: float
+    last_execution: Optional[str] = None
+
+
+class TaskTriggerRequest(BaseModel):
+    """Request to manually trigger a task"""
+    triggered_by: str
+
+
+class TaskTriggerResponse(BaseModel):
+    """Response from task trigger"""
+    success: bool
+    message: str
+    execution_id: Optional[str] = None
+
+
+# ============================================================================
+# Coin Registry Schemas
+# ============================================================================
+
+class CoinRegistryStatsResponse(BaseModel):
+    """CoinRegistry cache statistics"""
+    total_coins: int
+    active_coins: int
+    cache_age_seconds: Optional[float] = None
+    db_updated_at: Optional[str] = None
+
+
+class PairsUpdateDetailResponse(BaseModel):
+    """Detailed pairs update result"""
+    execution_id: str
+    started_at: str
+    completed_at: Optional[str] = None
+    duration_seconds: Optional[float] = None
+    status: str
+    total_pairs: int
+    new_pairs: int
+    updated_pairs: int
+    deactivated_pairs: int
+    top_10_symbols: List[str] = []
+
+
+class PairsUpdateHistoryResponse(BaseModel):
+    """History of pairs updates"""
+    updates: List[PairsUpdateDetailResponse]
+    total: int

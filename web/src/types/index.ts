@@ -164,3 +164,220 @@ export interface ServiceControlResponse {
   service: string;
   action: string;
 }
+
+// Pipeline Health Types
+export interface PipelineStageHealth {
+  stage: string;
+  status: 'healthy' | 'backpressure' | 'stalled' | 'error';
+  queue_depth: number;
+  queue_limit: number;
+  utilization_pct: number;
+  processing_rate: number;
+  avg_processing_time: number | null;
+  active_workers: number;
+  max_workers: number;
+  success_rate: number;
+  failure_rate: number;
+  processed_last_hour: number;
+  processed_last_24h: number;
+  failed_last_hour: number;
+}
+
+export interface PipelineHealthResponse {
+  timestamp: string;
+  overall_status: 'healthy' | 'degraded' | 'critical';
+  stages: PipelineStageHealth[];
+  bottleneck: string | null;
+  throughput_strategies_per_hour: number;
+  critical_issues: string[];
+}
+
+export interface PipelineTimeSeriesPoint {
+  timestamp: string;
+  stage: string;
+  throughput: number;
+  avg_processing_time: number | null;
+  queue_depth: number;
+  failures: number;
+}
+
+export interface PipelineStatsResponse {
+  period_hours: number;
+  data_points: PipelineTimeSeriesPoint[];
+  total_generated: number;
+  total_validated: number;
+  total_backtested: number;
+  total_selected: number;
+  overall_throughput: number;
+  bottleneck_stage: string;
+}
+
+export interface QualityBucket {
+  range: string;
+  count: number;
+  avg_sharpe: number;
+  avg_win_rate: number;
+}
+
+export interface QualityDistribution {
+  stage: string;
+  buckets: QualityBucket[];
+  by_type: Record<string, number>;
+  by_timeframe: Record<string, number>;
+}
+
+export interface QualityDistributionResponse {
+  distributions: QualityDistribution[];
+}
+
+// =============================================================================
+// STRATEGY RANKINGS
+// =============================================================================
+
+export interface RankedStrategy {
+  id: string;
+  name: string;
+  strategy_type: string;
+  timeframe: string;
+  status: string;
+  score: number | null;
+  sharpe: number | null;
+  expectancy: number | null;
+  win_rate: number | null;
+  total_trades: number | null;
+  max_drawdown: number | null;
+  ranking_type: 'backtest' | 'live';
+
+  // Live-specific fields
+  score_backtest?: number | null;
+  total_pnl?: number | null;
+  degradation_pct?: number | null;
+  last_update?: string | null;
+}
+
+export interface RankingResponse {
+  ranking_type: 'backtest' | 'live';
+  count: number;
+  strategies: RankedStrategy[];
+  avg_score: number;
+  avg_sharpe?: number | null;
+  avg_pnl?: number | null;
+}
+
+// =============================================================================
+// DEGRADATION MONITORING
+// =============================================================================
+
+export interface DegradationPoint {
+  id: string;
+  name: string;
+  strategy_type: string;
+  timeframe: string;
+  score_backtest: number | null;
+  score_live: number | null;
+  degradation_pct: number | null;
+  total_pnl: number | null;
+  total_trades_live: number | null;
+  live_since: string | null;
+}
+
+export interface DegradationResponse {
+  total_live_strategies: number;
+  degrading_count: number;
+  avg_degradation: number;
+  worst_degraders: DegradationPoint[];
+  all_points: DegradationPoint[];
+}
+
+// =============================================================================
+// PERFORMANCE ANALYTICS
+// =============================================================================
+
+export interface EquityPoint {
+  timestamp: string;
+  equity: number;
+  balance: number;
+  unrealized_pnl: number;
+  realized_pnl: number;
+  total_pnl: number;
+}
+
+export interface PerformanceEquityResponse {
+  period: string;
+  subaccount_id: number | null;
+  data_points: EquityPoint[];
+  start_equity: number;
+  end_equity: number;
+  peak_equity: number;
+  max_drawdown: number;
+  current_drawdown: number;
+  total_return: number;
+}
+
+// =============================================================================
+// SCHEDULED TASKS
+// =============================================================================
+
+export interface TaskExecutionDetail {
+  id: string;
+  task_name: string;
+  task_type: string;
+  status: string;
+  started_at: string;
+  completed_at?: string;
+  duration_seconds?: number;
+  error_message?: string;
+  metadata: Record<string, any>;
+  triggered_by: string;
+}
+
+export interface TaskExecutionListResponse {
+  executions: TaskExecutionDetail[];
+  total: number;
+}
+
+export interface TaskStatsResponse {
+  task_name: string;
+  period_hours: number;
+  total_executions: number;
+  successful_executions: number;
+  failed_executions: number;
+  avg_duration_seconds?: number;
+  failure_rate: number;
+  last_execution?: string;
+}
+
+export interface TaskTriggerResponse {
+  success: boolean;
+  message: string;
+  execution_id?: string;
+}
+
+// =============================================================================
+// COIN REGISTRY
+// =============================================================================
+
+export interface CoinRegistryStatsResponse {
+  total_coins: number;
+  active_coins: number;
+  cache_age_seconds?: number;
+  db_updated_at?: string;
+}
+
+export interface PairsUpdateDetail {
+  execution_id: string;
+  started_at: string;
+  completed_at?: string;
+  duration_seconds?: number;
+  status: string;
+  total_pairs: number;
+  new_pairs: number;
+  updated_pairs: number;
+  deactivated_pairs: number;
+  top_10_symbols: string[];
+}
+
+export interface PairsUpdateHistoryResponse {
+  updates: PairsUpdateDetail[];
+  total: number;
+}

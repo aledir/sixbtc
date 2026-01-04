@@ -127,3 +127,117 @@ export function useThresholds() {
     staleTime: Infinity,
   });
 }
+
+// Pipeline Health
+export function usePipelineHealth() {
+  return useQuery({
+    queryKey: ['pipelineHealth'],
+    queryFn: api.getPipelineHealth,
+    refetchInterval: FAST_REFRESH,  // 10s for real-time monitoring
+  });
+}
+
+export function usePipelineStats(params: { period: string }) {
+  return useQuery({
+    queryKey: ['pipelineStats', params],
+    queryFn: () => api.getPipelineStats(params),
+    refetchInterval: SLOW_REFRESH,  // 60s
+  });
+}
+
+export function useQualityDistribution() {
+  return useQuery({
+    queryKey: ['qualityDistribution'],
+    queryFn: api.getQualityDistribution,
+    refetchInterval: SLOW_REFRESH,  // 60s
+  });
+}
+
+// Rankings
+export function useBacktestRanking(params?: Parameters<typeof api.getBacktestRanking>[0]) {
+  return useQuery({
+    queryKey: ['backtestRanking', params],
+    queryFn: () => api.getBacktestRanking(params),
+    refetchInterval: SLOW_REFRESH,  // 60s
+  });
+}
+
+export function useLiveRanking(params?: Parameters<typeof api.getLiveRanking>[0]) {
+  return useQuery({
+    queryKey: ['liveRanking', params],
+    queryFn: () => api.getLiveRanking(params),
+    refetchInterval: FAST_REFRESH,  // 10s for live monitoring
+  });
+}
+
+export function useDegradationAnalysis(params?: Parameters<typeof api.getDegradationAnalysis>[0]) {
+  return useQuery({
+    queryKey: ['degradationAnalysis', params],
+    queryFn: () => api.getDegradationAnalysis(params),
+    refetchInterval: FAST_REFRESH,  // 10s for live monitoring
+  });
+}
+
+// Performance
+export function usePerformanceEquity(params?: Parameters<typeof api.getPerformanceEquity>[0]) {
+  return useQuery({
+    queryKey: ['performanceEquity', params],
+    queryFn: () => api.getPerformanceEquity(params),
+    refetchInterval: SLOW_REFRESH,  // 60s
+  });
+}
+
+// Scheduler hooks
+export function useTaskExecutions(params?: Parameters<typeof api.getTaskExecutions>[0]) {
+  return useQuery({
+    queryKey: ['taskExecutions', params],
+    queryFn: () => api.getTaskExecutions(params),
+    refetchInterval: SLOW_REFRESH,
+  });
+}
+
+export function useTaskStats(taskName: string, periodHours: number = 24) {
+  return useQuery({
+    queryKey: ['taskStats', taskName, periodHours],
+    queryFn: () => api.getTaskStats(taskName, periodHours),
+    refetchInterval: SLOW_REFRESH,
+  });
+}
+
+export function useSchedulerHealth() {
+  return useQuery({
+    queryKey: ['schedulerHealth'],
+    queryFn: api.getSchedulerHealth,
+    refetchInterval: FAST_REFRESH,
+  });
+}
+
+export function useTriggerTask() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ taskName, triggeredBy }: { taskName: string; triggeredBy: string }) =>
+      api.triggerTask(taskName, triggeredBy),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['taskExecutions'] });
+      queryClient.invalidateQueries({ queryKey: ['schedulerHealth'] });
+    },
+  });
+}
+
+// Coin registry hooks
+export function useCoinRegistryStats() {
+  return useQuery({
+    queryKey: ['coinRegistryStats'],
+    queryFn: api.getCoinRegistryStats,
+    refetchInterval: SLOW_REFRESH,
+  });
+}
+
+export function usePairsUpdateHistory(limit: number = 20) {
+  return useQuery({
+    queryKey: ['pairsUpdateHistory', limit],
+    queryFn: () => api.getPairsUpdateHistory(limit),
+    refetchInterval: SLOW_REFRESH,
+  });
+}

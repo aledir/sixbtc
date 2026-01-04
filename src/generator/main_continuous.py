@@ -176,9 +176,12 @@ class ContinuousGeneratorProcess:
             )
 
             if not all_patterns:
-                logger.debug("No patterns available from pattern-discovery")
+                # Pattern API unavailable or no patterns - not an error
+                # Fall back to AI-only generation (valid generation method)
+                logger.warning("No patterns available from pattern-discovery API, will use AI-only generation")
                 return []
 
+            # Get patterns that have been used (all time)
             used_ids = self.strategy_processor.get_used_pattern_ids()
             unused = [p for p in all_patterns if p.id not in used_ids]
 

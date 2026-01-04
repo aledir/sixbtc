@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useTrades, useSubaccounts, useTradesSummary } from '../hooks/useApi';
+import { useTrades, useSubaccounts, useTradesSummary, usePerformanceEquity } from '../hooks/useApi';
 import type { TradeItem, SubaccountInfo } from '../types';
 import { Activity, Wallet } from 'lucide-react';
 import {
@@ -138,17 +138,17 @@ export default function Trading() {
 
   const { data: subaccounts, isLoading: subaccountsLoading } = useSubaccounts();
   const { data: summary } = useTradesSummary({ days: 30 });
+  const { data: performanceData } = usePerformanceEquity({ period: '24h' });
 
-  // Mock equity data for chart (would come from API in production)
-  const equityData = [
-    { time: '00:00', equity: 10000 },
-    { time: '04:00', equity: 10050 },
-    { time: '08:00', equity: 10120 },
-    { time: '12:00', equity: 10080 },
-    { time: '16:00', equity: 10200 },
-    { time: '20:00', equity: 10180 },
-    { time: 'Now', equity: 10250 },
-  ];
+  // Transform equity data for chart
+  const equityData =
+    performanceData?.data_points.map((point) => ({
+      time: new Date(point.timestamp).toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+      equity: point.equity,
+    })) || [];
 
   return (
     <div className="space-y-6">
@@ -162,9 +162,31 @@ export default function Trading() {
       <div className="grid grid-cols-3 gap-6">
         {/* Equity Curve */}
         <div className="col-span-2 bg-card border border-border rounded-lg p-4">
-          <h3 className="text-sm font-semibold text-muted uppercase mb-4">
-            Equity Curve (24h)
-          </h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-muted uppercase">
+              Equity Curve (24h)
+            </h3>
+            {performanceData && (
+              <div className="flex gap-4 text-xs">
+                <div>
+                  <span className="text-muted">Return: </span>
+                  <span
+                    className={`font-mono ${
+                      performanceData.total_return >= 0 ? 'text-profit' : 'text-loss'
+                    }`}
+                  >
+                    {(performanceData.total_return * 100).toFixed(2)}%
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted">Drawdown: </span>
+                  <span className="font-mono text-loss">
+                    {(performanceData.max_drawdown * 100).toFixed(2)}%
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
           <div className="h-48">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={equityData}>

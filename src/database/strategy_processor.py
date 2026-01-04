@@ -360,19 +360,18 @@ class StrategyProcessor:
 
     def get_used_pattern_ids(self) -> set:
         """
-        Get all pattern IDs that have already been used in generated strategies.
+        Get pattern IDs that have been used (all time).
 
-        Queries the pattern_ids JSON field across all strategies to build
-        a set of already-used patterns. Used to prevent duplicate strategies
-        from the same patterns.
+        Returns all pattern IDs ever used in strategies to prevent duplicates.
+        Pattern exhaustion triggers AI-only generation (not recycling).
 
         Returns:
-            Set of pattern ID strings that have been used
+            Set of pattern IDs that have been used
         """
         session = self._get_session()
 
         try:
-            # Query all strategies that have pattern_ids
+            # Get all pattern IDs from all strategies (no time filter)
             strategies = (
                 session.query(Strategy.pattern_ids)
                 .filter(
@@ -390,7 +389,7 @@ class StrategyProcessor:
                         if pid:
                             used_ids.add(str(pid))
 
-            logger.debug(f"Found {len(used_ids)} used pattern IDs in database")
+            logger.debug(f"Found {len(used_ids)} patterns used (all time)")
             return used_ids
 
         except Exception as e:

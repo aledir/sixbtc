@@ -18,6 +18,7 @@ from typing import Dict, List, Set
 
 from src.config import load_config
 from src.database import get_session, Strategy, StrategyProcessor
+from src.scheduler.task_tracker import track_task_execution
 from src.utils import get_logger, setup_logging
 
 # Initialize logging at module load
@@ -86,29 +87,29 @@ class ContinuousSchedulerProcess:
         logger.info("Scheduler loop ended")
 
     async def _run_task(self, task_name: str):
-        """Run a scheduled task"""
-        logger.info(f"Running scheduled task: {task_name}")
-
-        try:
+        """Run a scheduled task with tracking"""
+        with track_task_execution(task_name, task_type='scheduler') as tracker:
             if task_name == 'cleanup_stale_processing':
-                await self._cleanup_stale_processing()
+                result = await self._cleanup_stale_processing()
+                tracker.add_metadata('released_count', result.get('released', 0))
 
             elif task_name == 'cleanup_old_failed':
-                await self._cleanup_old_failed()
+                result = await self._cleanup_old_failed()
+                tracker.add_metadata('deleted_count', result.get('deleted', 0))
 
             elif task_name == 'generate_daily_report':
-                await self._generate_daily_report()
+                result = await self._generate_daily_report()
+                tracker.add_metadata('strategy_counts', result.get('counts', {}))
+                tracker.add_metadata('live_strategies', result.get('live_strategies', 0))
 
             elif task_name == 'refresh_data_cache':
-                await self._refresh_data_cache()
+                result = await self._refresh_data_cache()
+                tracker.add_metadata('refreshed_timeframes', result.get('timeframes', []))
 
             else:
                 logger.warning(f"Unknown task: {task_name}")
 
-        except Exception as e:
-            logger.error(f"Task {task_name} failed: {e}", exc_info=True)
-
-    async def _cleanup_stale_processing(self):
+    async def _cleanup_stale_processing(self) -> dict:
         """Release strategies stuck in processing"""
         processor = StrategyProcessor(process_id=f"scheduler-{os.getpid()}")
 
@@ -132,7 +133,9 @@ class ContinuousSchedulerProcess:
             if stale:
                 logger.info(f"Released {len(stale)} stale processing claims")
 
-    async def _cleanup_old_failed(self):
+            return {'released': len(stale)}
+
+    async def _cleanup_old_failed(self) -> dict:
         """Clean up old FAILED strategies"""
         with get_session() as session:
             cutoff = datetime.now(UTC) - timedelta(days=7)
@@ -152,7 +155,9 @@ class ContinuousSchedulerProcess:
             if old_failed:
                 logger.info(f"Cleaned up {len(old_failed)} old failed strategies")
 
-    async def _generate_daily_report(self):
+            return {'deleted': len(old_failed)}
+
+    async def _generate_daily_report(self) -> dict:
         """Generate daily performance report"""
         with get_session() as session:
             # Count strategies by status
@@ -170,8 +175,15 @@ class ContinuousSchedulerProcess:
             logger.info(f"Live strategies: {live_strategies}")
             logger.info("===================")
 
-    async def _refresh_data_cache(self):
+            return {
+                'counts': status_counts,
+                'live_strategies': live_strategies
+            }
+
+    async def _refresh_data_cache(self) -> dict:
         """Refresh market data cache"""
+        refreshed_timeframes = []
+
         try:
             from src.backtester.data_loader import BacktestDataLoader
 
@@ -185,6 +197,7 @@ class ContinuousSchedulerProcess:
                 try:
                     data = loader.load_single_symbol('BTC', tf, days=30)
                     logger.debug(f"Refreshed BTC {tf} data: {len(data)} bars")
+                    refreshed_timeframes.append(tf)
                 except Exception as e:
                     # Cache not found is expected - data scheduler handles downloads
                     logger.debug(f"BTC {tf} data not in cache: {e}")
@@ -193,6 +206,8 @@ class ContinuousSchedulerProcess:
 
         except Exception as e:
             logger.error(f"Data refresh failed: {e}")
+
+        return {'timeframes': refreshed_timeframes}
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""

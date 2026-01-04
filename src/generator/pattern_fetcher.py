@@ -187,6 +187,25 @@ class PatternFetcher:
         """Check if API is available"""
         return self._available
 
+    def get_total_pattern_count(self) -> int:
+        """
+        Get total number of patterns in pattern-discovery DB.
+
+        Returns:
+            Total pattern count, or 0 if API unavailable
+        """
+        if not self._available:
+            return 0
+
+        try:
+            response = requests.get(f"{self.api_base}/patterns/stats", timeout=5)
+            response.raise_for_status()
+            stats = response.json()
+            return stats.get('total_patterns', 0)
+        except Exception as e:
+            logger.warning(f"Failed to get pattern count: {e}")
+            return 0
+
     def fetch_production_patterns(
         self,
         tier: int = 1,

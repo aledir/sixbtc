@@ -1,11 +1,16 @@
 import { NavLink, Outlet } from 'react-router-dom';
-import { LayoutDashboard, TrendingUp, LineChart, ScrollText, Settings, AlertTriangle } from 'lucide-react';
+import { LayoutDashboard, TrendingUp, LineChart, ScrollText, Settings, AlertTriangle, Activity, Trophy, FileCode, CheckCircle, Clock } from 'lucide-react';
 import { useStatus, useEmergencyStop } from '../hooks/useApi';
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Overview' },
+  { to: '/pipeline', icon: Activity, label: 'Pipeline' },
+  { to: '/rankings', icon: Trophy, label: 'Rankings' },
   { to: '/strategies', icon: TrendingUp, label: 'Strategies' },
+  { to: '/templates', icon: FileCode, label: 'Templates' },
+  { to: '/validation', icon: CheckCircle, label: 'Validation' },
   { to: '/trading', icon: LineChart, label: 'Trading' },
+  { to: '/system-tasks', icon: Clock, label: 'System Tasks' },
   { to: '/logs', icon: ScrollText, label: 'Logs' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ];

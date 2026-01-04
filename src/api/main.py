@@ -99,18 +99,32 @@ app.add_middleware(
 
 from src.api.routes import (
     config_router,
+    execution_router,
     logs_router,
+    performance_router,
+    pipeline_router,
+    scheduler_router,
+    coins_router,
     services_router,
     status_router,
     strategies_router,
     subaccounts_router,
+    templates_router,
     trades_router,
+    validation_router,
 )
 
 app.include_router(status_router, prefix="/api", tags=["Status"])
+app.include_router(pipeline_router, prefix="/api", tags=["Pipeline"])
 app.include_router(strategies_router, prefix="/api", tags=["Strategies"])
+app.include_router(templates_router, prefix="/api", tags=["Templates"])
+app.include_router(validation_router, prefix="/api", tags=["Validation"])
+app.include_router(execution_router, prefix="/api", tags=["Execution"])
+app.include_router(performance_router, prefix="/api", tags=["Performance"])
 app.include_router(trades_router, prefix="/api", tags=["Trades"])
 app.include_router(subaccounts_router, prefix="/api", tags=["Subaccounts"])
+app.include_router(scheduler_router, prefix="/api", tags=["Scheduler"])
+app.include_router(coins_router, prefix="/api", tags=["Coins"])
 app.include_router(services_router, prefix="/api", tags=["Services"])
 app.include_router(logs_router, prefix="/api", tags=["Logs"])
 app.include_router(config_router, prefix="/api", tags=["Config"])

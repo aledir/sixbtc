@@ -172,7 +172,7 @@ class StrategyBuilder:
             coin_config = self.config.get('pattern_discovery', {}).get('coin_selection', {})
             min_edge = coin_config.get('min_edge', 0.10)
             min_signals = coin_config.get('min_signals', 50)
-            min_coins = coin_config.get('min_tradable_coins', 5)
+            min_coins = coin_config.get('min_tradable_coins', 1)  # Trust Pattern Discovery Tier 1 validation
             # max_coins from backtesting config (shared with AI strategies)
             max_coins = self.config.get('backtesting', {}).get('max_coins', 30)
 
