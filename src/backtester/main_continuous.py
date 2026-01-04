@@ -1419,20 +1419,21 @@ class ContinuousBacktesterProcess:
         variant_num: int
     ) -> Optional[UUID]:
         """
-        Create a clone of a strategy with different parametric parameters.
+        Create an independent strategy with different parametric parameters.
 
-        Used when parametric backtest finds multiple valid combinations.
-        Each combination becomes an independent strategy for ranking.
+        Each parameter combination is a unique strategy, not a "variant" or "clone".
+        Name is generated using hash of parameters for independence.
 
         Args:
-            original_strategy_id: UUID of original strategy
+            original_strategy_id: UUID of template strategy
             params: Dict with sl_pct, tp_pct, leverage, exit_bars
-            variant_num: Variant number (2, 3, 4, ...)
+            variant_num: Sequence number (for logging only)
 
         Returns:
-            UUID of cloned strategy, or None if failed
+            UUID of new strategy, or None if failed
         """
         try:
+            import hashlib
             from src.database.models import Strategy
 
             with get_session() as session:
@@ -1445,10 +1446,15 @@ class ContinuousBacktesterProcess:
                     logger.error(f"Original strategy {original_strategy_id} not found")
                     return None
 
-                # Create clone
+                # Generate parameter hash for unique name
+                # Hash based on actual parameter values, not variant number
+                param_str = f"{params.get('sl_pct', 0):.4f}_{params.get('tp_pct', 0):.4f}_{params.get('leverage', 1)}_{params.get('exit_bars', 0)}"
+                param_hash = hashlib.sha256(param_str.encode()).hexdigest()[:8]
+
+                # Create independent strategy
                 clone = Strategy()
                 clone.id = uuid4()
-                clone.name = f"{original.name}_v{variant_num}"
+                clone.name = f"{original.name}_p{param_hash}"  # p = parameters hash
                 clone.strategy_type = original.strategy_type
                 clone.ai_provider = original.ai_provider
                 clone.timeframe = original.timeframe  # Will be updated with optimal TF
@@ -1471,7 +1477,7 @@ class ContinuousBacktesterProcess:
                 session.commit()
 
                 logger.info(
-                    f"Created strategy clone {clone.name} with params: "
+                    f"Created parametric strategy {clone.name} with params: "
                     f"SL={params.get('sl_pct', 0):.1%}, "
                     f"TP={params.get('tp_pct', 0):.1%}, "
                     f"lev={params.get('leverage', 1)}"
@@ -1480,7 +1486,7 @@ class ContinuousBacktesterProcess:
                 return clone.id
 
         except Exception as e:
-            logger.error(f"Failed to create strategy clone: {e}")
+            logger.error(f"Failed to create parametric strategy: {e}")
             return None
 
     def _update_strategy_params(self, code: str, params: Dict) -> Optional[str]:
