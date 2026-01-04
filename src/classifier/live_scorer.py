@@ -49,6 +49,50 @@ class LiveScorer:
             f"weights={self.weights}"
         )
 
+    def _calculate_trades_per_day(self, trades: List[Trade]) -> float | None:
+        """
+        Calculate average trades per day for Sharpe annualization.
+
+        Fast Fail: Returns None if insufficient data for reliable calculation.
+
+        Args:
+            trades: List of closed trades
+
+        Returns:
+            Average trades per day, or None if insufficient data
+        """
+        # Get config thresholds (Fast Fail - no defaults)
+        min_trades = self.config['classification']['live_ranking']['min_trades_for_frequency']
+        min_days = self.config['classification']['live_ranking']['min_days_for_frequency']
+
+        # Fast Fail: insufficient trades
+        if len(trades) < min_trades:
+            logger.debug(
+                f"Only {len(trades)} trades, need {min_trades} for frequency calculation"
+            )
+            return None
+
+        # Calculate time span
+        first_time = min(t.entry_time for t in trades)
+        last_time = max(t.exit_time for t in trades)
+        days_active = (last_time - first_time).total_seconds() / 86400
+
+        # Fast Fail: insufficient timespan
+        if days_active < min_days:
+            logger.debug(
+                f"Only {days_active:.1f} days active, need {min_days} for frequency calculation"
+            )
+            return None
+
+        trades_per_day = len(trades) / days_active
+
+        logger.debug(
+            f"Trade frequency: {trades_per_day:.2f} trades/day "
+            f"({len(trades)} trades over {days_active:.1f} days)"
+        )
+
+        return trades_per_day
+
     def calculate_live_metrics(self, strategy_id: UUID) -> Optional[Dict]:
         """
         Calculate live performance metrics from Trade records.
@@ -86,6 +130,17 @@ class LiveScorer:
                 )
                 return None
 
+            # Calculate trade frequency for Sharpe annualization (Fast Fail if insufficient)
+            trades_per_day = self._calculate_trades_per_day(trades)
+
+            if trades_per_day is None:
+                logger.info(
+                    f"Strategy {strategy_id}: insufficient trade history for metrics "
+                    f"(need {self.config['classification']['live_ranking']['min_trades_for_frequency']} trades "
+                    f"and {self.config['classification']['live_ranking']['min_days_for_frequency']} days)"
+                )
+                return None  # Skip entire calculation
+
             # Extract PnL values
             pnls = [t.pnl_usd for t in trades if t.pnl_usd is not None]
             pnl_pcts = [t.pnl_pct for t in trades if t.pnl_pct is not None]
@@ -98,14 +153,30 @@ class LiveScorer:
             wins = [p for p in pnls if p > 0]
             win_rate = len(wins) / total_trades if total_trades > 0 else 0
 
-            # Expectancy = average profit per trade (as percentage)
-            expectancy = np.mean(pnl_pcts) if pnl_pcts else 0
+            # Calculate expectancy using formal formula (matches backtester)
+            # Formula: (win_rate × avg_win%) - ((1 - win_rate) × avg_loss%)
+            if 0 < win_rate < 1:
+                winning_trades = [p for p in pnl_pcts if p > 0]
+                losing_trades = [p for p in pnl_pcts if p < 0]
+
+                avg_win = np.mean(winning_trades) if winning_trades else 0.0
+                avg_loss = abs(np.mean(losing_trades)) if losing_trades else 0.0
+
+                expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+
+                logger.debug(
+                    f"Expectancy: WR={win_rate:.2%}, AvgWin={avg_win:.2%}, "
+                    f"AvgLoss={avg_loss:.2%}, Exp={expectancy:.2%}"
+                )
+            else:
+                # Edge case: all wins or all losses
+                expectancy = np.mean(pnl_pcts) if pnl_pcts else 0.0
 
             # Total PnL
             total_pnl = sum(pnls)
 
-            # Sharpe ratio from returns
-            sharpe = self._calculate_sharpe(pnl_pcts)
+            # Sharpe ratio from returns (with dynamic annualization)
+            sharpe = self._calculate_sharpe(pnl_pcts, trades_per_day)
 
             # Max drawdown from equity curve
             max_drawdown = self._calculate_max_drawdown(pnls)
@@ -128,13 +199,23 @@ class LiveScorer:
                 'score': score
             }
 
-    def _calculate_sharpe(self, returns: List[float]) -> float:
+    def _calculate_sharpe(self, returns: List[float], trades_per_day: float | None) -> float:
         """
-        Calculate Sharpe ratio from trade returns.
+        Calculate annualized Sharpe ratio with dynamic frequency adjustment.
 
-        Uses trade-by-trade returns, annualized assuming 252 trading days.
+        Args:
+            returns: List of return percentages
+            trades_per_day: Average trades per day (for annualization)
+
+        Returns:
+            Annualized Sharpe ratio, or 0.0 if insufficient data
         """
         if len(returns) < 2:
+            return 0.0
+
+        # Fast Fail: cannot calculate Sharpe without trade frequency
+        if trades_per_day is None:
+            logger.warning("Cannot calculate Sharpe: insufficient trade history for frequency")
             return 0.0
 
         mean_return = np.mean(returns)
@@ -143,8 +224,18 @@ class LiveScorer:
         if std_return == 0:
             return 0.0
 
-        # Annualize: assume ~1 trade per day on average
-        sharpe = (mean_return / std_return) * np.sqrt(252)
+        # Annualize based on actual trade frequency
+        # sqrt(365 * trades_per_day) converts per-trade volatility to annual
+        # Crypto markets are open 365 days/year (24/7), not 252 like traditional markets
+        annualization_factor = np.sqrt(365 * trades_per_day)
+        sharpe = (mean_return / std_return) * annualization_factor
+
+        logger.debug(
+            f"Sharpe calculation: mean={mean_return:.4f}, std={std_return:.4f}, "
+            f"freq={trades_per_day:.2f}/day, factor={annualization_factor:.2f}, "
+            f"sharpe={sharpe:.2f}"
+        )
+
         return float(sharpe)
 
     def _calculate_max_drawdown(self, pnls: List[float]) -> float:

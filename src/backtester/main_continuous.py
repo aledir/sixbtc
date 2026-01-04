@@ -197,7 +197,7 @@ class ContinuousBacktesterProcess:
 
         min_coins = self.config.get('pattern_discovery', {}).get(
             'coin_selection', {}
-        ).get('min_tradable_coins', 10)
+        ).get('min_tradable_coins', 1)  # Trust Pattern Discovery Tier 1 validation
 
         # Level 1: Liquidity filter (active trading pairs from CoinRegistry)
         active_coins = set(get_active_pairs())
@@ -237,8 +237,8 @@ class ContinuousBacktesterProcess:
             if info and info.get('days', 0) >= total_days * min_coverage:
                 validated_coins.append(coin)
 
-            if len(validated_coins) >= min_coins * 2:
-                # Have enough, stop checking (preserve edge order)
+            if len(validated_coins) >= self.max_coins:
+                # Have enough coins for backtest, stop checking (preserve edge order)
                 break
 
         if len(validated_coins) < min_coins:
@@ -548,9 +548,10 @@ class ContinuousBacktesterProcess:
                     period_days=self.training_days
                 )
 
-                # Save holdout backtest result
+                # Save holdout backtest result (ALWAYS save, even with 0 trades)
+                # 0 trades is DATA (pattern dormant in recent period), not failure
                 holdout_backtest_id = None
-                if holdout_result and holdout_result.get('total_trades', 0) > 0:
+                if holdout_result:
                     holdout_backtest_id = self._save_backtest_result(
                         strategy_id, holdout_result, pairs, tf,
                         is_optimal=False,
@@ -652,7 +653,8 @@ class ContinuousBacktesterProcess:
             result = self.engine.backtest(
                 strategy=strategy_instance,
                 data=valid_data,
-                max_positions=None  # Uses config value
+                max_positions=None,  # Uses config value
+                timeframe=timeframe  # For correct Sharpe annualization
             )
             return result
         except Exception as e:
@@ -968,8 +970,9 @@ class ContinuousBacktesterProcess:
         training_expectancy = training_result.get('expectancy', 0)
 
         # Calculate training base score
-        # Normalize expectancy to percentage of initial capital
-        training_expectancy_pct = (training_expectancy / self.initial_capital) * 100 if self.initial_capital > 0 else 0
+        # Bug fix: expectancy is already a percentage from backtest_engine.py
+        # No division needed - dividing by initial_capital was corrupting the metric
+        training_expectancy_pct = training_expectancy
 
         training_score = (
             0.5 * training_sharpe +
@@ -983,8 +986,8 @@ class ContinuousBacktesterProcess:
             holdout_win_rate = holdout_result.get('win_rate', 0)
             holdout_expectancy = holdout_result.get('expectancy', 0)
 
-            # Normalize expectancy to percentage of initial capital
-            holdout_expectancy_pct = (holdout_expectancy / self.initial_capital) * 100 if self.initial_capital > 0 else 0
+            # Bug fix: expectancy is already a percentage
+            holdout_expectancy_pct = holdout_expectancy
             holdout_score = (
                 0.5 * holdout_sharpe +
                 0.3 * holdout_expectancy_pct +
@@ -994,6 +997,7 @@ class ContinuousBacktesterProcess:
             holdout_sharpe = 0
             holdout_win_rate = 0
             holdout_expectancy = 0
+            holdout_expectancy_pct = 0  # Bug fix: must be defined for weighted calculation
             holdout_score = training_score  # Neutral if no holdout
 
         # Calculate weighted final score
@@ -1007,6 +1011,15 @@ class ContinuousBacktesterProcess:
         # Apply holdout bonus/penalty
         holdout_bonus = validation.get('holdout_bonus', 0)
         final_score = final_score * (1 + holdout_bonus)
+
+        # Calculate weighted metrics for classifier (training 40% + holdout 60%)
+        # Each metric weighted individually (not composite) for accurate classification
+        weighted_sharpe_pure = (training_sharpe * 0.4) + (holdout_sharpe * 0.6) if holdout_sharpe is not None else training_sharpe
+        weighted_expectancy = (training_expectancy_pct * 0.4) + (holdout_expectancy_pct * 0.6) if holdout_expectancy_pct is not None else training_expectancy_pct
+        weighted_win_rate = (training_win_rate * 0.4) + (holdout_win_rate * 0.6) if holdout_win_rate is not None else training_win_rate
+
+        # Walk-forward stability: check if available from optimization
+        weighted_walk_forward_stability = training_result.get('walk_forward_stability')
 
         return {
             **training_result,
@@ -1026,6 +1039,11 @@ class ContinuousBacktesterProcess:
             'holdout_bonus': holdout_bonus,
             # Final score
             'final_score': final_score,
+            # Individual weighted metrics for classifier
+            'weighted_sharpe_pure': weighted_sharpe_pure,
+            'weighted_expectancy': weighted_expectancy,
+            'weighted_win_rate': weighted_win_rate,
+            'weighted_walk_forward_stability': weighted_walk_forward_stability,
         }
 
     def _update_training_with_holdout(
@@ -1047,12 +1065,29 @@ class ContinuousBacktesterProcess:
                 ).first()
 
                 if bt:
-                    # Link to holdout result
+                    # Link to holdout result (even if 0 trades)
                     if holdout_backtest_id:
                         bt.recent_result_id = holdout_backtest_id
 
-                    # Store final metrics (reuse existing columns)
-                    bt.weighted_sharpe = final_result.get('final_score')
+                    # Store final metrics (ALWAYS - final_result exists even with 0 holdout trades)
+                    # FAST FAIL: If final_score is None, crash (indicates bug in _calculate_final_metrics)
+                    final_score = final_result.get('final_score')
+                    if final_score is None:
+                        raise ValueError(
+                            f"final_score is None for training backtest {training_backtest_id} "
+                            f"(holdout_id={holdout_backtest_id}). "
+                            f"This indicates a bug in _calculate_final_metrics(). "
+                            f"All strategies must have a final_score calculated."
+                        )
+
+                    bt.weighted_sharpe = final_score
+
+                    # Save individual weighted metrics for classifier
+                    bt.weighted_sharpe_pure = final_result.get('weighted_sharpe_pure')
+                    bt.weighted_expectancy = final_result.get('weighted_expectancy')
+                    bt.weighted_win_rate = final_result.get('weighted_win_rate')
+                    bt.weighted_walk_forward_stability = final_result.get('weighted_walk_forward_stability')
+
                     bt.recency_ratio = 1 - final_result.get('degradation', 0)
                     bt.recency_penalty = -final_result.get('holdout_bonus', 0)
 

@@ -16,7 +16,7 @@ from sqlalchemy import (
     Column, String, Integer, Float, DateTime, Boolean, Text, JSON,
     ForeignKey, Enum, Index
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 
@@ -133,6 +133,14 @@ class Strategy(Base):
     # Process ID currently working on this strategy (e.g., "validator-001")
     processing_started_at = Column(DateTime, nullable=True)
     # When processing started (for timeout detection)
+
+    # Pipeline completion timestamps (for accurate throughput metrics)
+    validation_completed_at = Column(DateTime, nullable=True)
+    # When validation phase completed
+    backtest_completed_at = Column(DateTime, nullable=True)
+    # When backtesting completed (similar to tested_at but more precise)
+    processing_completed_at = Column(DateTime, nullable=True)
+    # When overall processing completed for this stage
 
     # Code
     code = Column(Text, nullable=False)
@@ -257,9 +265,14 @@ class BacktestResult(Base):
     period_days = Column(Integer)  # Number of days in this backtest period
 
     # Weighted score fields (only populated on 'full' period row after combining with recent)
-    weighted_sharpe = Column(Float)       # 60% full + 40% recent
+    weighted_sharpe = Column(Float)       # 60% full + 40% recent (legacy composite score)
     weighted_win_rate = Column(Float)
     weighted_expectancy = Column(Float)
+
+    # Individual weighted metrics (training 40% + holdout 60%) - for accurate classifier ranking
+    weighted_sharpe_pure = Column(Float, nullable=True)  # Sharpe only (no composite)
+    weighted_walk_forward_stability = Column(Float, nullable=True)  # Stability metric
+
     recency_ratio = Column(Float)         # recent_sharpe / full_sharpe (measures "in-form")
     recency_penalty = Column(Float)       # 0-20% penalty for poor recent performance
 
@@ -500,6 +513,77 @@ class Subaccount(Base):
 
     def __repr__(self):
         return f"<Subaccount(id={self.id}, strategy={self.strategy_id}, balance={self.current_balance:.2f})>"
+
+
+# ==============================================================================
+# SCHEDULED TASKS TRACKING
+# ==============================================================================
+
+class ScheduledTaskExecution(Base):
+    """Track execution of scheduled tasks"""
+    __tablename__ = "scheduled_task_executions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    task_name = Column(String(100), nullable=False, index=True)
+    task_type = Column(String(50), nullable=False, index=True)
+    status = Column(String(20), nullable=False, index=True)
+
+    # Timing
+    started_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    duration_seconds = Column(Float, nullable=True)
+
+    # Results
+    error_message = Column(Text, nullable=True)
+    task_metadata = Column(JSONB, nullable=True)
+
+    # Trigger source
+    triggered_by = Column(String(100), nullable=True)
+
+    # Relationship to pairs update details
+    pairs_update_details = relationship(
+        "PairsUpdateLog",
+        back_populates="execution",
+        cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index('idx_task_executions_lookup', 'task_name', 'started_at'),
+    )
+
+    def __repr__(self):
+        return f"<ScheduledTaskExecution(id={self.id}, task={self.task_name}, status={self.status})>"
+
+
+class PairsUpdateLog(Base):
+    """Detailed log for pairs update operations"""
+    __tablename__ = "pairs_update_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    execution_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey('scheduled_task_executions.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True
+    )
+
+    # Update metrics
+    total_pairs = Column(Integer, nullable=False)
+    new_pairs = Column(Integer, nullable=False)
+    updated_pairs = Column(Integer, nullable=False)
+    deactivated_pairs = Column(Integer, nullable=False)
+
+    # Snapshot
+    top_10_symbols = Column(JSONB, nullable=True)
+
+    # Timestamp
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+
+    # Relationship
+    execution = relationship("ScheduledTaskExecution", back_populates="pairs_update_details")
+
+    def __repr__(self):
+        return f"<PairsUpdateLog(id={self.id}, total_pairs={self.total_pairs})>"
 
 
 # ==============================================================================

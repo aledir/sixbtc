@@ -152,7 +152,7 @@ pipeline:
   queue_limits:
     generated: 100      # Max GENERATED strategies waiting for validation
     validated: 50       # Max VALIDATED strategies waiting for backtest
-    tested: 30          # Max TESTED strategies waiting for classification
+    tested: 100         # Max TESTED strategies waiting for classification (increased from 30)
 
   backpressure:
     check_interval: 10        # Seconds between backpressure checks
@@ -175,7 +175,7 @@ pattern_discovery:
   coin_selection:
     min_edge: 0.10             # 10% minimum edge to include coin
     min_signals: 50            # Minimum signals for statistical reliability
-    min_tradable_coins: 5      # Minimum validated coins required (NO fallback if fewer)
+    min_tradable_coins: 1      # Trust Pattern Discovery validation (Tier 1 = already anti-overfitting tested)
     # NOTE: max_coins is in backtesting.max_coins (shared with AI strategies)
 
   # Multi-target expansion: one pattern with N Tier 1 targets -> N strategies
@@ -256,6 +256,8 @@ classification:
   live_ranking:
     enabled: true
     min_trades_live: 10          # Minimum trades before calculating live metrics
+    min_trades_for_frequency: 10 # Minimum trades to calculate trade frequency for Sharpe annualization
+    min_days_for_frequency: 7    # Minimum days active for reliable frequency calculation
     retire_score_threshold: 30   # Score < 30 = retire
     max_degradation_pct: 0.50    # 50% worse than backtest = retire
     max_drawdown_live: 0.30      # 30% live drawdown = retire

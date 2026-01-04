@@ -74,15 +74,37 @@ class DualRanker:
                 .all()
             )
 
+            # Log legacy strategies without weighted_sharpe (will be skipped)
+            null_count = 0
+            for strategy, backtest in results:
+                if backtest.weighted_sharpe is None:
+                    null_count += 1
+
+            if null_count > 0:
+                logger.warning(
+                    f"Found {null_count} legacy TESTED strategies with NULL weighted_sharpe. "
+                    f"These are old backtests from before the weighted metrics fix. "
+                    f"They will be skipped from ranking. Re-backtest to include them."
+                )
+
             ranking = []
             for strategy, backtest in results:
+                # Fast Fail: skip strategies without weighted metrics (legacy or failed backtests)
+                if backtest.weighted_sharpe_pure is None:
+                    logger.warning(
+                        f"Strategy {strategy.name} missing weighted metrics, skipping. "
+                        f"Re-run backtest to populate weighted fields."
+                    )
+                    continue
+
                 # Calculate score if not cached
                 if strategy.score_backtest is None:
+                    # Use weighted metrics (training 40% + holdout 60%)
                     metrics = {
-                        'expectancy': backtest.expectancy or 0,
-                        'sharpe_ratio': backtest.sharpe_ratio or 0,
-                        'consistency': backtest.win_rate or 0,
-                        'wf_stability': backtest.walk_forward_stability or 0
+                        'expectancy': backtest.weighted_expectancy or 0,
+                        'sharpe_ratio': backtest.weighted_sharpe_pure or 0,
+                        'consistency': backtest.weighted_win_rate or 0,
+                        'wf_stability': backtest.weighted_walk_forward_stability or 0
                     }
                     score = self.backtest_scorer.score(metrics)
 
@@ -98,9 +120,10 @@ class DualRanker:
                     'timeframe': strategy.timeframe,
                     'status': strategy.status,
                     'score': score,
-                    'sharpe': backtest.sharpe_ratio,
-                    'expectancy': backtest.expectancy,
-                    'win_rate': backtest.win_rate,
+                    # Use weighted metrics for display (match scoring)
+                    'sharpe': backtest.weighted_sharpe_pure,
+                    'expectancy': backtest.weighted_expectancy,
+                    'win_rate': backtest.weighted_win_rate,
                     'total_trades': backtest.total_trades,
                     'max_drawdown': backtest.max_drawdown,
                     'ranking_type': 'backtest'
@@ -299,7 +322,9 @@ class DualRanker:
         for i, s in enumerate(live, 1):
             degrad = s.get('degradation_pct')
             degrad_str = f", degrad={degrad:.0%}" if degrad else ""
+            pnl = s.get('total_pnl') or 0
+            score = s.get('score') or 0
             logger.info(
-                f"  {i}. {s['name']}: score={s['score']:.1f}, "
-                f"pnl=${s['total_pnl']:.2f}{degrad_str}"
+                f"  {i}. {s['name']}: score={score:.1f}, "
+                f"pnl=${pnl:.2f}{degrad_str}"
             )

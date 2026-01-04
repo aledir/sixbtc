@@ -428,7 +428,8 @@ class BacktestEngine:
         self,
         strategy: StrategyCore,
         data: Dict[str, pd.DataFrame],
-        max_positions: Optional[int] = None
+        max_positions: Optional[int] = None,
+        timeframe: Optional[str] = None
     ) -> Dict:
         """
         Portfolio backtest with realistic position limits
@@ -446,6 +447,7 @@ class BacktestEngine:
             strategy: StrategyCore instance
             data: Dict mapping symbol → OHLCV DataFrame
             max_positions: Maximum concurrent open positions (default from config)
+            timeframe: Timeframe string ('15m', '1h', '4h', '1d') for correct Sharpe annualization
 
         Returns:
             Portfolio-level metrics with position-limited simulation
@@ -570,7 +572,8 @@ class BacktestEngine:
         metrics = self._calculate_portfolio_metrics(
             closed_trades,
             equity_curve,
-            self.initial_capital
+            self.initial_capital,
+            timeframe=timeframe
         )
         metrics['max_positions_used'] = max_positions
         metrics['symbols_count'] = len(symbols)
@@ -1098,7 +1101,8 @@ class BacktestEngine:
         metrics = self._calculate_portfolio_metrics(
             closed_trades,
             equity_curve,
-            self.initial_capital
+            self.initial_capital,
+            timeframe=timeframe
         )
         metrics['max_positions_used'] = max_positions
         metrics['symbols_count'] = len(symbols)
@@ -1153,9 +1157,18 @@ class BacktestEngine:
         self,
         trades: List[Dict],
         equity_curve: List[float],
-        initial_capital: float
+        initial_capital: float,
+        timeframe: Optional[str] = None
     ) -> Dict:
-        """Calculate metrics from trade list and equity curve"""
+        """
+        Calculate metrics from trade list and equity curve
+
+        Args:
+            trades: List of trade dicts
+            equity_curve: Equity curve (one value per bar)
+            initial_capital: Starting capital
+            timeframe: Timeframe string ('15m', '1h', etc.) for correct Sharpe annualization
+        """
         if not trades:
             return self._empty_results()
 
@@ -1206,13 +1219,32 @@ class BacktestEngine:
         # Clamp to [0, 1] range
         max_drawdown = min(max(max_drawdown, 0.0), 1.0)
 
-        # Sharpe (simplified - daily returns) - protect against division by zero
+        # Sharpe ratio with correct annualization based on timeframe
+        # Equity curve has one value per bar, so returns are per-bar returns
         with np.errstate(divide='ignore', invalid='ignore'):
             returns = np.where(equity_arr[:-1] > 0,
                                np.diff(equity_arr) / equity_arr[:-1],
                                0.0)
         returns = np.nan_to_num(returns, nan=0.0, posinf=0.0, neginf=0.0)
-        sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) > 0 else 0.0
+
+        # Calculate annualization factor based on timeframe
+        # sqrt(365 * bars_per_day) converts per-bar volatility to annual
+        # Crypto markets are open 365 days/year (24/7), not 252 like traditional markets
+        if timeframe:
+            bars_per_day = {
+                '1d': 1,
+                '4h': 6,
+                '1h': 24,
+                '30m': 48,
+                '15m': 96,
+                '5m': 288
+            }.get(timeframe, 1)  # Default to daily if unknown
+        else:
+            # Fallback: assume daily if timeframe not provided
+            bars_per_day = 1
+
+        annualization_factor = np.sqrt(365 * bars_per_day)
+        sharpe = np.mean(returns) / np.std(returns) * annualization_factor if np.std(returns) > 0 else 0.0
 
         # Profit factor
         gross_profit = sum(p for p in pnls if p > 0)
