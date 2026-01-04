@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from uuid import UUID, uuid4
 import importlib.util
 import tempfile
 import sys
@@ -1362,7 +1363,6 @@ class ContinuousBacktesterProcess:
             UUID of cloned strategy, or None if failed
         """
         try:
-            from uuid import uuid4
             from src.database.models import Strategy
 
             with get_session() as session:
