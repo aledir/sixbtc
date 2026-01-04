@@ -241,12 +241,12 @@ def test_backtester(strategy_ids: list) -> list:
 
     config = load_config()
 
-    step("Initializing VectorBT backtester...")
-    from src.backtester.backtest_engine import VectorBTBacktester
+    step("Initializing backtester...")
+    from src.backtester.backtest_engine import BacktestEngine
     from src.backtester.data_loader import BinanceDataLoader
     from datetime import timedelta
 
-    backtester = VectorBTBacktester(config)
+    backtester = BacktestEngine(config)
     data_loader = BinanceDataLoader()
     success("Backtester ready")
 

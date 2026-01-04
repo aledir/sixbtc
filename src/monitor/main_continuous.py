@@ -15,7 +15,7 @@ import asyncio
 import os
 import signal
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Dict, Optional
 
 from src.config import load_config
@@ -143,7 +143,7 @@ class ContinuousMonitorProcess:
     async def _run_health_checks(self) -> Dict:
         """Run all health checks"""
         health = {
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now(UTC).isoformat(),
             'database': self._check_database(),
             'pipeline': self._check_pipeline(),
             'trading': self._check_trading(),
@@ -188,7 +188,7 @@ class ContinuousMonitorProcess:
             # Check for stalled strategies
             stalled_count = 0
             with get_session() as session:
-                cutoff = datetime.utcnow() - timedelta(minutes=30)
+                cutoff = datetime.now(UTC) - timedelta(minutes=30)
                 stalled_count = (
                     session.query(Strategy)
                     .filter(
@@ -227,7 +227,7 @@ class ContinuousMonitorProcess:
                 )
 
                 # Count recent trades (last 24h)
-                cutoff = datetime.utcnow() - timedelta(hours=24)
+                cutoff = datetime.now(UTC) - timedelta(hours=24)
                 recent_trades = (
                     session.query(Trade)
                     .filter(Trade.entry_time >= cutoff)
@@ -317,7 +317,7 @@ class ContinuousMonitorProcess:
 
             for s in strategies:
                 s.status = "RETIRED"
-                s.retired_at = datetime.utcnow()
+                s.retired_at = datetime.now(UTC)
                 logger.warning(f"Retired strategy {s.name}")
 
     def _record_health_snapshot(self, health: Dict):
@@ -328,7 +328,7 @@ class ContinuousMonitorProcess:
 
                 snapshot = PerformanceSnapshot(
                     strategy_id=None,  # Portfolio level
-                    snapshot_time=datetime.utcnow(),
+                    snapshot_time=datetime.now(UTC),
                     total_pnl_usd=perf.get('total_pnl', 0),
                     max_drawdown=perf.get('max_drawdown', 0),
                     pnl_24h=perf.get('pnl_24h', 0),

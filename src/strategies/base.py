@@ -3,7 +3,7 @@ StrategyCore Base Class
 
 Abstract base class for all trading strategies in SixBTC.
 All generated strategies MUST inherit from this class to ensure
-compatibility with both backtest (VectorBT) and live (Hyperliquid SDK).
+compatibility with both backtest and live (Hyperliquid SDK) execution.
 """
 
 from abc import ABC, abstractmethod

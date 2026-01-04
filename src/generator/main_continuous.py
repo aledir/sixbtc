@@ -288,7 +288,8 @@ class ContinuousGeneratorProcess:
                         if success:
                             logger.info(f"Generated {count} strategies from template {template_id}")
                         else:
-                            logger.warning(f"Generation failed for task {task_id}")
+                            # Normal when patterns filtered out - not a real failure
+                            logger.debug(f"No strategy generated for task {task_id}")
                     except Exception as e:
                         logger.error(f"Task {task_id} error: {e}")
 
@@ -298,7 +299,7 @@ class ContinuousGeneratorProcess:
 
     def _generate_batch(self) -> Tuple[bool, int, str]:
         """
-        Generate ALL strategy variations from one template.
+        Generate strategy variations from one template, respecting backpressure.
 
         Returns:
             (success, count, template_id) tuple
@@ -313,6 +314,14 @@ class ContinuousGeneratorProcess:
                 time.sleep(wait_time)
             self._last_generation_time = datetime.now()
 
+            # Calculate remaining capacity (backpressure-aware)
+            generated_count = self.strategy_processor.count_available("GENERATED")
+            remaining_capacity = max(0, self.generated_limit - generated_count)
+
+            if remaining_capacity == 0:
+                logger.debug("No remaining capacity, skipping generation")
+                return (False, 0, "backpressure")
+
             # Select random strategy type and timeframe
             strategy_types = ['MOM', 'REV', 'TRN', 'BRE', 'VOL', 'SCA']
             timeframes = self.config.get('timeframes', ['15m', '30m', '1h', '4h', '1d'])
@@ -323,16 +332,18 @@ class ContinuousGeneratorProcess:
             # Smart pattern selection
             use_patterns, selected_patterns = self._should_use_patterns()
 
-            # Generate ALL variations
+            # Generate variations with capacity limit
             results = self.strategy_builder.generate_strategies(
                 strategy_type=strategy_type,
                 timeframe=timeframe,
                 use_patterns=use_patterns,
-                patterns=selected_patterns
+                patterns=selected_patterns,
+                max_variations=remaining_capacity
             )
 
             if not results:
-                logger.warning("No valid strategies generated")
+                # This is normal when patterns are filtered out (e.g., insufficient coins)
+                logger.debug("No valid strategies generated")
                 return (False, 0, "")
 
             # Save all strategies

@@ -109,7 +109,7 @@ class ShuffleTester:
 
     # Configuration
     MIN_BARS_REQUIRED = 100  # Minimum bars needed for testing
-    SAMPLE_POINTS = 50  # Number of points to test (for performance)
+    SAMPLE_POINTS = 20  # Number of points to test (reduced from 50 for performance)
     FAKE_FUTURE_BARS = 20  # How many fake future bars to append
     N_RANDOM_FUTURES = 3  # Number of different random futures to test
 

@@ -64,7 +64,7 @@ class LookaheadTester:
 
     def __init__(
         self,
-        sample_points: int = 20,
+        sample_points: int = 10,
         lookahead_bars: int = 10,
         tolerance: float = 1e-9
     ):

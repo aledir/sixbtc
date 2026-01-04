@@ -51,7 +51,7 @@ function LogLineRow({ line }: { line: LogLine }) {
 }
 
 // Main Logs Page
-export function Logs() {
+export default function Logs() {
   const [selectedService, setSelectedService] = useState('executor');
   const [logLevel, setLogLevel] = useState('');
   const [search, setSearch] = useState('');
@@ -108,7 +108,7 @@ export function Logs() {
       </div>
 
       {/* Service Tabs */}
-      <div className="flex items-center gap-2 border-b border-terminal pb-3">
+      <div className="flex items-center gap-2 border-b border-border pb-3">
         {SERVICES.map((service) => (
           <button
             key={service}
@@ -130,7 +130,7 @@ export function Logs() {
         <select
           value={logLevel}
           onChange={(e) => setLogLevel(e.target.value)}
-          className="px-3 py-2 bg-card border border-terminal rounded text-sm focus:outline-none focus:border-profit"
+          className="px-3 py-2 bg-card border border-border rounded text-sm focus:outline-none focus:border-profit"
         >
           <option value="">All Levels</option>
           {LOG_LEVELS.map((level) => (
@@ -148,7 +148,7 @@ export function Logs() {
             placeholder="Search logs..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 bg-card border border-terminal rounded text-sm focus:outline-none focus:border-profit"
+            className="w-full pl-10 pr-4 py-2 bg-card border border-border rounded text-sm focus:outline-none focus:border-profit"
           />
         </div>
 
@@ -170,7 +170,7 @@ export function Logs() {
         {/* Download */}
         <button
           onClick={handleDownload}
-          className="flex items-center gap-2 px-3 py-2 bg-card border border-terminal rounded text-sm hover:bg-white/5"
+          className="flex items-center gap-2 px-3 py-2 bg-card border border-border rounded text-sm hover:bg-white/5"
         >
           <Download className="w-4 h-4" />
           Export
@@ -179,7 +179,7 @@ export function Logs() {
         {/* Refresh */}
         <button
           onClick={() => refetch()}
-          className="flex items-center gap-2 px-3 py-2 bg-card border border-terminal rounded text-sm hover:bg-white/5"
+          className="flex items-center gap-2 px-3 py-2 bg-card border border-border rounded text-sm hover:bg-white/5"
         >
           <RefreshCw className="w-4 h-4" />
         </button>
@@ -190,7 +190,7 @@ export function Logs() {
         <div
           ref={scrollRef}
           onScroll={handleScroll}
-          className="h-[600px] bg-card border border-terminal rounded-md p-4 overflow-auto"
+          className="h-[600px] bg-card border border-border rounded-lg p-4 overflow-auto"
         >
           {isLoading ? (
             <div className="flex items-center justify-center h-full">

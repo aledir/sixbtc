@@ -19,7 +19,7 @@ Pattern:
 
 import os
 import socket
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -108,7 +108,7 @@ class StrategyProcessor:
 
             # Update the strategy to mark it as being processed
             strategy.processing_by = self.process_id
-            strategy.processing_started_at = datetime.utcnow()
+            strategy.processing_started_at = datetime.now(UTC)
 
             session.commit()
 
@@ -157,11 +157,11 @@ class StrategyProcessor:
 
             # Update relevant timestamps based on new status
             if new_status == "TESTED":
-                strategy.tested_at = datetime.utcnow()
+                strategy.tested_at = datetime.now(UTC)
             elif new_status == "LIVE":
-                strategy.live_since = datetime.utcnow()
+                strategy.live_since = datetime.now(UTC)
             elif new_status == "RETIRED":
-                strategy.retired_at = datetime.utcnow()
+                strategy.retired_at = datetime.now(UTC)
 
             session.commit()
 
@@ -265,7 +265,7 @@ class StrategyProcessor:
         Returns:
             Number of stale claims released
         """
-        cutoff_time = datetime.utcnow() - timedelta(seconds=self.timeout_seconds)
+        cutoff_time = datetime.now(UTC) - timedelta(seconds=self.timeout_seconds)
 
         result = (
             session.query(Strategy)

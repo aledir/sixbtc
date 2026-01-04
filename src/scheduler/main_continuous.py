@@ -12,7 +12,7 @@ import asyncio
 import os
 import signal
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from typing import Dict, List, Set
 
@@ -54,9 +54,9 @@ class ContinuousSchedulerProcess:
             'refresh_data_cache': 4,  # Every 4 hours
         }
 
-        # Initialize last run times
+        # Initialize last run times (use timezone-aware datetime)
         for task in self.tasks:
-            self.last_run[task] = datetime.min
+            self.last_run[task] = datetime.min.replace(tzinfo=UTC)
 
         logger.info(
             f"ContinuousSchedulerProcess initialized: {len(self.tasks)} tasks"
@@ -68,7 +68,7 @@ class ContinuousSchedulerProcess:
 
         while not self.shutdown_event.is_set() and not self.force_exit:
             try:
-                now = datetime.utcnow()
+                now = datetime.now(UTC)
 
                 # Check each task
                 for task_name, interval_hours in self.tasks.items():
@@ -113,7 +113,7 @@ class ContinuousSchedulerProcess:
         processor = StrategyProcessor(process_id=f"scheduler-{os.getpid()}")
 
         with get_session() as session:
-            cutoff = datetime.utcnow() - timedelta(minutes=30)
+            cutoff = datetime.now(UTC) - timedelta(minutes=30)
 
             stale = (
                 session.query(Strategy)
@@ -135,7 +135,7 @@ class ContinuousSchedulerProcess:
     async def _cleanup_old_failed(self):
         """Clean up old FAILED strategies"""
         with get_session() as session:
-            cutoff = datetime.utcnow() - timedelta(days=7)
+            cutoff = datetime.now(UTC) - timedelta(days=7)
 
             old_failed = (
                 session.query(Strategy)

@@ -175,8 +175,8 @@ pattern_discovery:
   coin_selection:
     min_edge: 0.10             # 10% minimum edge to include coin
     min_signals: 50            # Minimum signals for statistical reliability
-    max_coins: 30              # Max coins to select per pattern
     min_tradable_coins: 5      # Minimum validated coins required (NO fallback if fewer)
+    # NOTE: max_coins is in backtesting.max_coins (shared with AI strategies)
 
   # Multi-target expansion: one pattern with N Tier 1 targets -> N strategies
   multi_target:
@@ -197,8 +197,10 @@ backtesting:
   initial_capital: 10000
   parallel_threads: 10
 
-  # Multi-pair backtesting
-  backtest_pairs_count: 20   # Top N pairs by volume (reduced for performance)
+  # Coins per backtest (applies to BOTH pattern and AI strategies)
+  # Pattern: selects top N coins by edge from pattern's coin_performance
+  # AI: selects top N coins by volume from active trading pairs
+  max_coins: 30
 
   # Training/Holdout split (unified approach)
   # Total period = training_days + holdout_days = 210 days

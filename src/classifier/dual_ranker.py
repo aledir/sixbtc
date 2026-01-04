@@ -6,7 +6,7 @@ Provides two independent rankings:
 2. LIVE ranking - for monitoring and retirement decisions
 """
 
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
@@ -249,7 +249,7 @@ class DualRanker:
 
             old_status = strategy.status
             strategy.status = 'RETIRED'
-            strategy.retired_at = datetime.utcnow()
+            strategy.retired_at = datetime.now(UTC)
 
             logger.warning(
                 f"RETIRED {strategy.name}: {reason} "

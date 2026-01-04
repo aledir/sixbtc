@@ -42,7 +42,7 @@ function SubaccountCard({ subaccount }: { subaccount: SubaccountInfo }) {
   const pnlColor = subaccount.pnl >= 0 ? 'text-profit' : 'text-loss';
 
   return (
-    <div className="bg-card border border-terminal rounded-md p-4">
+    <div className="bg-card border border-border rounded-lg p-4">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <Wallet className="w-4 h-4 text-muted" />
@@ -120,7 +120,7 @@ function TradeRow({ trade }: { trade: TradeItem }) {
 // Summary Stats Card
 function SummaryCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-card border border-terminal rounded-md p-4">
+    <div className="bg-card border border-border rounded-lg p-4">
       <h3 className="text-sm font-semibold text-muted uppercase mb-4">{title}</h3>
       {children}
     </div>
@@ -128,7 +128,7 @@ function SummaryCard({ title, children }: { title: string; children: React.React
 }
 
 // Main Trading Page
-export function Trading() {
+export default function Trading() {
   const [tradeStatus, setTradeStatus] = useState<'open' | 'closed'>('open');
 
   const { data: trades, isLoading: tradesLoading } = useTrades({
@@ -161,7 +161,7 @@ export function Trading() {
       {/* Top Row: Equity + Summary */}
       <div className="grid grid-cols-3 gap-6">
         {/* Equity Curve */}
-        <div className="col-span-2 bg-card border border-terminal rounded-md p-4">
+        <div className="col-span-2 bg-card border border-border rounded-lg p-4">
           <h3 className="text-sm font-semibold text-muted uppercase mb-4">
             Equity Curve (24h)
           </h3>
@@ -299,7 +299,7 @@ export function Trading() {
           </div>
         </div>
 
-        <div className="bg-card border border-terminal rounded-md overflow-hidden">
+        <div className="bg-card border border-border rounded-lg overflow-hidden">
           {tradesLoading ? (
             <div className="flex items-center justify-center h-32">
               <Activity className="w-6 h-6 animate-spin text-muted" />

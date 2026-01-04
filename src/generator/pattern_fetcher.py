@@ -83,7 +83,8 @@ class Pattern:
         self,
         min_edge: float = 0.10,
         min_signals: int = 50,
-        max_coins: int = 30
+        max_coins: int = 30,
+        filter_tradable: bool = True
     ) -> List[str]:
         """
         Get coins where this pattern has demonstrated positive edge.
@@ -92,6 +93,7 @@ class Pattern:
             min_edge: Minimum edge threshold (default 10%)
             min_signals: Minimum number of signals for reliability
             max_coins: Maximum coins to return
+            filter_tradable: If True, only return coins in CoinRegistry (default True)
 
         Returns:
             List of coin symbols sorted by edge (descending)
@@ -99,9 +101,20 @@ class Pattern:
         if not self.coin_performance:
             return []
 
+        # Get tradable coins from registry if filtering enabled
+        tradable_coins = None
+        if filter_tradable:
+            try:
+                from src.data.coin_registry import get_active_pairs
+                tradable_coins = set(get_active_pairs())
+            except Exception as e:
+                logger.warning(f"Failed to get tradable coins: {e}")
+                tradable_coins = None
+
         filtered = [
             cp for cp in self.coin_performance
             if cp.edge >= min_edge and cp.n_signals >= min_signals
+            and (tradable_coins is None or cp.coin in tradable_coins)
         ]
 
         # Sort by edge descending
@@ -245,7 +258,8 @@ class PatternFetcher:
             params = {
                 'status': 'PRODUCTION',
                 'tier': 1,
-                'limit': limit
+                'limit': limit,
+                'include_coin_performance': 'true',  # Get per-coin edge data
             }
 
             response = requests.get(

@@ -1,83 +1,117 @@
-import { Link, useLocation } from 'react-router-dom';
-import {
-  LayoutDashboard,
-  TrendingUp,
-  LineChart,
-  FileText,
-  Settings,
-  AlertTriangle,
-} from 'lucide-react';
-import { useEmergencyStop } from '../hooks/useApi';
+import { NavLink, Outlet } from 'react-router-dom';
+import { LayoutDashboard, TrendingUp, LineChart, ScrollText, Settings, AlertTriangle } from 'lucide-react';
+import { useStatus, useEmergencyStop } from '../hooks/useApi';
 
-interface LayoutProps {
-  children: React.ReactNode;
-}
-
-const navigation = [
-  { name: 'Overview', href: '/', icon: LayoutDashboard },
-  { name: 'Strategies', href: '/strategies', icon: TrendingUp },
-  { name: 'Trading', href: '/trading', icon: LineChart },
-  { name: 'Logs', href: '/logs', icon: FileText },
-  { name: 'Settings', href: '/settings', icon: Settings },
+const navItems = [
+  { to: '/', icon: LayoutDashboard, label: 'Overview' },
+  { to: '/strategies', icon: TrendingUp, label: 'Strategies' },
+  { to: '/trading', icon: LineChart, label: 'Trading' },
+  { to: '/logs', icon: ScrollText, label: 'Logs' },
+  { to: '/settings', icon: Settings, label: 'Settings' },
 ];
 
-export function Layout({ children }: LayoutProps) {
-  const location = useLocation();
+function formatUptime(seconds: number): string {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
+export default function Layout() {
+  const { data: status, isError } = useStatus();
   const emergencyStop = useEmergencyStop();
 
+  const servicesOk = status?.services.every((s) => s.status === 'RUNNING') ?? false;
+  const hasAlerts = (status?.alerts.length ?? 0) > 0;
+
   const handleEmergencyStop = () => {
-    if (confirm('Are you sure you want to trigger EMERGENCY STOP? This will halt all trading.')) {
+    if (confirm('EMERGENCY STOP: This will halt all trading immediately. Continue?')) {
       emergencyStop.mutate();
     }
   };
 
   return (
-    <div className="flex min-h-screen w-full">
+    <div className="flex min-h-screen bg-background text-foreground font-mono">
       {/* Sidebar */}
-      <aside className="w-64 bg-card border-r border-terminal flex flex-col">
+      <aside className="w-56 bg-card border-r border-border flex flex-col">
         {/* Logo */}
-        <div className="p-4 border-b border-terminal">
+        <div className="p-4 border-b border-border">
           <h1 className="text-xl font-bold text-profit">SixBTC</h1>
-          <p className="text-sm text-muted">Control Center</p>
+          <p className="text-xs text-muted mt-1">Control Center</p>
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 p-4 space-y-2">
-          {navigation.map((item) => {
-            const isActive = location.pathname === item.href;
-            return (
-              <Link
-                key={item.name}
-                to={item.href}
-                className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
+        <nav className="flex-1 p-2">
+          {navItems.map(({ to, icon: Icon, label }) => (
+            <NavLink
+              key={to}
+              to={to}
+              end={to === '/'}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-3 py-2 rounded text-sm transition-colors ${
                   isActive
                     ? 'bg-profit/10 text-profit'
                     : 'text-muted hover:text-foreground hover:bg-white/5'
-                }`}
-              >
-                <item.icon className="w-5 h-5" />
-                {item.name}
-              </Link>
-            );
-          })}
+                }`
+              }
+            >
+              <Icon size={18} />
+              {label}
+            </NavLink>
+          ))}
         </nav>
 
-        {/* Emergency Stop Button */}
-        <div className="p-4 border-t border-terminal">
+        {/* System Status & Emergency Stop */}
+        <div className="p-3 border-t border-border space-y-3">
+          <div className="flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  isError ? 'bg-loss' : servicesOk ? 'bg-profit animate-pulse' : 'bg-warning'
+                }`}
+              />
+              <span className="text-muted">
+                {isError ? 'API Offline' : servicesOk ? 'System OK' : 'Issues'}
+              </span>
+            </div>
+            {status && (
+              <span className="text-muted">{formatUptime(status.uptime_seconds)}</span>
+            )}
+          </div>
           <button
             onClick={handleEmergencyStop}
             disabled={emergencyStop.isPending}
-            className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-loss/20 hover:bg-loss/30 text-loss rounded-md font-semibold transition-colors disabled:opacity-50"
+            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-loss/20 hover:bg-loss/30 text-loss rounded text-xs font-semibold transition-colors disabled:opacity-50"
           >
-            <AlertTriangle className="w-5 h-5" />
+            <AlertTriangle size={14} />
             {emergencyStop.isPending ? 'Stopping...' : 'Emergency Stop'}
           </button>
         </div>
       </aside>
 
-      {/* Main content */}
-      <main className="flex-1 overflow-auto">
-        <div className="p-6">{children}</div>
+      {/* Main Content */}
+      <main className="flex-1 flex flex-col overflow-hidden">
+        {/* Alert Bar */}
+        {hasAlerts && (
+          <div className="bg-warning/10 border-b border-warning/20 px-4 py-2">
+            <div className="flex items-center gap-2 text-warning text-sm">
+              <AlertTriangle size={16} />
+              <span>{status?.alerts[0]?.message}</span>
+              {(status?.alerts.length ?? 0) > 1 && (
+                <span className="text-xs text-muted ml-2">
+                  +{(status?.alerts.length ?? 1) - 1} more
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Page Content */}
+        <div className="flex-1 overflow-auto p-6">
+          <Outlet />
+        </div>
       </main>
     </div>
   );

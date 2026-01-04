@@ -23,31 +23,31 @@ STOP LOSS: TRAILING (sl_type=StopLossType.TRAILING)
 - Uses trailing_stop_pct: distance from high water mark
 - Uses trailing_activation_pct: profit threshold before trailing activates
 {% else %}
-STOP LOSS: ALWAYS REQUIRED (use ATR-based or percentage-based)
+STOP LOSS: ALWAYS REQUIRED (use percentage-based)
 {% endif %}
 
 {% if structure.take_profit %}
-TAKE PROFIT: REQUIRED (use ATR, RR_RATIO, or percentage-based)
+TAKE PROFIT: REQUIRED (use percentage-based)
 {% else %}
 TAKE PROFIT: DO NOT USE (tp_type must NOT be set)
 {% endif %}
 
-{% if structure.exit_indicator %}
-EXIT INDICATOR: REQUIRED
-- Generate Signal(direction='close') when exit condition is met
-- Exit condition should be based on indicator reversal (e.g., RSI returns to neutral)
-- This is SEPARATE from stop loss/take profit
-{% else %}
-EXIT INDICATOR: DO NOT GENERATE (no direction='close' signals)
-{% endif %}
-
 {% if structure.time_exit %}
 TIME EXIT: REQUIRED
-- Include exit_type=ExitType.TIME_BASED in Signal
 - Include exit_after_bars={{ "{{ exit_bars }}" }} parameter
 {% else %}
 TIME EXIT: DO NOT USE
 {% endif %}
+
+=== CRITICAL: VECTORIZED BACKTEST REQUIREMENTS ===
+
+The strategy MUST support vectorized backtesting:
+
+1. calculate_indicators() MUST populate 'entry_signal' boolean column
+2. Class attributes MUST be defined: direction, sl_pct, tp_pct, exit_after_bars, signal_column
+3. generate_signal() is ONLY for live execution (reads entry_signal[-1])
+
+The backtester reads entry_signal as a numpy array - NO per-bar loops!
 
 === STRATEGY TYPE GUIDANCE ===
 
@@ -86,69 +86,28 @@ SCALPING Strategy:
 === ENTRY LOGIC CATEGORIES ===
 
 Choose ONE primary category for your entry logic. This creates diversity across templates.
-DO NOT rely only on TA-Lib indicators - explore other approaches!
 
 **1. INDICATOR-BASED** (Traditional TA)
    Common oscillators: RSI, MACD, Stochastic, CCI, Williams %R, MFI
    Moving averages: EMA, SMA, WMA, DEMA, TEMA, KAMA
    Bands/Channels: BBANDS (Bollinger), Keltner, Donchian
-   Trend: ADX, Supertrend, Parabolic SAR, Ichimoku
-   Less common: AROON, CMO, TRIX, ULTOSC, ROC, Fisher
+   Trend: ADX, Supertrend, Parabolic SAR
 
-   Libraries available:
-   - TA-Lib: `ta.RSI()`, `ta.BBANDS()`, `ta.MACD()`, etc.
-   - pandas_ta: `df.ta.supertrend()`, `df.ta.squeeze()`, `df.ta.vwap()`, `df.ta.ichimoku()`
-
-   Example TA-Lib: `rsi = ta.RSI(df['close'], {{ "{{ indicator_period }}" }})`
-   Example pandas_ta: `supertrend = df.ta.supertrend(length={{ "{{ indicator_period }}" }})`
+   Example: `rsi = ta.RSI(df['close'], {{ "{{ indicator_period }}" }})`
 
 **2. PRICE ACTION** (No indicators, pure price)
-   - Break of previous day/week high or low
+   - Break of previous N bars high or low
    - Higher highs / lower lows sequence
-   - Price vs previous N bars high/low
-   - Example: `break_high = df['close'].iloc[-1] > df['high'].iloc[-2:-{{ "{{ lookback }}" }}].max()`
+   - Example: `break_high = df['close'] > df['high'].shift(1).rolling({{ "{{ lookback }}" }}).max()`
 
-**3. CANDLESTICK PATTERNS** (Single or multi-bar)
-   - Engulfing (bullish/bearish)
-   - Pin bar / Hammer / Shooting star
-   - Inside bar breakout
-   - Doji at extremes
-   - Example: `engulf = (df['close'].iloc[-1] > df['open'].iloc[-2]) and (df['open'].iloc[-1] < df['close'].iloc[-2])`
-
-**4. BODY/RANGE ANALYSIS** (Candle anatomy)
-   - Large body candles (momentum)
-   - Small body = indecision
-   - Body vs wick ratio
-   - Range expansion/contraction
-   - Example: `body = abs(df['close'].iloc[-1] - df['open'].iloc[-1]); range_ = df['high'].iloc[-1] - df['low'].iloc[-1]`
-
-**5. STRUCTURE-BASED** (Market structure)
+**3. STRUCTURE-BASED** (Market structure)
    - Support/resistance levels (swing highs/lows)
-   - Double top/bottom
-   - Trend line breaks
-   - Pivot points (daily PP, R1, S1)
-   - Example: `swing_low = df['low'].rolling({{ "{{ lookback }}" }}).min().iloc[-1]`
+   - Donchian channels
+   - Example: `swing_low = df['low'].rolling({{ "{{ lookback }}" }}).min()`
 
-**6. VOLUME-BASED** (Volume as primary trigger)
+**4. VOLUME-BASED** (Volume as primary trigger)
    - Volume spike entry (volume > N x average)
-   - Volume dry-up reversal
-   - Price + volume confirmation
-   - Example: `vol_avg = df['volume'].rolling(20).mean().iloc[-1]; vol_spike = df['volume'].iloc[-1] > vol_avg * {{ "{{ volume_mult }}" }}`
-
-**7. STATISTICAL** (Quantitative approach)
-   - Z-score of price (deviation from mean)
-   - Percentile rank
-   - Standard deviation bands
-   - Linear regression channel
-   - Example: `z = (df['close'].iloc[-1] - df['close'].rolling({{ "{{ period }}" }}).mean().iloc[-1]) / df['close'].rolling({{ "{{ period }}" }}).std().iloc[-1]`
-
-**8. MULTI-TIMEFRAME PROXY** (Simulated HTF levels)
-   - Use longer lookback to simulate higher timeframe
-   - Daily levels on intraday (e.g., 96-bar high on 15m = daily high)
-   - Example for 15m simulating daily: `daily_high = df['high'].rolling(96).max().iloc[-1]`
-
-IMPORTANT: Be CREATIVE! Combine categories or use less common approaches.
-The walk-forward validation will filter out strategies that don't work.
+   - Example: `vol_spike = df['volume'] > df['volume'].rolling(20).mean() * {{ "{{ volume_mult }}" }}`
 
 === PARAMETERIZATION RULES ===
 
@@ -158,76 +117,45 @@ Use double braces: {{ "{{ parameter_name }}" }}
 REQUIRED PARAMETERS (include ALL of these):
 - {{ "{{ indicator_period }}" }} - Main indicator lookback period
 - {{ "{{ entry_threshold }}" }} - Entry trigger threshold
-{% if structure.exit_indicator %}
-- {{ "{{ exit_threshold }}" }} - Exit indicator threshold
-{% endif %}
-{% if structure.trailing_stop %}
-- {{ "{{ trailing_stop_pct }}" }} - Trail distance from high water mark (e.g., 0.02 = 2%)
-- {{ "{{ trailing_activation_pct }}" }} - Profit threshold to activate trailing (e.g., 0.01 = 1%)
-{% else %}
-- {{ "{{ atr_multiplier }}" }} - ATR multiplier for stop loss (be creative with values!)
-{% endif %}
+- {{ "{{ sl_pct }}" }} - Stop loss percentage (e.g., 0.02 = 2%)
+- {{ "{{ tp_pct }}" }} - Take profit percentage (e.g., 0.03 = 3%)
 {% if structure.time_exit %}
 - {{ "{{ exit_bars }}" }} - Number of bars for time-based exit
 {% endif %}
 
 NOTE: Do NOT include "leverage" as a parameter - it will be assigned automatically by the system.
 
-OPTIONAL ADDITIONAL PARAMETERS (choose 1-3 based on your entry logic category):
+=== CRITICAL: NO LOOKAHEAD BIAS (AUTOMATIC REJECTION) ===
 
-For INDICATOR-BASED:
-- {{ "{{ fast_period }}" }}, {{ "{{ slow_period }}" }} - For crossover strategies
-- {{ "{{ threshold_high }}" }}, {{ "{{ threshold_low }}" }} - For range-based entries
+YOUR CODE WILL BE AUTOMATICALLY REJECTED IF IT CONTAINS:
+- rolling(center=True) <-- NEVER USE THIS, IT LOOKS INTO THE FUTURE
+- shift(-N) where N > 0 <-- NEVER USE NEGATIVE SHIFT
+- Any other access to future data
 
-For PRICE ACTION / STRUCTURE:
-- {{ "{{ lookback }}" }} - Bars to look back for highs/lows/structure
-- {{ "{{ break_threshold }}" }} - Minimum break distance (e.g., 0.001 = 0.1%)
+CORRECT PATTERNS (use these instead):
+- rolling(N) with NO center parameter (defaults to center=False which is correct)
+- rolling(window=N) with NO center parameter
+- shift(N) where N >= 0 (positive or zero only)
 
-For CANDLESTICK / BODY-RANGE:
-- {{ "{{ body_ratio }}" }} - Minimum body/range ratio (e.g., 0.6 = 60%)
-- {{ "{{ wick_ratio }}" }} - Maximum wick ratio for pin bars
+EXAMPLE:
+# WRONG - WILL BE REJECTED:
+df['sma'] = df['close'].rolling(20, center=True).mean()
 
-For VOLUME-BASED:
-- {{ "{{ volume_mult }}" }} - Volume spike multiplier (e.g., 2.0 = 2x average)
-- {{ "{{ volume_period }}" }} - Volume average period
-
-For STATISTICAL:
-- {{ "{{ z_threshold }}" }} - Z-score threshold (e.g., 2.0)
-- {{ "{{ percentile }}" }} - Percentile threshold (e.g., 5, 95)
-
-For MULTI-TIMEFRAME PROXY:
-- {{ "{{ htf_lookback }}" }} - Higher timeframe lookback (e.g., 96 for daily on 15m)
-
-=== NO LOOKAHEAD BIAS ===
-
-FORBIDDEN patterns (will be rejected):
-- rolling(center=True)
-- shift(-N) where N > 0
-- Any access to future data
-
-ALLOWED patterns:
-- rolling(N) without center
-- shift(N) where N >= 0
-- iloc[-1] for current bar
-- iloc[-2] for previous bar
+# CORRECT - WILL BE ACCEPTED:
+df['sma'] = df['close'].rolling(20).mean()
 
 === CODE TEMPLATE ===
 
-IMPORTANT: The strategy uses a TWO-PHASE approach:
-1. calculate_indicators(df) - Pre-calculate ALL indicators ONCE
-2. generate_signal(df) - Read pre-calculated values and generate signal
-
-This enables:
-- O(n) instead of O(n^2) indicator calculation in backtests
-- Freqtrade-style lookahead bias detection
-- Potential Numba optimization
+CRITICAL: The strategy uses a VECTORIZED approach:
+1. calculate_indicators(df) - Pre-calculate ALL indicators AND entry_signal column
+2. Backtester reads entry_signal as numpy array (no per-bar loops)
+3. generate_signal(df) - ONLY for live execution (reads entry_signal[-1])
 
 ```python
 import pandas as pd
 import numpy as np
 import talib as ta
-import pandas_ta as pta  # Optional: for supertrend, squeeze, vwap, ichimoku, etc.
-from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType{% if structure.time_exit %}, ExitType{% endif %}
+from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType, ExitType
 
 
 class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
@@ -235,22 +163,18 @@ class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
     {{ strategy_type }} strategy template for {{ timeframe }} timeframe
     Structure: {{ structure.name }}
 
+    Entry Logic Category: [SPECIFY WHICH CATEGORY FROM THE 8 ABOVE]
+
+    [DESCRIBE YOUR ENTRY LOGIC IN 2-3 SENTENCES]
+
     Parameters:
     - indicator_period: Main indicator lookback
     - entry_threshold: Entry trigger level
-{% if structure.exit_indicator %}
-    - exit_threshold: Exit trigger level
-{% endif %}
-{% if structure.trailing_stop %}
-    - trailing_stop_pct: Trail distance from high water mark
-    - trailing_activation_pct: Profit threshold to activate trailing
-{% else %}
-    - atr_multiplier: Stop loss ATR multiplier
-{% endif %}
+    - sl_pct: Stop loss percentage
+    - tp_pct: Take profit percentage
 {% if structure.time_exit %}
     - exit_bars: Time-based exit after N bars
 {% endif %}
-    - leverage: Assigned automatically by system (not a template parameter)
 
 {% if structure.entry_long and structure.entry_short %}
     Entry Long: [describe long entry condition]
@@ -262,147 +186,106 @@ class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
     Entry Long: NOT GENERATED (structure is SHORT_ONLY)
     Entry Short: [describe short entry condition]
 {% endif %}
-{% if structure.exit_indicator %}
-    Exit: Indicator-based close signal when [describe exit condition]
-{% endif %}
 {% if structure.time_exit %}
     Time Exit: Close after {{ "{{ exit_bars }}" }} bars
 {% endif %}
     """
 
+    # =========================================================================
+    # STRATEGY PARAMETERS (read by backtester for vectorized execution)
+    # =========================================================================
+{% if structure.entry_long %}
+    direction = 'long'
+{% else %}
+    direction = 'short'
+{% endif %}
+    sl_pct = {{ "{{ sl_pct }}" }}
+    tp_pct = {{ "{{ tp_pct }}" }}
     leverage = {{ "__LEVERAGE__" }}  # Will be replaced by system
+{% if structure.time_exit %}
+    exit_after_bars = {{ "{{ exit_bars }}" }}
+{% else %}
+    exit_after_bars = 20
+{% endif %}
+    signal_column = 'entry_signal'
 
     # Indicator columns added by calculate_indicators()
-    # Used for lookahead bias detection
-    indicator_columns = ['atr']  # ADD YOUR INDICATOR NAMES HERE
+    indicator_columns = ['atr', 'entry_signal']  # ADD YOUR INDICATOR NAMES HERE
 
     def __init__(self, params: dict = None):
         super().__init__(params)
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Pre-calculate ALL indicators on the dataframe.
+        Pre-calculate ALL indicators AND entry_signal on the dataframe.
 
-        This method is called ONCE before signal generation. All indicator
-        calculations should happen here, not in generate_signal().
+        CRITICAL: This method MUST populate 'entry_signal' boolean column.
+        The backtester reads this column as a numpy array for vectorized execution.
 
         IMPORTANT:
         - Always return df.copy() to avoid modifying the original
         - Use only lookback operations (no center=True, no shift(-N))
-        - Update indicator_columns with all column names you add
+        - entry_signal must be a boolean Series (True = entry, False = no entry)
         """
         df = df.copy()
 
-        # ATR for stop loss calculation (always needed)
+        # ATR for reference (may be used in entry logic)
         df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
 
         # YOUR INDICATOR CALCULATIONS HERE
         # Example: df['rsi'] = ta.RSI(df['close'], timeperiod={{ "{{ indicator_period }}" }})
 
+        # ============================================
+        # ENTRY SIGNAL (VECTORIZED - CRITICAL!)
+        # Must be a boolean column: True = entry signal, False = no signal
+        # ============================================
+
+{% if structure.entry_long %}
+        # Long entry condition (vectorized)
+        entry_condition = False  # YOUR VECTORIZED LONG ENTRY LOGIC using {{ "{{ entry_threshold }}" }}
+        # Example: entry_condition = df['rsi'] < {{ "{{ entry_threshold }}" }}
+{% else %}
+        # Short entry condition (vectorized)
+        entry_condition = False  # YOUR VECTORIZED SHORT ENTRY LOGIC using {{ "{{ entry_threshold }}" }}
+        # Example: entry_condition = df['rsi'] > {{ "{{ entry_threshold }}" }}
+{% endif %}
+
+        df['entry_signal'] = entry_condition
+
         return df
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
         """
-        Generate signal from DataFrame with pre-calculated indicators.
+        Generate signal for LIVE execution only.
 
-        IMPORTANT: DO NOT calculate indicators here - they are already in df.
-        Only read values using iloc[-1] and apply entry/exit logic.
+        For BACKTEST: The backtester reads entry_signal column directly (vectorized).
+        For LIVE: This method reads entry_signal[-1] and returns a Signal object.
+
+        DO NOT calculate indicators here - they are already in df from calculate_indicators().
         """
         min_bars = 100
         if len(df) < min_bars:
             return None
 
-        # ============================================
-        # READ PRE-CALCULATED INDICATOR VALUES
-        # Use iloc[-1] to get current bar values
-        # ============================================
-
-        current_price = df['close'].iloc[-1]
-        current_atr = df['atr'].iloc[-1]
-
-        if pd.isna(current_atr) or current_atr <= 0:
+        # Read pre-calculated entry signal
+        if not df['entry_signal'].iloc[-1]:
             return None
 
-        # YOUR INDICATOR VALUE READS HERE
-        # Example: current_rsi = df['rsi'].iloc[-1]
-
-        # ============================================
-{% if structure.exit_indicator %}
-        # EXIT CONDITION (indicator-based)
-        # Check exit BEFORE entry to close existing positions first
-        # ============================================
-
-        exit_condition = False  # YOUR EXIT LOGIC using {{ "{{ exit_threshold }}" }}
-
-        if exit_condition:
-            return Signal(
-                direction='close',
-                reason="Exit: [describe why exiting]"
-            )
-
-        # ============================================
-{% endif %}
-        # ENTRY CONDITIONS
-        # ============================================
-
-{% if structure.entry_long %}
-        entry_long = False  # YOUR LONG ENTRY using {{ "{{ entry_threshold }}" }}
-{% endif %}
-{% if structure.entry_short %}
-        entry_short = False  # YOUR SHORT ENTRY using {{ "{{ entry_threshold }}" }}
-{% endif %}
-
-{% if structure.entry_long %}
-        if entry_long:
-            return Signal(
-                direction='long',
-                leverage=self.leverage,
-{% if structure.trailing_stop %}
-                sl_type=StopLossType.TRAILING,
-                trailing_stop_pct={{ "{{ trailing_stop_pct }}" }},
-                trailing_activation_pct={{ "{{ trailing_activation_pct }}" }},
-{% else %}
-                sl_type=StopLossType.ATR,
-                atr_stop_multiplier={{ "{{ atr_multiplier }}" }},
-{% endif %}
+        return Signal(
+            direction=self.direction,
+            leverage=self.leverage,
+            sl_type=StopLossType.PERCENTAGE,
+            sl_pct=self.sl_pct,
 {% if structure.take_profit %}
-                tp_type=TakeProfitType.RR_RATIO,
-                rr_ratio=2.0,
+            tp_type=TakeProfitType.PERCENTAGE,
+            tp_pct=self.tp_pct,
 {% endif %}
 {% if structure.time_exit %}
-                exit_type=ExitType.TIME_BASED,
-                exit_after_bars={{ "{{ exit_bars }}" }},
+            exit_type=ExitType.TIME_BASED,
+            exit_after_bars=self.exit_after_bars,
 {% endif %}
-                reason="Long: [describe entry reason]"
-            )
-
-{% endif %}
-{% if structure.entry_short %}
-        if entry_short:
-            return Signal(
-                direction='short',
-                leverage=self.leverage,
-{% if structure.trailing_stop %}
-                sl_type=StopLossType.TRAILING,
-                trailing_stop_pct={{ "{{ trailing_stop_pct }}" }},
-                trailing_activation_pct={{ "{{ trailing_activation_pct }}" }},
-{% else %}
-                sl_type=StopLossType.ATR,
-                atr_stop_multiplier={{ "{{ atr_multiplier }}" }},
-{% endif %}
-{% if structure.take_profit %}
-                tp_type=TakeProfitType.RR_RATIO,
-                rr_ratio=2.0,
-{% endif %}
-{% if structure.time_exit %}
-                exit_type=ExitType.TIME_BASED,
-                exit_after_bars={{ "{{ exit_bars }}" }},
-{% endif %}
-                reason="Short: [describe entry reason]"
-            )
-
-{% endif %}
-        return None
+            reason="{{ strategy_type }}: [describe entry reason]"
+        )
 ```
 
 === PARAMETERS SCHEMA ===
@@ -414,17 +297,9 @@ Be CREATIVE with the values - don't just copy the examples below!
 {
   "indicator_period": {"type": "int", "values": [YOUR_CHOICES]},
   "entry_threshold": {"type": "int_or_float", "values": [YOUR_CHOICES]},
-{% if structure.exit_indicator %}
-  "exit_threshold": {"type": "int_or_float", "values": [YOUR_CHOICES]},
-{% endif %}
-{% if structure.trailing_stop %}
-  "trailing_stop_pct": {"type": "float", "values": [YOUR_CHOICES]},
-  "trailing_activation_pct": {"type": "float", "values": [YOUR_CHOICES]}{% if structure.time_exit %},
+  "sl_pct": {"type": "float", "values": [0.02, 0.03, 0.04, 0.05]},
+  "tp_pct": {"type": "float", "values": [0.03, 0.04, 0.05, 0.06]}{% if structure.time_exit %},
   "exit_bars": {"type": "int", "values": [YOUR_CHOICES]}{% endif %}
-{% else %}
-  "atr_multiplier": {"type": "float", "values": [YOUR_CHOICES]}{% if structure.time_exit %},
-  "exit_bars": {"type": "int", "values": [YOUR_CHOICES]}{% endif %}
-{% endif %}
 
 }
 ```
@@ -432,17 +307,8 @@ Be CREATIVE with the values - don't just copy the examples below!
 GUIDELINES for parameter values:
 - indicator_period: typically 5-50 for oscillators, 10-200 for MAs
 - entry_threshold: depends on indicator (RSI: 20-40, Z-score: 1.5-3.0, etc.)
-{% if structure.trailing_stop %}
-- trailing_stop_pct: MUST be 0.02-0.05 (2%-5% trail distance)
-  * WARNING: Values below 2% cause overfitting - great backtest but poor live results!
-  * Reason: Live has spread, slippage, latency that backtest doesn't capture
-  * Recommended: 0.025-0.04 (2.5%-4%) for robust performance
-- trailing_activation_pct: MUST be 0.01-0.03 (1%-3% profit before trailing activates)
-  * WARNING: Values below 1% activate too early before trend is confirmed
-  * Recommended: 0.015-0.025 (1.5%-2.5%) for better trend confirmation
-{% else %}
-- atr_multiplier: typically 1.0-5.0 (tighter = more trades, wider = fewer trades)
-{% endif %}
+- sl_pct: 0.02-0.05 (2%-5% stop loss)
+- tp_pct: 0.03-0.08 (3%-8% take profit)
 {% if structure.time_exit %}
 - exit_bars: MUST be appropriate for {{ timeframe }} timeframe:
 {% if timeframe == '15m' %}
@@ -466,46 +332,30 @@ GUIDELINES for parameter values:
 
 Before generating, verify:
 {% if structure.entry_long and not structure.entry_short %}
-[ ] ONLY long entries (NO entry_short, NO direction='short')
+[ ] direction = 'long' (class attribute)
+[ ] ONLY long entries in entry_signal logic
 {% elif structure.entry_short and not structure.entry_long %}
-[ ] ONLY short entries (NO entry_long, NO direction='long')
+[ ] direction = 'short' (class attribute)
+[ ] ONLY short entries in entry_signal logic
 {% else %}
-[ ] Both long AND short entries present
+[ ] Both directions supported
 {% endif %}
-{% if structure.trailing_stop %}
-[ ] Stop loss uses sl_type=StopLossType.TRAILING with trailing_stop_pct and trailing_activation_pct
-{% else %}
-[ ] Stop loss is ALWAYS set (sl_type required)
-{% endif %}
-{% if structure.take_profit %}
-[ ] Take profit IS set (tp_type required)
-{% else %}
-[ ] Take profit is NOT set (no tp_type)
-{% endif %}
-{% if structure.exit_indicator %}
-[ ] Exit indicator generates Signal(direction='close')
-{% else %}
-[ ] NO direction='close' signals
-{% endif %}
-{% if structure.time_exit %}
-[ ] Time exit with exit_after_bars parameter
-{% else %}
-[ ] NO exit_after_bars parameter
-{% endif %}
-[ ] All Jinja2 placeholders use double braces {{ "{{ }}" }}
-[ ] Parameter schema matches placeholders in code (NO leverage!)
-[ ] 50-200 total parameter combinations
+[ ] sl_pct class attribute uses {{ "{{ sl_pct }}" }} placeholder
+[ ] tp_pct class attribute uses {{ "{{ tp_pct }}" }} placeholder
+[ ] signal_column = 'entry_signal' is set
+[ ] calculate_indicators() populates 'entry_signal' column (VECTORIZED!)
+[ ] entry_signal is a boolean Series (True/False)
+[ ] generate_signal() ONLY reads entry_signal[-1] (no calculation!)
 [ ] leverage = {{ "__LEVERAGE__" }} is in class body (will be replaced by system)
-[ ] TWO-PHASE APPROACH: calculate_indicators() pre-calculates ALL indicators
-[ ] generate_signal() ONLY reads pre-calculated values (no ta.XXX calls!)
-[ ] indicator_columns class attribute lists all indicator column names
+[ ] All Jinja2 placeholders use double braces {{ "{{ }}" }}
+[ ] Parameter schema includes sl_pct and tp_pct
+[ ] 50-200 total parameter combinations
 
 Generate the complete parameterized template now.
 
 REQUIREMENTS:
-1. Be STRICT with structure compliance (entry direction, SL, TP, exits)
-2. Be CREATIVE with entry logic - choose from the 8 categories above
-3. In the docstring, specify which ENTRY LOGIC CATEGORY you chose
+1. Be STRICT with structure compliance
+2. Be CREATIVE with entry logic - choose from the categories above
+3. entry_signal MUST be calculated VECTORIZED (no loops, use pandas operations)
 4. Parameters schema must match the placeholders in your code
-5. Aim for 50-200 total parameter combinations
-6. Do NOT include leverage in parameters - use {{ "__LEVERAGE__" }} placeholder
+5. Do NOT include leverage in parameters - use {{ "__LEVERAGE__" }} placeholder

@@ -282,7 +282,7 @@ def generate(ctx, count, timeframe, strategy_type, use_patterns):
 @click.option('--workers', type=int, default=10, help='Parallel workers')
 @click.pass_context
 def backtest(ctx, backtest_all, strategy, symbol, timeframe, lookback_days, workers):
-    """Backtest strategies using VectorBT"""
+    """Backtest strategies"""
     logger = ctx.obj['logger']
     config = ctx.obj['config']
 
@@ -292,13 +292,13 @@ def backtest(ctx, backtest_all, strategy, symbol, timeframe, lookback_days, work
     console.print(f"Lookback: {lookback_days} days\n")
 
     try:
-        from src.backtester.backtest_engine import VectorBTEngine
+        from src.backtester.backtest_engine import BacktestEngine
         from src.backtester.data_loader import BacktestDataLoader
         from src.backtester.validator import LookaheadValidator
         import importlib.util
 
         # Initialize components
-        engine = VectorBTEngine(config)
+        engine = BacktestEngine(config)
         data_loader = BacktestDataLoader()
         validator = LookaheadValidator()
 
@@ -493,7 +493,7 @@ def backtest(ctx, backtest_all, strategy, symbol, timeframe, lookback_days, work
 
     except ImportError as e:
         console.print(f"[red]Import error: {e}[/red]")
-        console.print("[yellow]Make sure VectorBT is installed: pip install vectorbt[/yellow]")
+        console.print("[yellow]Make sure all dependencies are installed[/yellow]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         logger.error(f"Backtest failed: {e}", exc_info=True)

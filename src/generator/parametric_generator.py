@@ -19,36 +19,35 @@ from typing import Optional, Tuple
 from dataclasses import dataclass
 from jinja2 import Environment
 
-from sqlalchemy import func
-from src.database.models import StrategyTemplate, Coin
+from src.database.models import StrategyTemplate
 from src.database import get_session
+from src.data.coin_registry import get_registry
 
 logger = logging.getLogger(__name__)
 
 
 def get_leverage_range_from_db() -> Tuple[int, int]:
     """
-    Get min/max leverage from active coins in database
+    Get min/max leverage from active coins via CoinRegistry.
 
     Returns:
         (min_leverage, max_leverage) tuple
 
     Raises:
-        ValueError: If no active coins in database
+        ValueError: If no active coins in registry
     """
-    with get_session() as session:
-        result = session.query(
-            func.min(Coin.max_leverage).label('min_lev'),
-            func.max(Coin.max_leverage).label('max_lev')
-        ).filter(Coin.is_active == True).first()
+    min_lev, max_lev = get_registry().get_leverage_range()
 
-        if result is None or result.min_lev is None or result.max_lev is None:
+    if min_lev == 1 and max_lev == 10:
+        # Registry returned default fallback, check if actually empty
+        coins = get_registry().get_all_active_coins()
+        if not coins:
             raise ValueError(
                 "No active coins found in database. "
                 "Run pairs_updater.py to populate coins table."
             )
 
-        return (result.min_lev, result.max_lev)
+    return (min_lev, max_lev)
 
 
 @dataclass
@@ -185,6 +184,19 @@ class ParametricGenerator:
         # by making it a proper Jinja2 expression that outputs the f-string literal
         # For now, just fix the triple brace to double brace
         code_template = re.sub(r'\{\{\{\s*(\w+)\s*\}\}\}', r'{{ \1 }}', code_template)
+
+        # Fix lookahead bias: remove center=True from rolling()
+        # AI sometimes generates this despite explicit instructions
+        original = code_template
+        # Handle various formats: .rolling(N, center=True), .rolling(window=N, center=True)
+        code_template = re.sub(r'center\s*=\s*True', '', code_template)
+        # Clean up resulting double commas or trailing commas
+        code_template = re.sub(r',\s*,', ',', code_template)
+        code_template = re.sub(r',\s*\)', ')', code_template)
+        code_template = re.sub(r'\(\s*,', '(', code_template)
+
+        if original != code_template:
+            logger.info("Fixed lookahead bias: removed center=True from code")
 
         return code_template
 
@@ -371,6 +383,9 @@ class ParametricGenerator:
 
         if '.shift(-' in code:
             errors.append("Lookahead bias: negative shift detected")
+
+        if errors:
+            logger.warning(f"Strategy validation failed: {errors}")
 
         return (len(errors) == 0, errors)
 

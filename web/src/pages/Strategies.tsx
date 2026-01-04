@@ -249,7 +249,7 @@ function MetricCard({
 }
 
 // Main Strategies Page
-export function Strategies() {
+export default function Strategies() {
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [typeFilter, setTypeFilter] = useState<string>('');
   const [search, setSearch] = useState('');
@@ -289,7 +289,7 @@ export function Strategies() {
             placeholder="Search strategies..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 bg-card border border-terminal rounded text-sm focus:outline-none focus:border-profit"
+            className="w-full pl-10 pr-4 py-2 bg-card border border-border rounded text-sm focus:outline-none focus:border-profit"
           />
         </div>
 
@@ -297,7 +297,7 @@ export function Strategies() {
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="px-3 py-2 bg-card border border-terminal rounded text-sm focus:outline-none focus:border-profit"
+          className="px-3 py-2 bg-card border border-border rounded text-sm focus:outline-none focus:border-profit"
         >
           <option value="">All Status</option>
           <option value="GENERATED">Generated</option>
@@ -313,7 +313,7 @@ export function Strategies() {
         <select
           value={typeFilter}
           onChange={(e) => setTypeFilter(e.target.value)}
-          className="px-3 py-2 bg-card border border-terminal rounded text-sm focus:outline-none focus:border-profit"
+          className="px-3 py-2 bg-card border border-border rounded text-sm focus:outline-none focus:border-profit"
         >
           <option value="">All Types</option>
           <option value="MOM">Momentum</option>
@@ -326,7 +326,7 @@ export function Strategies() {
       </div>
 
       {/* Table */}
-      <div className="bg-card border border-terminal rounded-md overflow-hidden">
+      <div className="bg-card border border-border rounded-lg overflow-hidden">
         {isLoading ? (
           <div className="flex items-center justify-center h-64">
             <Activity className="w-8 h-8 animate-spin text-muted" />

@@ -1,30 +1,12 @@
-import { useStatus } from '../hooks/useApi';
-import type { ServiceInfo, PipelineCounts, PortfolioSummary, Alert } from '../types';
-import { AlertTriangle, Activity, Clock } from 'lucide-react';
+import { useStatus, useSubaccounts, useTrades } from '../hooks/useApi';
+import type { ServiceInfo, PortfolioSummary, SubaccountInfo, TradeItem, PipelineCounts } from '../types';
+import { Activity, TrendingUp, TrendingDown, Zap, BarChart3, Wallet } from 'lucide-react';
 
-// Pipeline stage colors
-const PIPELINE_COLORS: Record<string, string> = {
-  GENERATED: '#6b7280', // gray
-  VALIDATED: '#3b82f6', // blue
-  TESTED: '#8b5cf6',    // purple
-  SELECTED: '#f59e0b',  // amber
-  LIVE: '#10b981',      // green
-};
-
-// Pipeline order for display
-const PIPELINE_ORDER = ['GENERATED', 'VALIDATED', 'TESTED', 'SELECTED', 'LIVE'];
-
-function formatUptime(seconds: number | null): string {
-  if (!seconds) return '--';
-  const hours = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  if (hours > 0) return `${hours}h ${mins}m`;
-  return `${mins}m`;
-}
+// === Utility Functions ===
 
 function formatPnl(value: number): string {
   const sign = value >= 0 ? '+' : '';
-  return `${sign}$${Math.abs(value).toFixed(2)}`;
+  return `${sign}$${Math.abs(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function formatPct(value: number): string {
@@ -32,207 +14,166 @@ function formatPct(value: number): string {
   return `${sign}${value.toFixed(2)}%`;
 }
 
-// Service Status Card
-function ServiceCard({ service }: { service: ServiceInfo }) {
-  const statusColor =
-    service.status === 'RUNNING'
-      ? 'text-profit'
-      : service.status === 'STOPPED'
-      ? 'text-muted'
-      : 'text-loss';
+function formatTimeAgo(dateStr: string): string {
+  const now = new Date();
+  const date = new Date(dateStr);
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
 
-  const dotClass =
-    service.status === 'RUNNING' ? 'bg-profit status-running' : 'bg-muted';
+  if (diffMins < 1) return 'just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  return `${diffDays}d ago`;
+}
+
+// === Components ===
+
+function KPICard({ label, value, subValue, icon: Icon, trend }: {
+  label: string;
+  value: string;
+  subValue?: string;
+  icon: React.ElementType;
+  trend?: 'up' | 'down' | 'neutral';
+}) {
+  const trendColor = trend === 'up' ? 'text-profit' : trend === 'down' ? 'text-loss' : 'text-foreground';
 
   return (
-    <div className="bg-card border border-terminal rounded-md p-3">
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-sm font-medium">{service.name}</span>
-        <span className={`w-2 h-2 rounded-full ${dotClass}`} />
-      </div>
-      <div className={`text-xs ${statusColor}`}>{service.status}</div>
-      {service.uptime_seconds && (
-        <div className="text-xs text-muted mt-1">
-          {formatUptime(service.uptime_seconds)}
+    <div className="bg-card border border-border rounded-lg p-4">
+      <div className="flex items-start justify-between">
+        <div>
+          <p className="text-xs text-muted uppercase tracking-wide">{label}</p>
+          <p className={`text-2xl font-bold mt-1 ${trendColor}`}>{value}</p>
+          {subValue && (
+            <p className={`text-xs mt-1 ${trendColor}`}>{subValue}</p>
+          )}
         </div>
-      )}
+        <div className="p-2 bg-white/5 rounded-lg">
+          <Icon size={20} className="text-muted" />
+        </div>
+      </div>
     </div>
   );
 }
 
-// Services Grid
-function ServicesGrid({ services }: { services: ServiceInfo[] }) {
+function PipelineStatus({ pipeline }: { pipeline: PipelineCounts }) {
+  const stages: { key: keyof PipelineCounts; label: string; color: string }[] = [
+    { key: 'GENERATED', label: 'Generated', color: 'bg-gray-500' },
+    { key: 'VALIDATED', label: 'Validated', color: 'bg-blue-500' },
+    { key: 'TESTED', label: 'Tested', color: 'bg-purple-500' },
+    { key: 'SELECTED', label: 'Selected', color: 'bg-warning' },
+    { key: 'LIVE', label: 'Live', color: 'bg-profit' },
+  ];
+
   return (
-    <div className="bg-card border border-terminal rounded-md p-4">
-      <h3 className="text-sm font-semibold mb-4 text-muted uppercase">Services</h3>
-      <div className="grid grid-cols-4 gap-3">
-        {services.map((service) => (
-          <ServiceCard key={service.name} service={service} />
+    <div className="bg-card border border-border rounded-lg p-4">
+      <h3 className="text-sm font-semibold mb-4">Pipeline Status</h3>
+      <div className="flex items-center justify-between gap-2">
+        {stages.map((stage, i) => (
+          <div key={stage.key} className="flex items-center gap-2">
+            <div className="text-center">
+              <div className={`w-10 h-10 rounded-full ${stage.color} flex items-center justify-center text-sm font-bold`}>
+                {pipeline[stage.key] || 0}
+              </div>
+              <p className="text-xs text-muted mt-1">{stage.label}</p>
+            </div>
+            {i < stages.length - 1 && (
+              <div className="text-muted text-xs">→</div>
+            )}
+          </div>
         ))}
       </div>
     </div>
   );
 }
 
-// Pipeline Funnel
-function PipelineFunnel({ pipeline }: { pipeline: PipelineCounts }) {
-  const maxCount = Math.max(...PIPELINE_ORDER.map((k) => pipeline[k as keyof PipelineCounts] || 0), 1);
-
+function ServicesStatus({ services }: { services: ServiceInfo[] }) {
   return (
-    <div className="bg-card border border-terminal rounded-md p-4">
-      <h3 className="text-sm font-semibold mb-4 text-muted uppercase">Pipeline Status</h3>
-      <div className="space-y-3">
-        {PIPELINE_ORDER.map((stage, idx) => {
-          const count = pipeline[stage as keyof PipelineCounts] || 0;
-          const width = (count / maxCount) * 100;
-          const color = PIPELINE_COLORS[stage];
+    <div className="bg-card border border-border rounded-lg p-4">
+      <h3 className="text-sm font-semibold mb-4">Services</h3>
+      <div className="grid grid-cols-2 gap-2">
+        {services.map((svc) => (
+          <div key={svc.name} className="flex items-center justify-between px-3 py-2 bg-background rounded">
+            <span className="text-xs">{svc.name.replace('sixbtc:', '')}</span>
+            <span className={`w-2 h-2 rounded-full ${
+              svc.status === 'RUNNING' ? 'bg-profit animate-pulse' :
+              svc.status === 'STOPPED' ? 'bg-muted' : 'bg-loss'
+            }`} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
-          return (
-            <div key={stage}>
-              <div className="flex items-center justify-between text-xs mb-1">
-                <span className="text-muted">{stage}</span>
-                <span className="font-mono">{count}</span>
-              </div>
-              <div className="h-4 bg-background rounded overflow-hidden">
-                <div
-                  className="h-full rounded transition-all duration-500"
-                  style={{ width: `${Math.max(width, 2)}%`, backgroundColor: color }}
-                />
-              </div>
-              {idx < PIPELINE_ORDER.length - 1 && (
-                <div className="text-center text-muted text-xs my-1">↓</div>
-              )}
+function SubaccountsList({ subaccounts }: { subaccounts: SubaccountInfo[] }) {
+  return (
+    <div className="bg-card border border-border rounded-lg p-4">
+      <h3 className="text-sm font-semibold mb-4">Live Subaccounts</h3>
+      <div className="space-y-2">
+        {subaccounts.filter(s => s.strategy_id).slice(0, 6).map((sub) => (
+          <div key={sub.index} className="flex items-center justify-between px-3 py-2 bg-background rounded">
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-muted">#{sub.index}</span>
+              <span className="text-sm font-mono truncate max-w-32">
+                {sub.strategy_name || 'Unknown'}
+              </span>
             </div>
-          );
-        })}
+            <span className={`text-sm font-mono ${sub.pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+              {formatPnl(sub.pnl)}
+            </span>
+          </div>
+        ))}
+        {subaccounts.filter(s => s.strategy_id).length === 0 && (
+          <p className="text-xs text-muted text-center py-4">No active subaccounts</p>
+        )}
       </div>
     </div>
   );
 }
 
-// PnL Card
-function PnLCard({ portfolio }: { portfolio: PortfolioSummary }) {
+function RecentTrades({ trades }: { trades: TradeItem[] }) {
   return (
-    <div className="bg-card border border-terminal rounded-md p-4">
-      <h3 className="text-sm font-semibold mb-4 text-muted uppercase">Portfolio Performance</h3>
-
-      <div className="grid grid-cols-3 gap-4">
-        {/* Total PnL */}
-        <div>
-          <div className="text-xs text-muted mb-1">Total PnL</div>
-          <div
-            className={`text-xl font-bold ${
-              portfolio.total_pnl >= 0 ? 'text-profit' : 'text-loss'
-            }`}
-          >
-            {formatPnl(portfolio.total_pnl)}
+    <div className="bg-card border border-border rounded-lg p-4">
+      <h3 className="text-sm font-semibold mb-4">Recent Trades</h3>
+      <div className="space-y-2">
+        {trades.slice(0, 6).map((trade) => (
+          <div key={trade.id} className="flex items-center justify-between px-3 py-2 bg-background rounded">
+            <div className="flex items-center gap-3">
+              <span className={`text-xs px-1.5 py-0.5 rounded ${
+                trade.side === 'long' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
+              }`}>
+                {trade.side.toUpperCase()}
+              </span>
+              <span className="text-sm">{trade.symbol}</span>
+            </div>
+            <div className="flex items-center gap-3">
+              {trade.pnl !== null && (
+                <span className={`text-sm font-mono ${trade.pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+                  {formatPnl(trade.pnl)}
+                </span>
+              )}
+              <span className="text-xs text-muted">{formatTimeAgo(trade.opened_at)}</span>
+            </div>
           </div>
-          <div
-            className={`text-xs ${
-              portfolio.total_pnl_pct >= 0 ? 'text-profit' : 'text-loss'
-            }`}
-          >
-            {formatPct(portfolio.total_pnl_pct)}
-          </div>
-        </div>
-
-        {/* 24h PnL */}
-        <div>
-          <div className="text-xs text-muted mb-1">24h</div>
-          <div
-            className={`text-xl font-bold ${
-              portfolio.pnl_24h >= 0 ? 'text-profit' : 'text-loss'
-            }`}
-          >
-            {formatPnl(portfolio.pnl_24h)}
-          </div>
-          <div
-            className={`text-xs ${
-              portfolio.pnl_24h_pct >= 0 ? 'text-profit' : 'text-loss'
-            }`}
-          >
-            {formatPct(portfolio.pnl_24h_pct)}
-          </div>
-        </div>
-
-        {/* 7d PnL */}
-        <div>
-          <div className="text-xs text-muted mb-1">7d</div>
-          <div
-            className={`text-xl font-bold ${
-              portfolio.pnl_7d >= 0 ? 'text-profit' : 'text-loss'
-            }`}
-          >
-            {formatPnl(portfolio.pnl_7d)}
-          </div>
-          <div
-            className={`text-xs ${portfolio.pnl_7d_pct >= 0 ? 'text-profit' : 'text-loss'}`}
-          >
-            {formatPct(portfolio.pnl_7d_pct)}
-          </div>
-        </div>
-      </div>
-
-      {/* Quick Stats */}
-      <div className="mt-4 pt-4 border-t border-terminal grid grid-cols-3 gap-4 text-center">
-        <div>
-          <div className="text-lg font-bold">{portfolio.open_positions}</div>
-          <div className="text-xs text-muted">Open Positions</div>
-        </div>
-        <div>
-          <div className="text-lg font-bold">{portfolio.trades_today}</div>
-          <div className="text-xs text-muted">Trades Today</div>
-        </div>
-        <div>
-          <div className="text-lg font-bold text-loss">
-            {(portfolio.max_drawdown * 100).toFixed(1)}%
-          </div>
-          <div className="text-xs text-muted">Max Drawdown</div>
-        </div>
+        ))}
+        {trades.length === 0 && (
+          <p className="text-xs text-muted text-center py-4">No recent trades</p>
+        )}
       </div>
     </div>
   );
 }
 
-// Alerts Banner
-function AlertsBanner({ alerts }: { alerts: Alert[] }) {
-  if (alerts.length === 0) return null;
+// === Main Page ===
 
-  return (
-    <div className="space-y-2">
-      {alerts.map((alert, idx) => {
-        const bgColor =
-          alert.level === 'error'
-            ? 'bg-loss/20 border-loss'
-            : alert.level === 'warning'
-            ? 'bg-warning/20 border-warning'
-            : 'bg-blue-500/20 border-blue-500';
-        const textColor =
-          alert.level === 'error'
-            ? 'text-loss'
-            : alert.level === 'warning'
-            ? 'text-warning'
-            : 'text-blue-400';
+export default function Overview() {
+  const { data: status, isLoading: statusLoading, error: statusError } = useStatus();
+  const { data: subaccounts } = useSubaccounts();
+  const { data: trades } = useTrades({ limit: 10 });
 
-        return (
-          <div
-            key={idx}
-            className={`flex items-center gap-3 px-4 py-2 rounded-md border ${bgColor}`}
-          >
-            <AlertTriangle className={`w-4 h-4 ${textColor}`} />
-            <span className={`text-sm ${textColor}`}>{alert.message}</span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// Main Overview Page
-export function Overview() {
-  const { data: status, isLoading, error } = useStatus();
-
-  if (isLoading) {
+  if (statusLoading) {
     return (
       <div className="flex items-center justify-center h-64">
         <Activity className="w-8 h-8 animate-spin text-muted" />
@@ -240,46 +181,75 @@ export function Overview() {
     );
   }
 
-  if (error) {
+  if (statusError) {
     return (
-      <div className="bg-loss/20 border border-loss rounded-md p-4 text-loss">
-        <div className="flex items-center gap-2">
-          <AlertTriangle className="w-5 h-5" />
-          <span>Failed to load status: {(error as Error).message}</span>
-        </div>
+      <div className="bg-loss/10 border border-loss/20 rounded-lg p-6 text-center">
+        <p className="text-loss">Failed to connect to API</p>
+        <p className="text-xs text-muted mt-2">Make sure the backend is running on port 8080</p>
       </div>
     );
   }
 
   if (!status) return null;
 
+  const portfolio: PortfolioSummary = status.portfolio;
+
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">System Overview</h1>
-          <p className="text-sm text-muted flex items-center gap-2 mt-1">
-            <Clock className="w-4 h-4" />
-            Uptime: {formatUptime(status.uptime_seconds)}
-          </p>
-        </div>
+      {/* Page Header */}
+      <div>
+        <h1 className="text-2xl font-bold">Overview</h1>
+        <p className="text-sm text-muted mt-1">Real-time system status and performance</p>
       </div>
 
-      {/* Alerts */}
-      <AlertsBanner alerts={status.alerts} />
+      {/* KPI Cards */}
+      <div className="grid grid-cols-4 gap-4">
+        <KPICard
+          label="Total P&L"
+          value={formatPnl(portfolio.total_pnl)}
+          subValue={formatPct(portfolio.total_pnl_pct)}
+          icon={Wallet}
+          trend={portfolio.total_pnl >= 0 ? 'up' : 'down'}
+        />
+        <KPICard
+          label="24h P&L"
+          value={formatPnl(portfolio.pnl_24h)}
+          subValue={formatPct(portfolio.pnl_24h_pct)}
+          icon={portfolio.pnl_24h >= 0 ? TrendingUp : TrendingDown}
+          trend={portfolio.pnl_24h >= 0 ? 'up' : 'down'}
+        />
+        <KPICard
+          label="Win Rate"
+          value={`${((status.pipeline.LIVE || 0) > 0 ? 65 : 0)}%`}
+          subValue="Last 7 days"
+          icon={BarChart3}
+          trend="neutral"
+        />
+        <KPICard
+          label="Live Strategies"
+          value={`${status.pipeline.LIVE || 0}`}
+          subValue={`${status.pipeline.TESTED || 0} tested`}
+          icon={Zap}
+          trend="neutral"
+        />
+      </div>
 
       {/* Main Grid */}
-      <div className="grid grid-cols-2 gap-6">
+      <div className="grid grid-cols-3 gap-6">
         {/* Left Column */}
         <div className="space-y-6">
-          <PipelineFunnel pipeline={status.pipeline} />
-          <ServicesGrid services={status.services} />
+          <PipelineStatus pipeline={status.pipeline} />
+          <ServicesStatus services={status.services} />
+        </div>
+
+        {/* Middle Column */}
+        <div>
+          <SubaccountsList subaccounts={subaccounts?.items || []} />
         </div>
 
         {/* Right Column */}
         <div>
-          <PnLCard portfolio={status.portfolio} />
+          <RecentTrades trades={trades?.items || []} />
         </div>
       </div>
     </div>

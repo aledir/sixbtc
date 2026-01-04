@@ -29,7 +29,7 @@ function ServiceControl({ service }: { service: ServiceInfo }) {
   };
 
   return (
-    <div className="bg-card border border-terminal rounded-md p-4">
+    <div className="bg-card border border-border rounded-lg p-4">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-3">
           <span className={`w-3 h-3 rounded-full ${dotClass}`} />
@@ -63,7 +63,7 @@ function ServiceControl({ service }: { service: ServiceInfo }) {
             <button
               onClick={() => handleAction('restart')}
               disabled={isPending}
-              className="flex items-center gap-1 px-3 py-1.5 bg-card border border-terminal hover:bg-white/5 rounded text-sm disabled:opacity-50"
+              className="flex items-center gap-1 px-3 py-1.5 bg-card border border-border hover:bg-white/5 rounded text-sm disabled:opacity-50"
             >
               <RotateCcw className="w-3 h-3" />
               Restart
@@ -98,7 +98,7 @@ function ThresholdsSection() {
   if (!thresholds) return null;
 
   return (
-    <div className="bg-card border border-terminal rounded-md p-4">
+    <div className="bg-card border border-border rounded-lg p-4">
       <h3 className="text-sm font-semibold text-muted uppercase mb-4">
         System Thresholds
       </h3>
@@ -222,7 +222,7 @@ function ConfigViewer() {
   }
 
   return (
-    <div className="bg-card border border-terminal rounded-md p-4">
+    <div className="bg-card border border-border rounded-lg p-4">
       <h3 className="text-sm font-semibold text-muted uppercase mb-4">
         Configuration (Read-Only)
       </h3>
@@ -236,7 +236,7 @@ function ConfigViewer() {
 }
 
 // Main Settings Page
-export function Settings() {
+export default function Settings() {
   const { data: services, isLoading: servicesLoading } = useServices();
   const [activeTab, setActiveTab] = useState<'services' | 'config'>('services');
 
@@ -252,7 +252,7 @@ export function Settings() {
       </div>
 
       {/* Warning */}
-      <div className="flex items-center gap-3 p-4 bg-warning/20 border border-warning rounded-md">
+      <div className="flex items-center gap-3 p-4 bg-warning/20 border border-warning rounded-lg">
         <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0" />
         <p className="text-sm text-warning">
           Service controls affect live trading. Use with caution.
@@ -260,7 +260,7 @@ export function Settings() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-4 border-b border-terminal">
+      <div className="flex gap-4 border-b border-border">
         <button
           onClick={() => setActiveTab('services')}
           className={`px-4 py-2 text-sm border-b-2 transition-colors ${

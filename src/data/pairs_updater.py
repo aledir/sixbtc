@@ -395,6 +395,9 @@ def get_tradable_pairs_for_strategy(
     """
     Get pairs tradable for a strategy with pattern-awareness.
 
+    DEPRECATED: Use CoinRegistry.get_tradable_for_strategy() directly.
+    This function is kept for backward compatibility.
+
     Priority:
     1. pattern_coins (if available) - already edge-filtered, preferred
     2. backtest_pairs (fallback) - audit trail pairs
@@ -408,36 +411,10 @@ def get_tradable_pairs_for_strategy(
     Returns:
         List of tradable symbols (maintains pattern order if pattern_coins used)
     """
-    config = load_config()
-    min_volume = config.get('trading.min_volume_24h', 1_000_000)
+    # Delegate to CoinRegistry
+    from src.data.coin_registry import get_registry
 
-    with get_session() as session:
-        liquid_coins = session.query(Coin.symbol).filter(
-            Coin.is_active == True,
-            Coin.volume_24h >= min_volume
-        ).all()
-
-    active_liquid = {c.symbol for c in liquid_coins}
-
-    # Use pattern coins if available (preferred - edge-sorted)
-    if pattern_coins:
-        candidate_set = set(pattern_coins)
-        source = "pattern_coins"
-        # Maintain order (sorted by edge)
-        ordered_candidates = pattern_coins
-    else:
-        candidate_set = set(strategy_backtest_pairs or [])
-        source = "backtest_pairs"
-        ordered_candidates = strategy_backtest_pairs or []
-
-    tradable_set = candidate_set & active_liquid
-
-    # Maintain order from source
-    tradable = [c for c in ordered_candidates if c in tradable_set]
-
-    logger.info(
-        f"Tradable pairs ({source}): {len(tradable)} "
-        f"(candidates={len(candidate_set)}, active_liquid={len(active_liquid)})"
+    return get_registry().get_tradable_for_strategy(
+        pattern_coins=pattern_coins,
+        backtest_pairs=strategy_backtest_pairs
     )
-
-    return tradable

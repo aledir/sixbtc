@@ -146,9 +146,11 @@ def _simulate_single_param_set(
 
                 equity += pnl
 
-                # Record trade
+                # Record trade as percentage of notional (for expectancy calculation)
                 if n_trades < max_trades:
-                    trade_pnls[n_trades] = pnl
+                    # Store PnL as percentage of trade notional, not absolute USD
+                    trade_pnl_pct = pnl / notional if notional > 0 else 0.0
+                    trade_pnls[n_trades] = trade_pnl_pct
                     trade_wins[n_trades] = pnl > 0
                     n_trades += 1
 
@@ -229,8 +231,10 @@ def _simulate_single_param_set(
 
         equity += pnl
 
+        # Record trade as percentage of notional (for expectancy calculation)
         if n_trades < max_trades:
-            trade_pnls[n_trades] = pnl
+            trade_pnl_pct = pnl / notional if notional > 0 else 0.0
+            trade_pnls[n_trades] = trade_pnl_pct
             trade_wins[n_trades] = pnl > 0
             n_trades += 1
 
@@ -272,11 +276,25 @@ def _calc_metrics(
             wins += 1
     win_rate = wins / n_trades
 
-    # Expectancy
-    total_pnl = 0.0
+    # Expectancy: (Win% × Avg Win%) - (Loss% × Avg Loss%)
+    # trade_pnls now contains PnL as percentage of trade notional
+    avg_win_pct = 0.0
+    avg_loss_pct = 0.0
+    n_wins = 0
+    n_losses = 0
     for i in range(n_trades):
-        total_pnl += trade_pnls[i]
-    expectancy = total_pnl / n_trades
+        if trade_wins[i]:
+            avg_win_pct += trade_pnls[i]
+            n_wins += 1
+        else:
+            avg_loss_pct += abs(trade_pnls[i])
+            n_losses += 1
+
+    avg_win_pct = avg_win_pct / n_wins if n_wins > 0 else 0.0
+    avg_loss_pct = avg_loss_pct / n_losses if n_losses > 0 else 0.0
+
+    # Official expectancy formula
+    expectancy = (win_rate * avg_win_pct) - ((1.0 - win_rate) * avg_loss_pct)
 
     # Max drawdown
     n_bars = len(equity_curve)
@@ -535,3 +553,154 @@ class ParametricBacktester:
         """
         self.parameter_space.update(space)
         logger.info(f"Parameter space updated: {self._count_combinations()} combinations")
+
+    def build_pattern_centered_space(
+        self,
+        base_tp_pct: float,
+        base_sl_pct: float,
+        base_exit_bars: int,
+        base_leverage: int = 1
+    ) -> Dict[str, List]:
+        """
+        Build parameter space centered on pattern's values.
+
+        REASONING FOR EACH PARAMETER:
+
+        TP (Take Profit) - 5 values:
+        - Pattern's magnitude represents expected move
+        - More conservative (0.5x-0.75x): Exit early, more trades complete
+        - Pattern value (1.0x): Validated target
+        - More aggressive (1.25x-1.5x): Let winners run, fewer completions
+        - Range 50%-150%, step 25% (finer differences are noise)
+
+        SL (Stop Loss) - 5 values:
+        - Must allow trade to "breathe" but limit losses
+        - Too tight (0.5x): Hit by market noise
+        - Pattern value (1.0x): Calculated from historical volatility
+        - Wider (1.5x-2.0x): Fewer false stops, larger losses when wrong
+        - Range 50%-200%, step 25-50%
+
+        EXIT BARS (Time Exit) - 5 values:
+        - Pattern's holding_period is statistically optimal
+        - Shorter (0.5x): Exit before momentum exhausts
+        - Longer (1.5x-2.0x): Give trade more time
+        - Zero (0): Disable time exit, rely only on SL/TP
+        - Range 0 + 50%-200%
+
+        LEVERAGE - 3 values:
+        - Independent of pattern, reflects risk appetite
+        - 1x: Conservative
+        - 2x: Moderate
+        - 3x: Aggressive
+        - No 4x+ to avoid excessive risk
+
+        TOTAL: 5 x 5 x 5 x 3 = 375 combinations
+
+        Args:
+            base_tp_pct: Pattern's target magnitude (e.g., 0.06 for 6%)
+            base_sl_pct: Pattern's stop loss (e.g., 0.18 for 18%)
+            base_exit_bars: Pattern's holding period in bars
+            base_leverage: Starting leverage (not used, leverage is fixed 1-3)
+
+        Returns:
+            Parameter space dict suitable for set_parameter_space()
+        """
+        # TP: 50% to 150% of base, 5 values (25% steps)
+        tp_multipliers = [0.5, 0.75, 1.0, 1.25, 1.5]
+        tp_pcts = sorted(set([round(base_tp_pct * m, 4) for m in tp_multipliers]))
+
+        # SL: 50% to 200% of base, 5 values
+        sl_multipliers = [0.5, 0.75, 1.0, 1.5, 2.0]
+        sl_pcts = sorted(set([round(base_sl_pct * m, 4) for m in sl_multipliers]))
+
+        # Exit bars: 0 (disabled) + 50% to 200% of base, 5 values total
+        exit_multipliers = [0.5, 1.0, 1.5, 2.0]
+        exit_bars = sorted(set([max(1, int(base_exit_bars * m)) for m in exit_multipliers]))
+        exit_bars = [0] + exit_bars  # Add 0 = no time exit
+
+        # Leverage: fixed 1, 2, 3 (3 values)
+        leverages = [1, 2, 3]
+
+        space = {
+            'sl_pct': sl_pcts,
+            'tp_pct': tp_pcts,
+            'leverage': leverages,
+            'exit_bars': exit_bars,
+        }
+
+        logger.info(
+            f"Built pattern-centered space: "
+            f"TP={[f'{p:.1%}' for p in tp_pcts]}, "
+            f"SL={[f'{p:.1%}' for p in sl_pcts]}, "
+            f"exit={exit_bars}, lev={leverages} "
+            f"({self._count_combinations()} combinations after set)"
+        )
+
+        return space
+
+    def build_absolute_space(self) -> Dict[str, List]:
+        """
+        Build parameter space with absolute values for AI strategies.
+
+        AI strategies don't have validated base values from patterns.
+        Instead, we use reasonable absolute ranges for crypto trading.
+
+        REASONING FOR EACH PARAMETER:
+
+        TP (Take Profit) - 5 values:
+        - Crypto is volatile, 2-10% are realistic targets
+        - 2%: Conservative, high hit rate
+        - 5%: Moderate swing target
+        - 10%: Aggressive, fewer completions
+        - Values: 2%, 3%, 5%, 7%, 10%
+
+        SL (Stop Loss) - 5 values:
+        - Must limit losses while avoiding noise stops
+        - 1%: Very tight, high stop rate
+        - 3%: Moderate protection
+        - 5%: Wide, fewer false stops
+        - Values: 1%, 1.5%, 2%, 3%, 5%
+
+        EXIT BARS (Time Exit) - 5 values:
+        - Depends on timeframe but we use bar counts
+        - 0: No time exit (SL/TP only)
+        - 10-100: Scalping to swing
+        - Values: 0, 10, 20, 50, 100
+
+        LEVERAGE - 3 values:
+        - Same as pattern: 1x, 2x, 3x
+        - Values: 1, 2, 3
+
+        TOTAL: 5 x 5 x 5 x 3 = 375 combinations
+
+        Returns:
+            Parameter space dict suitable for set_parameter_space()
+        """
+        # Absolute TP values for crypto (5 values)
+        tp_pcts = [0.02, 0.03, 0.05, 0.07, 0.10]
+
+        # Absolute SL values for crypto (5 values)
+        sl_pcts = [0.01, 0.015, 0.02, 0.03, 0.05]
+
+        # Exit bars: 0 (disabled) + reasonable bar counts (5 values total)
+        exit_bars = [0, 10, 20, 50, 100]
+
+        # Leverage: fixed 1, 2, 3 (3 values)
+        leverages = [1, 2, 3]
+
+        space = {
+            'sl_pct': sl_pcts,
+            'tp_pct': tp_pcts,
+            'leverage': leverages,
+            'exit_bars': exit_bars,
+        }
+
+        logger.info(
+            f"Built absolute space for AI strategy: "
+            f"TP={[f'{p:.1%}' for p in tp_pcts]}, "
+            f"SL={[f'{p:.1%}' for p in sl_pcts]}, "
+            f"exit={exit_bars}, lev={leverages} "
+            f"({self._count_combinations()} combinations after set)"
+        )
+
+        return space

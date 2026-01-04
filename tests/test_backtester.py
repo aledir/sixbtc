@@ -3,7 +3,7 @@ Tests for backtester module
 
 Validates:
 - Data loading from Binance
-- VectorBT backtest execution
+- Backtest execution
 - Metrics calculation
 - Lookahead bias detection
 - Walk-forward validation
@@ -151,8 +151,8 @@ class TestBacktestDataLoader:
         assert all(isinstance(df, pd.DataFrame) for df in data.values())
 
 
-class TestVectorBTBacktester:
-    """Test VectorBT backtest execution"""
+class TestBacktestEngine:
+    """Test backtest execution"""
 
     @patch('src.database.connection.get_session')
     @patch('src.config.loader.load_config')

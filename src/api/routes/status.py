@@ -4,7 +4,7 @@ Status API routes
 GET /api/status - System status overview
 """
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Dict, List
 
 from fastapi import APIRouter, HTTPException
@@ -26,9 +26,9 @@ router = APIRouter()
 
 def get_supervisor_status() -> List[ServiceInfo]:
     """
-    Get status of all supervisor-managed services.
+    Get status of sixbtc supervisor-managed services.
 
-    Returns list of ServiceInfo objects.
+    Returns list of ServiceInfo objects (only sixbtc:* services).
     """
     services = []
 
@@ -48,6 +48,13 @@ def get_supervisor_status() -> List[ServiceInfo]:
             if len(parts) >= 2:
                 name = parts[0]
                 status_str = parts[1]
+
+                # Only include sixbtc services
+                if not name.startswith("sixbtc:"):
+                    continue
+
+                # Simplify name (remove sixbtc: prefix)
+                display_name = name.replace("sixbtc:", "")
 
                 # Map supervisor status to our status
                 if status_str == "RUNNING":
@@ -78,7 +85,7 @@ def get_supervisor_status() -> List[ServiceInfo]:
                     uptime = None
 
                 services.append(ServiceInfo(
-                    name=name,
+                    name=display_name,
                     status=status,
                     pid=pid,
                     uptime_seconds=uptime,
@@ -159,7 +166,7 @@ def get_portfolio_summary() -> PortfolioSummary:
     """
     try:
         with get_session() as session:
-            now = datetime.utcnow()
+            now = datetime.now(UTC)
             day_ago = now - timedelta(days=1)
             week_ago = now - timedelta(days=7)
 
@@ -251,7 +258,7 @@ def get_system_alerts() -> List[Alert]:
                 alerts.append(Alert(
                     level="warning",
                     message=f"Pipeline bottleneck: {generated_count} strategies waiting for validation",
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(UTC),
                 ))
 
             # Check for high number of failed strategies
@@ -263,7 +270,7 @@ def get_system_alerts() -> List[Alert]:
                 alerts.append(Alert(
                     level="info",
                     message=f"{failed_count} failed strategies pending cleanup",
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(UTC),
                 ))
 
     except Exception as e:
@@ -271,7 +278,7 @@ def get_system_alerts() -> List[Alert]:
         alerts.append(Alert(
             level="error",
             message=f"Error checking system status: {str(e)}",
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(UTC),
         ))
 
     return alerts

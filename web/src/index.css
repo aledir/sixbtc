@@ -1,20 +1,33 @@
-/* Import JetBrains Mono font - must be first */
+/* Import JetBrains Mono font */
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Tailwind v4 - use @import instead of @tailwind */
+@import "tailwindcss";
+
+/* Custom theme - Tailwind v4 CSS-based config */
+@theme {
+  /* Colors */
+  --color-background: #0a0a0a;
+  --color-foreground: #fafafa;
+  --color-card: #111111;
+  --color-border: #1f1f1f;
+  --color-muted: #888888;
+  --color-profit: #10b981;
+  --color-loss: #ef4444;
+  --color-warning: #f59e0b;
+
+  /* Fonts */
+  --font-mono: 'JetBrains Mono', Consolas, Monaco, monospace;
+}
 
 /* Base styles */
 :root {
-  font-family: 'JetBrains Mono', Consolas, Monaco, monospace;
+  font-family: var(--font-mono);
   line-height: 1.5;
   font-weight: 400;
-
   color-scheme: dark;
-  color: #fafafa;
-  background-color: #0a0a0a;
-
+  color: var(--color-foreground);
+  background-color: var(--color-background);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -23,7 +36,6 @@
 
 body {
   margin: 0;
-  min-width: 1280px;
   min-height: 100vh;
 }
 
@@ -39,7 +51,7 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: #111111;
+  background: var(--color-card);
 }
 
 ::-webkit-scrollbar-thumb {
@@ -51,24 +63,7 @@ body {
   background: #444444;
 }
 
-/* Utility classes */
-.text-profit {
-  color: #10b981;
-}
-
-.text-loss {
-  color: #ef4444;
-}
-
-.bg-card {
-  background-color: #111111;
-}
-
-.border-terminal {
-  border-color: #1f1f1f;
-}
-
-/* Status dot animations */
+/* Status dot animation */
 @keyframes pulse-green {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }

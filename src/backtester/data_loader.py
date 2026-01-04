@@ -304,14 +304,14 @@ class BacktestDataLoader:
 
         return (last_ts - first_ts).days
 
-    def prepare_vectorbt_format(
+    def prepare_backtest_format(
         self,
         data: Dict[str, pd.DataFrame]
     ) -> pd.DataFrame:
         """
-        Convert multi-symbol data to VectorBT format
+        Convert multi-symbol data to backtest format
 
-        VectorBT expects:
+        Expected format:
         - Index: timestamps (common across all symbols)
         - Columns: MultiIndex (symbol, ohlcv_field)
 
@@ -319,7 +319,7 @@ class BacktestDataLoader:
             data: Dict mapping symbol -> DataFrame
 
         Returns:
-            Multi-index DataFrame ready for VectorBT
+            Multi-index DataFrame ready for backtesting
         """
         if not data:
             raise ValueError("No data provided")
@@ -358,7 +358,7 @@ class BacktestDataLoader:
             names=['symbol', 'ohlcv']
         )
 
-        logger.debug(f"Prepared VectorBT data: {len(result)} rows x {len(result.columns)} columns")
+        logger.debug(f"Prepared backtest data: {len(result)} rows x {len(result.columns)} columns")
 
         return result
 

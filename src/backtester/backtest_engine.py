@@ -19,8 +19,7 @@ from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitTy
 from src.utils.logger import get_logger
 from src.config.loader import load_config
 from src.executor.risk_manager import RiskManager
-from src.database.connection import get_session
-from src.database.models import Coin
+from src.data.coin_registry import get_registry, CoinNotFoundError
 
 logger = get_logger(__name__)
 
@@ -401,28 +400,29 @@ class BacktestEngine:
 
     def _get_coin_max_leverage(self, symbol: str) -> int:
         """
-        Get max leverage for a coin from database (with caching).
+        Get max leverage for a coin from CoinRegistry (with local caching).
 
         Args:
             symbol: Coin symbol (e.g., 'BTC', 'ETH')
 
         Returns:
-            Max leverage from DB, defaults to 10 if not found
+            Max leverage from registry
+
+        Raises:
+            ValueError: If coin not found in registry
         """
         if symbol in self._coin_max_leverage_cache:
             return self._coin_max_leverage_cache[symbol]
 
-        with get_session() as session:
-            coin = session.query(Coin).filter(Coin.symbol == symbol).first()
-            if coin:
-                self._coin_max_leverage_cache[symbol] = coin.max_leverage
-                return coin.max_leverage
-
-        # No fallback - coin must be in DB for valid backtest
-        raise ValueError(
-            f"Coin {symbol} not found in DB - cannot determine max_leverage. "
-            "Run pairs_updater to sync coins from Hyperliquid."
-        )
+        try:
+            max_leverage = get_registry().get_max_leverage(symbol)
+            self._coin_max_leverage_cache[symbol] = max_leverage
+            return max_leverage
+        except CoinNotFoundError:
+            raise ValueError(
+                f"Coin {symbol} not found in CoinRegistry - cannot determine max_leverage. "
+                "Run pairs_updater to sync coins from Hyperliquid."
+            )
 
     def backtest(
         self,
@@ -1170,13 +1170,26 @@ class BacktestEngine:
         avg_pnl = np.mean(pnls)
         total_return = total_pnl / initial_capital
 
-        # Expectancy
-        avg_win = np.mean([p for p in pnls if p > 0]) if winning_trades > 0 else 0
-        avg_loss = abs(np.mean([p for p in pnls if p < 0])) if (total_trades - winning_trades) > 0 else 0
-        # Sanitize avg_win/avg_loss to avoid NaN propagation
-        avg_win = float(np.nan_to_num(avg_win, nan=0.0))
-        avg_loss = float(np.nan_to_num(avg_loss, nan=0.0))
-        expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+        # Expectancy: (Win% × Avg Win%) - (Loss% × Avg Loss%)
+        # Calculate PnL as percentage of trade notional for each trade
+        win_pcts = []
+        loss_pcts = []
+        for t in trades:
+            notional = t.get('notional', 0)
+            if notional > 0:
+                pnl_pct = t['pnl'] / notional
+                if t['pnl'] > 0:
+                    win_pcts.append(pnl_pct)
+                else:
+                    loss_pcts.append(abs(pnl_pct))
+
+        avg_win_pct = np.mean(win_pcts) if win_pcts else 0.0
+        avg_loss_pct = np.mean(loss_pcts) if loss_pcts else 0.0
+        # Sanitize to avoid NaN
+        avg_win_pct = float(np.nan_to_num(avg_win_pct, nan=0.0))
+        avg_loss_pct = float(np.nan_to_num(avg_loss_pct, nan=0.0))
+        # Official expectancy formula
+        expectancy = (win_rate * avg_win_pct) - ((1 - win_rate) * avg_loss_pct)
 
         # Drawdown - protect against division by zero and negative equity
         equity_arr = np.array(equity_curve)
@@ -1324,10 +1337,10 @@ class BacktestEngine:
 
     def _extract_metrics(self, portfolio, n_signals: int) -> Dict:
         """
-        Extract comprehensive metrics from VectorBT portfolio
+        Extract comprehensive metrics from portfolio
 
         Args:
-            portfolio: VectorBT Portfolio object
+            portfolio: Portfolio object
             n_signals: Number of entry signals generated
 
         Returns:
@@ -1513,49 +1526,3 @@ class BacktestEngine:
     backtest_portfolio = backtest
 
 
-# Backward compatibility aliases
-VectorBTBacktester = BacktestEngine
-
-
-class VectorBTEngine:
-    """
-    Deprecated: Use BacktestEngine directly instead.
-    Kept for backward compatibility.
-    """
-
-    def __init__(self, config: Optional[Dict] = None):
-        self.backtester = BacktestEngine(config)
-
-    def backtest(
-        self,
-        strategy: StrategyCore,
-        data: Dict[str, pd.DataFrame],
-        max_positions: Optional[int] = None
-    ) -> Dict:
-        """
-        Run portfolio backtest with realistic position limits and leverage
-
-        Args:
-            strategy: StrategyCore instance
-            data: Dict mapping symbol -> OHLCV DataFrame
-            max_positions: Max concurrent positions (default from config)
-
-        Returns:
-            Portfolio-level metrics with position-limited simulation
-        """
-        return self.backtester.backtest(strategy, data, max_positions)
-
-    # Alias for backward compatibility
-    backtest_portfolio = backtest
-
-    def calculate_metrics(self, portfolio) -> Dict:
-        """
-        Calculate metrics from VectorBT portfolio
-
-        Args:
-            portfolio: VectorBT portfolio object
-
-        Returns:
-            Metrics dictionary
-        """
-        return self.backtester._extract_metrics(portfolio, 0)

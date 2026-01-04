@@ -4,7 +4,7 @@ Trades API routes
 GET /api/trades - List trades with filters
 GET /api/trades/summary - Aggregated trade statistics
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Optional
 from uuid import UUID
 
@@ -55,7 +55,7 @@ async def list_trades(
                 query = query.filter(Trade.subaccount_id == subaccount_id)
 
             if days:
-                cutoff = datetime.utcnow() - timedelta(days=days)
+                cutoff = datetime.now(UTC) - timedelta(days=days)
                 query = query.filter(Trade.entry_time >= cutoff)
 
             # Get total count
@@ -119,7 +119,7 @@ async def get_trades_summary(
             query = session.query(Trade).filter(Trade.exit_time.isnot(None))  # Only closed trades
 
             if days:
-                cutoff = datetime.utcnow() - timedelta(days=days)
+                cutoff = datetime.now(UTC) - timedelta(days=days)
                 query = query.filter(Trade.exit_time >= cutoff)
 
             if strategy_id:

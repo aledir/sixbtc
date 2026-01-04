@@ -172,7 +172,9 @@ class StrategyBuilder:
             coin_config = self.config.get('pattern_discovery', {}).get('coin_selection', {})
             min_edge = coin_config.get('min_edge', 0.10)
             min_signals = coin_config.get('min_signals', 50)
-            max_coins = coin_config.get('max_coins', 30)
+            min_coins = coin_config.get('min_tradable_coins', 5)
+            # max_coins from backtesting config (shared with AI strategies)
+            max_coins = self.config.get('backtesting', {}).get('max_coins', 30)
 
             pattern_coins = pattern.get_high_edge_coins(
                 min_edge=min_edge,
@@ -180,6 +182,13 @@ class StrategyBuilder:
                 max_coins=max_coins
             )
             if pattern_coins:
+                # Early validation: reject patterns with insufficient tradable coins
+                if len(pattern_coins) < min_coins:
+                    logger.info(
+                        f"Skipping pattern {pattern.name}: only {len(pattern_coins)} tradable coins "
+                        f"(need {min_coins})"
+                    )
+                    return None
                 logger.info(
                     f"Pattern {pattern.name}: {len(pattern_coins)} coins with edge >= {min_edge:.0%} "
                     f"(top: {pattern_coins[:5]})"
@@ -377,19 +386,21 @@ class StrategyBuilder:
         strategy_type: StrategyType,
         timeframe: str,
         use_patterns: bool = True,
-        patterns: Optional[list] = None
+        patterns: Optional[list] = None,
+        max_variations: Optional[int] = None
     ) -> list[GeneratedStrategy]:
         """
-        Generate ALL strategy variations from a template
+        Generate strategy variations from a template
 
         Unlike generate_strategy() which returns a single strategy,
-        this method returns ALL parametric variations.
+        this method returns parametric variations up to max_variations.
 
         Args:
             strategy_type: Type of strategy (MOM, REV, TRN, etc.)
             timeframe: Target timeframe ('5m', '15m', '1h', etc.)
             use_patterns: Whether to use pattern-discovery patterns
             patterns: Pre-selected patterns (if provided, uses first one)
+            max_variations: Maximum number of variations to generate (backpressure)
 
         Returns:
             List of GeneratedStrategy objects
@@ -406,12 +417,15 @@ class StrategyBuilder:
                 result = self.generate_from_pattern(fetched_patterns[0])
                 return [result] if result else []
 
-        # Template-based generation: return ALL variations
+        # Template-based generation: return variations up to limit
         logger.info(f"No patterns available, using template-based generation")
         if self.template_generator:
             template = self.template_generator.generate_template(strategy_type, timeframe)
             if template:
-                variations = self.parametric_generator.generate_variations(template)
+                variations = self.parametric_generator.generate_variations(
+                    template,
+                    max_variations=max_variations
+                )
                 return [
                     self._convert_parametric_strategy(v, template)
                     for v in variations

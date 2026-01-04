@@ -249,8 +249,24 @@ class TemplateGenerator:
 
         # Validate template
         validation_errors = self._validate_template(code_template, parameters_schema, structure)
+
+        # Critical errors that make the template unusable
+        critical_keywords = [
+            "entry_long but not found",
+            "entry_short but not found",
+            "Missing Strategy class",
+            "Missing generate_signal",
+            "Missing StrategyCore",
+            "No Signal object"
+        ]
+        critical_errors = [e for e in validation_errors if any(k in e for k in critical_keywords)]
+
+        if critical_errors:
+            logger.error(f"Template generation failed - critical errors: {critical_errors}")
+            return None
+
         if validation_errors:
-            logger.warning(f"Template validation warnings: {validation_errors}")
+            logger.info(f"Template validation notes: {validation_errors}")
 
         template_name = f"TPL_{strategy_type}_{template_id}"
 
@@ -320,6 +336,12 @@ class TemplateGenerator:
 
             if '{{' not in code:
                 logger.warning("Code does not contain Jinja2 placeholders")
+
+            # Debug: check for direction attribute
+            if "direction = 'long'" in code or "direction = 'short'" in code:
+                logger.debug("Code contains direction attribute")
+            else:
+                logger.warning(f"Code missing direction attribute. First 500 chars: {code[:500]}")
 
             return code
 
@@ -450,14 +472,25 @@ class TemplateGenerator:
         if 'Signal(' not in code_template:
             warnings.append("No Signal object returned")
 
-        # Validate structure compliance
-        if structure.entry_long and "direction='long'" not in code_template:
+        # Validate structure compliance (flexible matching for quotes and spaces)
+        has_long = bool(re.search(r"direction\s*=\s*['\"]long['\"]", code_template))
+        has_short = bool(re.search(r"direction\s*=\s*['\"]short['\"]", code_template))
+        has_close = bool(re.search(r"direction\s*=\s*['\"]close['\"]", code_template))
+
+        # Debug: log direction-related content
+        direction_matches = re.findall(r"direction.*?=.*?(?:\n|,)", code_template)
+        if direction_matches:
+            logger.info(f"Direction matches in code: {direction_matches[:3]}")
+        else:
+            logger.warning(f"No 'direction' found in code. Code length: {len(code_template)}")
+
+        if structure.entry_long and not has_long:
             warnings.append("Structure requires entry_long but not found in code")
 
-        if structure.entry_short and "direction='short'" not in code_template:
+        if structure.entry_short and not has_short:
             warnings.append("Structure requires entry_short but not found in code")
 
-        if structure.exit_indicator and "direction='close'" not in code_template:
+        if structure.exit_indicator and not has_close:
             warnings.append("Structure requires exit_indicator but no close signal found")
 
         if structure.time_exit and 'exit_after_bars' not in code_template:

@@ -5,7 +5,7 @@ Calculates performance metrics from live Trade records.
 Used for dual-ranking system (backtest vs live).
 """
 
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Dict, List, Optional
 from uuid import UUID
 import numpy as np
@@ -258,7 +258,7 @@ class LiveScorer:
             strategy.max_drawdown_live = metrics['max_drawdown']
             strategy.total_trades_live = metrics['total_trades']
             strategy.total_pnl_live = metrics['total_pnl']
-            strategy.last_live_update = datetime.utcnow()
+            strategy.last_live_update = datetime.now(UTC)
 
             # Calculate degradation vs backtest
             if strategy.score_backtest and strategy.score_backtest > 0:

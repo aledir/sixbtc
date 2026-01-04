@@ -245,7 +245,7 @@ class BacktestResult(Base):
     per_symbol_results = Column(JSON)  # {symbol: {trades, win_rate, etc.}}
 
     # Raw metrics (JSON - for detailed analysis)
-    raw_metrics = Column(JSON)  # Full VectorBT portfolio stats
+    raw_metrics = Column(JSON)  # Full portfolio stats
 
     # Multi-pair/TF optimization fields
     symbols_tested = Column(JSON)  # List of symbols: ["BTC", "ETH", ...]

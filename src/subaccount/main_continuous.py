@@ -12,7 +12,7 @@ import asyncio
 import os
 import signal
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Dict, List, Optional
 
 from src.config import load_config
@@ -182,7 +182,7 @@ class SubaccountManagerProcess:
             db_strategy = session.query(Strategy).filter(Strategy.id == strategy['id']).first()
             if db_strategy:
                 db_strategy.status = "RETIRED"
-                db_strategy.retired_at = datetime.utcnow()
+                db_strategy.retired_at = datetime.now(UTC)
 
             # Free up subaccount
             subaccount = (
@@ -290,7 +290,7 @@ class SubaccountManagerProcess:
             db_strategy = session.query(Strategy).filter(Strategy.id == strategy['id']).first()
             if db_strategy:
                 db_strategy.status = "LIVE"
-                db_strategy.live_since = datetime.utcnow()
+                db_strategy.live_since = datetime.now(UTC)
 
         logger.info(f"Deployed {strategy['name']} to subaccount {slot['id']}")
 

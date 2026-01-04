@@ -769,21 +769,16 @@ class BinanceDataDownloader:
         Returns:
             Dict mapping {symbol: {timeframe: DataFrame}}
         """
-        from src.database import get_session, Coin
+        from src.data.coin_registry import get_active_pairs
 
-        # Get active coins from database
-        with get_session() as session:
-            active_coins = session.query(Coin.symbol).filter(
-                Coin.is_active == True
-            ).all()
-
-        symbols = [c.symbol for c in active_coins]
+        # Get active coins from CoinRegistry
+        symbols = get_active_pairs()
 
         if not symbols:
-            logger.warning("No active coins in database - run pairs_updater first")
+            logger.warning("No active coins in CoinRegistry - run pairs_updater first")
             return {}
 
-        logger.info(f"Downloading data for {len(symbols)} active coins from DB")
+        logger.info(f"Downloading data for {len(symbols)} active coins from CoinRegistry")
 
         # Download all timeframes for active symbols
         return self.download_all_timeframes(
@@ -1523,20 +1518,16 @@ Examples:
     if args.symbols:
         symbol_list = args.symbols
     else:
-        # Get from database
+        # Get from CoinRegistry
         try:
-            from src.database import get_session, Coin
-            with get_session() as session:
-                active = session.query(Coin.symbol).filter(
-                    Coin.is_active == True
-                ).all()
-            symbol_list = [c.symbol for c in active]
+            from src.data.coin_registry import get_active_pairs
+            symbol_list = get_active_pairs()
 
             if not symbol_list:
-                console.print("[yellow]No active coins in database. Using common symbols...[/yellow]")
+                console.print("[yellow]No active coins in CoinRegistry. Using common symbols...[/yellow]")
                 symbol_list = downloader.get_common_symbols()[:50]
         except Exception as e:
-            console.print(f"[yellow]Could not read from DB ({e}), using common symbols...[/yellow]")
+            console.print(f"[yellow]Could not read from CoinRegistry ({e}), using common symbols...[/yellow]")
             symbol_list = downloader.get_common_symbols()[:50]
 
     if not symbol_list:

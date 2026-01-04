@@ -9,7 +9,7 @@ import asyncio
 import os
 import signal
 import threading
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Dict, Optional, List
 import importlib.util
 import tempfile
@@ -17,11 +17,11 @@ import sys
 from pathlib import Path
 
 from src.config import load_config
-from src.database import get_session, Strategy, Subaccount, Trade, Coin
+from src.database import get_session, Strategy, Subaccount, Trade
 from src.executor.hyperliquid_client import HyperliquidClient
 from src.executor.risk_manager import RiskManager
 from src.executor.trailing_service import TrailingService
-from src.data.pairs_updater import get_tradable_pairs_for_strategy
+from src.data.coin_registry import get_registry, get_active_pairs, CoinNotFoundError
 from src.strategies.base import StrategyCore, Signal, StopLossType, ExitType
 from src.utils import get_logger, setup_logging
 
@@ -89,19 +89,15 @@ class ContinuousExecutorProcess:
         )
 
     def _load_trading_pairs(self) -> List[str]:
-        """Load active trading pairs from database"""
-        with get_session() as session:
-            coins = session.query(Coin.symbol).filter(
-                Coin.is_active == True
-            ).order_by(Coin.volume_24h.desc()).all()
+        """Load active trading pairs from CoinRegistry"""
+        pairs = get_active_pairs()
 
-            if not coins:
-                logger.warning("No active coins in database, using BTC only")
-                return ['BTC']
+        if not pairs:
+            logger.warning("No active coins in CoinRegistry, using BTC only")
+            return ['BTC']
 
-            pairs = [c.symbol for c in coins]
-            logger.info(f"Loaded {len(pairs)} trading pairs from database")
-            return pairs
+        logger.info(f"Loaded {len(pairs)} trading pairs from CoinRegistry")
+        return pairs
 
     async def run_continuous(self):
         """Main continuous execution loop"""
@@ -196,11 +192,12 @@ class ContinuousExecutorProcess:
                 return
 
             # Get tradable pairs for this strategy (pattern-aware)
+            # CoinRegistry handles validation and filtering
             backtest_pairs = subaccount.get('backtest_pairs', [])
             pattern_coins = subaccount.get('pattern_coins')
-            trading_pairs = get_tradable_pairs_for_strategy(
-                backtest_pairs,
-                pattern_coins=pattern_coins
+            trading_pairs = get_registry().get_tradable_for_strategy(
+                pattern_coins=pattern_coins,
+                backtest_pairs=backtest_pairs
             )
 
             if not trading_pairs:
@@ -368,24 +365,24 @@ class ContinuousExecutorProcess:
 
     def _get_coin_max_leverage(self, symbol: str) -> int:
         """
-        Get max leverage for a coin from database.
+        Get max leverage for a coin from CoinRegistry.
 
         Args:
             symbol: Coin symbol (e.g., 'BTC', 'ETH')
 
         Returns:
-            Max leverage from DB, defaults to 10 if not found
-        """
-        with get_session() as session:
-            coin = session.query(Coin).filter(Coin.symbol == symbol).first()
-            if coin:
-                return coin.max_leverage
+            Max leverage from registry
 
-        # No fallback in live trading - coin must be in DB
-        raise ValueError(
-            f"Coin {symbol} not found in DB - cannot determine max_leverage. "
-            "Run pairs_updater to sync coins from Hyperliquid."
-        )
+        Raises:
+            CoinNotFoundError: If coin not found or inactive
+        """
+        try:
+            return get_registry().get_max_leverage(symbol)
+        except CoinNotFoundError:
+            raise ValueError(
+                f"Coin {symbol} not found in CoinRegistry - cannot determine max_leverage. "
+                "Run pairs_updater to sync coins from Hyperliquid."
+            )
 
     def _get_strategy(
         self,
@@ -453,7 +450,7 @@ class ContinuousExecutorProcess:
             # Check cache (valid for 60 seconds)
             if cache_key in self._data_cache:
                 cached_data, cached_time = self._data_cache[cache_key]
-                if (datetime.utcnow() - cached_time).seconds < 60:
+                if (datetime.now(UTC) - cached_time).seconds < 60:
                     return cached_data
 
             # Load fresh data
@@ -462,7 +459,7 @@ class ContinuousExecutorProcess:
             data = loader.load_single_symbol(symbol, timeframe, days=7)
 
             # Update cache
-            self._data_cache[cache_key] = (data, datetime.utcnow())
+            self._data_cache[cache_key] = (data, datetime.now(UTC))
 
             return data
 
@@ -565,7 +562,7 @@ class ContinuousExecutorProcess:
                     exit_after_bars = getattr(signal, 'exit_after_bars', 20)
                     key = f"{symbol}:{subaccount['id']}"
                     self._time_exit_tracking[key] = {
-                        'entry_time': datetime.utcnow(),
+                        'entry_time': datetime.now(UTC),
                         'exit_after_bars': exit_after_bars,
                         'timeframe': subaccount.get('timeframe', '15m'),
                     }
@@ -615,7 +612,7 @@ class ContinuousExecutorProcess:
                 symbol=symbol,
                 subaccount_id=subaccount['id'],
                 direction='LONG' if signal.direction == 'long' else 'SHORT',
-                entry_time=datetime.utcnow(),
+                entry_time=datetime.now(UTC),
                 entry_price=entry_price,
                 entry_size=size,
                 stop_loss=stop_loss,
@@ -682,7 +679,7 @@ class ContinuousExecutorProcess:
             ).first()
 
             if trade:
-                trade.exit_time = datetime.utcnow()
+                trade.exit_time = datetime.now(UTC)
                 trade.exit_price = exit_price
                 trade.exit_reason = exit_reason
 
@@ -732,7 +729,7 @@ class ContinuousExecutorProcess:
         if not self._time_exit_tracking:
             return
 
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
 
         for key, tracking_info in list(self._time_exit_tracking.items()):
             try:

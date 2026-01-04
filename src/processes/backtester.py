@@ -2,7 +2,7 @@
 """
 Backtester Process Entry Point
 
-Backtests validated strategies using VectorBT.
+Backtests validated strategies.
 Supervisor-managed continuous process.
 """
 

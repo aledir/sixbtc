@@ -13,7 +13,7 @@ import os
 import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor, Future
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import importlib.util
@@ -25,7 +25,7 @@ from src.database import get_session, Strategy, BacktestResult, StrategyProcesso
 from src.backtester.backtest_engine import BacktestEngine
 from src.backtester.data_loader import BacktestDataLoader
 from src.backtester.parametric_backtest import ParametricBacktester
-from src.data.pairs_updater import get_current_pairs, get_coins_last_updated
+from src.data.coin_registry import get_registry, get_active_pairs
 from src.utils import get_logger, setup_logging
 
 # Initialize logging at module load
@@ -42,7 +42,7 @@ class ContinuousBacktesterProcess:
     """
     Continuous backtesting process.
 
-    Claims VALIDATED strategies and runs multi-pair VectorBT backtests.
+    Claims VALIDATED strategies and runs multi-pair backtests.
     Tests all timeframes and selects optimal TF.
     Strategies that pass thresholds are promoted to TESTED.
     """
@@ -122,7 +122,7 @@ class ContinuousBacktesterProcess:
         self.timeframes = self.config.get_required('timeframes')
 
         # Pairs count (from backtesting section)
-        self.pairs_count = self.config.get_required('backtesting.backtest_pairs_count')
+        self.max_coins = self.config.get_required('backtesting.max_coins')
 
         # Training/Holdout configuration
         self.training_days = self.config.get_required('backtesting.training_days')
@@ -140,64 +140,34 @@ class ContinuousBacktesterProcess:
         # Preloaded data cache: {(symbols_hash, timeframe): data}
         self._data_cache: Dict[str, Dict[str, any]] = {}
 
-        # Pairs cache (shared across threads, invalidated when DB updates)
-        self._pairs_cache: Optional[List[str]] = None
-        self._pairs_cache_updated_at: Optional[datetime] = None
-        self._pairs_cache_lock = threading.Lock()
+        # CoinRegistry handles caching and invalidation
+        # No need for local pairs cache anymore
 
         logger.info(
             f"ContinuousBacktesterProcess initialized: "
-            f"{self.parallel_threads} threads, {len(self.timeframes)} TFs, {self.pairs_count} pairs, "
+            f"{self.parallel_threads} threads, {len(self.timeframes)} TFs, {self.max_coins} coins, "
             f"downstream limit {self.tested_limit} TESTED"
         )
 
-    def _get_cached_pairs(self) -> List[str]:
-        """
-        Get pairs from cache, refreshing if DB was updated.
-
-        Cache invalidation is based on coins.updated_at timestamp.
-        When data_scheduler updates the coins table, the cache is
-        automatically invalidated on next access.
-
-        Thread-safe via lock.
-
-        Returns:
-            List of active symbol names ordered by volume
-        """
-        with self._pairs_cache_lock:
-            # Check if cache needs refresh
-            db_updated_at = get_coins_last_updated()
-
-            if (
-                self._pairs_cache is None
-                or self._pairs_cache_updated_at is None
-                or (db_updated_at and db_updated_at > self._pairs_cache_updated_at)
-            ):
-                # Cache miss or stale - refresh from DB
-                self._pairs_cache = get_current_pairs()
-                self._pairs_cache_updated_at = db_updated_at or datetime.now()
-                logger.info(
-                    f"Pairs cache refreshed: {len(self._pairs_cache)} pairs "
-                    f"(db_updated_at={db_updated_at})"
-                )
-
-            return self._pairs_cache
-
     def _get_backtest_pairs(self) -> List[str]:
         """
-        Load top N pairs from cache.
+        Load top N pairs from CoinRegistry.
+
+        CoinRegistry handles:
+        - Caching with automatic invalidation
+        - Volume filtering (min $1M by default)
+        - Sorting by volume descending
 
         Returns:
             List of symbol names (e.g., ['BTC', 'ETH', ...])
         """
-        pairs = self._get_cached_pairs()
+        pairs = get_active_pairs(limit=self.max_coins)
 
         if not pairs:
-            logger.warning("No pairs in database, using default pairs")
+            logger.warning("No pairs in CoinRegistry, using default pairs")
             return ['BTC', 'ETH', 'SOL', 'ARB', 'AVAX']
 
-        # Take top N pairs
-        return pairs[:self.pairs_count]
+        return pairs
 
     def _validate_pattern_coins(
         self,
@@ -229,8 +199,8 @@ class ContinuousBacktesterProcess:
             'coin_selection', {}
         ).get('min_tradable_coins', 10)
 
-        # Level 1: Liquidity filter (active trading pairs from cache)
-        active_coins = set(self._get_cached_pairs())
+        # Level 1: Liquidity filter (active trading pairs from CoinRegistry)
+        active_coins = set(get_active_pairs())
         liquid_coins = [c for c in pattern_coins if c in active_coins]
 
         if len(liquid_coins) < min_coins:
@@ -506,8 +476,10 @@ class ContinuousBacktesterProcess:
                 try:
                     if self.parametric_enabled:
                         # Parametric: test multiple SL/TP/leverage combinations
+                        # Pass is_pattern_based to select appropriate parameter space
+                        is_pattern_based = pattern_coins is not None and len(pattern_coins) > 0
                         parametric_results = self._run_parametric_backtest(
-                            strategy_instance, training_data, tf
+                            strategy_instance, training_data, tf, is_pattern_based
                         )
                         if not parametric_results:
                             logger.warning(f"No parametric results for {tf}")
@@ -692,7 +664,8 @@ class ContinuousBacktesterProcess:
         self,
         strategy_instance,
         data: Dict[str, any],
-        timeframe: str
+        timeframe: str,
+        is_pattern_based: bool = False
     ) -> List[Dict]:
         """
         Run parametric backtest testing multiple SL/TP/leverage/exit combinations.
@@ -700,10 +673,25 @@ class ContinuousBacktesterProcess:
         Extracts entry signals from the strategy once, then tests N parameter
         combinations using the Numba-optimized ParametricBacktester.
 
+        TWO APPROACHES based on strategy origin:
+
+        1. PATTERN STRATEGIES (is_pattern_based=True):
+           - Have validated base values from pattern-discovery (magnitude, SL, holding)
+           - Use build_pattern_centered_space() to explore variations AROUND base
+           - Rationale: Pattern's edge is proven, optimize management params
+
+        2. AI STRATEGIES (is_pattern_based=False):
+           - No validated base values, AI invented the params
+           - Use build_absolute_space() with fixed reasonable ranges
+           - Rationale: Must search wider space to find what works
+
+        Both approaches: 5x5x5x3 = 375 combinations
+
         Args:
             strategy_instance: StrategyCore instance
             data: Dict mapping symbol -> DataFrame
             timeframe: Timeframe being tested
+            is_pattern_based: True for pattern strategies, False for AI strategies
 
         Returns:
             List of top K results with different parameters
@@ -714,6 +702,26 @@ class ContinuousBacktesterProcess:
             # Fallback to single backtest with strategy's original params
             result = self._run_multi_symbol_backtest(strategy_instance, data, timeframe)
             return [result] if result.get('total_trades', 0) > 0 else []
+
+        # Build parameter space based on strategy origin
+        if is_pattern_based:
+            # PATTERN STRATEGY: center on validated pattern values
+            base_tp_pct = getattr(strategy_instance, 'tp_pct', 0.05)
+            base_sl_pct = getattr(strategy_instance, 'sl_pct', 0.15)
+            base_exit_bars = getattr(strategy_instance, 'exit_after_bars', 20)
+            base_leverage = getattr(strategy_instance, 'leverage', 1)
+
+            space = self.parametric_backtester.build_pattern_centered_space(
+                base_tp_pct=base_tp_pct,
+                base_sl_pct=base_sl_pct,
+                base_exit_bars=base_exit_bars,
+                base_leverage=base_leverage
+            )
+        else:
+            # AI STRATEGY: use absolute ranges for crypto
+            space = self.parametric_backtester.build_absolute_space()
+
+        self.parametric_backtester.set_parameter_space(space)
 
         # Filter out empty/insufficient data
         valid_data = {
@@ -805,20 +813,21 @@ class ContinuousBacktesterProcess:
         top_results = self.parametric_backtester.get_top_k(results_df, self.parametric_top_k)
 
         # Convert to list of dicts matching expected format
+        # Use float() to convert np.float64 to native Python float (required for DB)
         results = []
         for _, row in top_results.iterrows():
             result = {
-                'sharpe_ratio': row['sharpe'],
-                'max_drawdown': row['max_drawdown'],
-                'win_rate': row['win_rate'],
-                'expectancy': row['expectancy'],
+                'sharpe_ratio': float(row['sharpe']),
+                'max_drawdown': float(row['max_drawdown']),
+                'win_rate': float(row['win_rate']),
+                'expectancy': float(row['expectancy']),
                 'total_trades': int(row['total_trades']),
-                'total_return': row['total_return'],
-                'parametric_score': row['score'],
+                'total_return': float(row['total_return']),
+                'parametric_score': float(row['score']),
                 # Store the parameters used
                 'params': {
-                    'sl_pct': row['sl_pct'],
-                    'tp_pct': row['tp_pct'],
+                    'sl_pct': float(row['sl_pct']),
+                    'tp_pct': float(row['tp_pct']),
                     'leverage': int(row['leverage']),
                     'exit_bars': int(row['exit_bars']),
                 },
@@ -865,14 +874,31 @@ class ContinuousBacktesterProcess:
                 'holdout_bonus': 0.0,
             }
 
-        # Require minimum trades in holdout period
+        # Check holdout trades - penalize low activity instead of rejecting
+        # This allows strategies to pass when market conditions don't match pattern
+        # (e.g., flat market for momentum patterns), but with lower final score
         holdout_trades = holdout_result.get('total_trades', 0) if holdout_result else 0
-        if holdout_trades < self.min_holdout_trades:
+        if holdout_trades == 0:
+            # No holdout trades = pattern not active in recent period
+            # Pass with heavy penalty - training edge is still valid
+            logger.debug(
+                f"No holdout trades - pattern dormant in current market. "
+                f"Passing with -30% penalty."
+            )
             return {
-                'passed': False,
-                'reason': f'Insufficient holdout trades: {holdout_trades} < {self.min_holdout_trades}',
+                'passed': True,
+                'reason': 'No holdout trades - pattern dormant',
                 'degradation': 0.5,
-                'holdout_bonus': -0.20,
+                'holdout_bonus': -0.30,  # Heavy penalty for dormant patterns
+            }
+
+        if holdout_trades < self.min_holdout_trades:
+            # Some trades but below threshold - moderate penalty
+            return {
+                'passed': True,
+                'reason': f'Low holdout trades: {holdout_trades} < {self.min_holdout_trades}',
+                'degradation': 0.3,
+                'holdout_bonus': -0.15,
             }
 
         holdout_sharpe = holdout_result.get('sharpe_ratio', 0)
@@ -1090,6 +1116,24 @@ class ContinuousBacktesterProcess:
 
         return best_tf
 
+    def _to_python_type(self, value):
+        """
+        Convert numpy types to Python native types for database storage.
+
+        PostgreSQL doesn't understand numpy types (np.float64, np.int64, etc.)
+        and throws 'schema "np" does not exist' error.
+        """
+        import numpy as np
+        if value is None:
+            return None
+        if isinstance(value, (np.integer, np.floating)):
+            return float(value) if isinstance(value, np.floating) else int(value)
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.bool_):
+            return bool(value)
+        return value
+
     def _save_backtest_result(
         self,
         strategy_id,
@@ -1125,6 +1169,7 @@ class ContinuousBacktesterProcess:
                 if period_days is None:
                     period_days = self.training_days if period_type == 'training' else self.holdout_days
 
+                # Convert numpy types to Python native (PostgreSQL doesn't understand np.float64)
                 bt_result = BacktestResult(
                     strategy_id=strategy_id,
                     lookback_days=period_days,
@@ -1132,14 +1177,14 @@ class ContinuousBacktesterProcess:
                     start_date=start_date,
                     end_date=end_date,
 
-                    # Aggregate metrics
-                    total_trades=result.get('total_trades', 0),
-                    win_rate=result.get('win_rate'),
-                    sharpe_ratio=result.get('sharpe_ratio'),
-                    expectancy=result.get('expectancy'),
-                    max_drawdown=result.get('max_drawdown'),
-                    final_equity=result.get('final_equity'),
-                    total_return_pct=result.get('total_return'),
+                    # Aggregate metrics (converted from numpy)
+                    total_trades=self._to_python_type(result.get('total_trades', 0)),
+                    win_rate=self._to_python_type(result.get('win_rate')),
+                    sharpe_ratio=self._to_python_type(result.get('sharpe_ratio')),
+                    expectancy=self._to_python_type(result.get('expectancy')),
+                    max_drawdown=self._to_python_type(result.get('max_drawdown')),
+                    final_equity=self._to_python_type(result.get('final_equity')),
+                    total_return_pct=self._to_python_type(result.get('total_return')),
 
                     # Multi-pair/TF fields
                     symbols_tested=pairs,
@@ -1192,8 +1237,8 @@ class ContinuousBacktesterProcess:
                 if strategy:
                     strategy.optimal_timeframe = optimal_tf
                     strategy.backtest_pairs = pairs
-                    strategy.backtest_date = datetime.utcnow()
-                    strategy.tested_at = datetime.utcnow()
+                    strategy.backtest_date = datetime.now(UTC)
+                    strategy.tested_at = datetime.now(UTC)
 
                     # Update strategy code with optimal params from parametric backtest
                     if optimal_params:
