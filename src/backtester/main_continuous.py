@@ -437,6 +437,7 @@ class ContinuousBacktesterProcess:
             tf_validated_coins = {}  # Track which coins were used per TF
             tf_optimal_params = {}  # Track optimal params per TF (from parametric)
             tf_all_parametric_results = {}  # Track ALL valid parametric results per TF
+            tf_holdout_data = {}  # Track holdout data per TF (for additional parametric validation)
 
             for tf in self.timeframes:
                 # Validate pattern coins for this timeframe (3-level validation)
@@ -540,8 +541,11 @@ class ContinuousBacktesterProcess:
                 # Store optimal params if parametric was used
                 if optimal_params:
                     tf_optimal_params[tf] = optimal_params
-                    # Also store ALL parametric results for this TF (for creating clones later)
+                    # Also store ALL parametric results for this TF (for holdout validation)
                     tf_all_parametric_results[tf] = parametric_results
+
+                # Store holdout data for this TF (needed for additional parametric validation)
+                tf_holdout_data[tf] = holdout_data
 
                 # Save training backtest result
                 training_backtest_id = self._save_backtest_result(
@@ -598,38 +602,104 @@ class ContinuousBacktesterProcess:
                 strategy_id, optimal_tf, optimal_tf_coins, optimal_params_for_tf
             )
 
-            # Create clones for additional parametric results (if any)
+            # Process additional parametric strategies (if any)
+            # Each parametric combination becomes an independent strategy
             additional_results = tf_all_parametric_results.get(optimal_tf, [])[1:]  # Skip first
             if additional_results:
                 logger.info(
-                    f"Creating {len(additional_results)} strategy clones for "
-                    f"additional parametric combinations that passed threshold"
+                    f"Validating {len(additional_results)} additional parametric strategies "
+                    f"with holdout testing (anti-overfitting)"
                 )
 
-                for i, param_result in enumerate(additional_results, start=2):
-                    # Create clone with these params
-                    clone_id = self._create_strategy_clone(
-                        strategy_id,
-                        param_result['params'],
-                        variant_num=i
-                    )
+                # Get holdout data for optimal TF
+                holdout_data_for_tf = tf_holdout_data.get(optimal_tf)
+                if not holdout_data_for_tf:
+                    logger.warning(f"No holdout data for {optimal_tf}, skipping additional parametric validation")
+                else:
+                    for i, param_result in enumerate(additional_results, start=2):
+                        # Run holdout validation for this parameter combination
+                        try:
+                            # Load strategy instance and apply these params
+                            strategy_instance_for_holdout = self._load_strategy_instance(code, class_name)
+                            if not strategy_instance_for_holdout:
+                                continue
 
-                    if clone_id:
-                        # Save training backtest result for clone
-                        # Note: No holdout validation for clones (computational efficiency)
-                        # Classifier will see training metrics only
-                        clone_backtest_id = self._save_backtest_result(
-                            clone_id,
-                            param_result,  # Training metrics with these params
-                            optimal_tf_coins,
-                            optimal_tf,
-                            period_type='training'
-                        )
+                            # Apply parameters to instance
+                            params = param_result['params']
+                            strategy_instance_for_holdout.sl_pct = params.get('sl_pct', 0.02)
+                            strategy_instance_for_holdout.tp_pct = params.get('tp_pct', 0.03)
+                            strategy_instance_for_holdout.leverage = params.get('leverage', 1)
+                            strategy_instance_for_holdout.exit_after_bars = params.get('exit_bars', 0)
 
-                        # Update clone with optimal TF and pairs
-                        self._update_strategy_optimal_tf(
-                            clone_id, optimal_tf, optimal_tf_coins, None
-                        )
+                            # Run holdout backtest with these params
+                            holdout_result_for_params = self._run_multi_symbol_backtest(
+                                strategy_instance_for_holdout, holdout_data_for_tf, optimal_tf
+                            )
+
+                            # Validate holdout performance
+                            validation_for_params = self._validate_holdout(
+                                param_result, holdout_result_for_params
+                            )
+
+                            if not validation_for_params['passed']:
+                                logger.info(
+                                    f"Parametric strategy variant {i} REJECTED on holdout: "
+                                    f"{validation_for_params['reason']}"
+                                )
+                                continue  # Skip this combination (overfitted)
+
+                            # Calculate final metrics (training + holdout)
+                            final_result_for_params = self._calculate_final_metrics(
+                                param_result, holdout_result_for_params, validation_for_params
+                            )
+
+                            # Create independent strategy for this parameter combination
+                            variant_id = self._create_strategy_clone(
+                                strategy_id,
+                                params,
+                                variant_num=i
+                            )
+
+                            if variant_id:
+                                # Save training backtest
+                                training_bt_id = self._save_backtest_result(
+                                    variant_id,
+                                    param_result,
+                                    optimal_tf_coins,
+                                    optimal_tf,
+                                    period_type='training'
+                                )
+
+                                # Save holdout backtest
+                                if holdout_result_for_params:
+                                    holdout_bt_id = self._save_backtest_result(
+                                        variant_id,
+                                        holdout_result_for_params,
+                                        optimal_tf_coins,
+                                        optimal_tf,
+                                        period_type='holdout'
+                                    )
+
+                                    # Link training to holdout
+                                    self._update_training_with_holdout(
+                                        training_bt_id,
+                                        holdout_bt_id,
+                                        final_result_for_params
+                                    )
+
+                                # Update strategy with optimal TF and pairs
+                                self._update_strategy_optimal_tf(
+                                    variant_id, optimal_tf, optimal_tf_coins, None
+                                )
+
+                                logger.info(
+                                    f"Parametric strategy {i} PASSED holdout validation: "
+                                    f"Final score {final_result_for_params.get('final_score', 0):.2f}"
+                                )
+
+                        except Exception as e:
+                            logger.error(f"Failed to validate parametric variant {i}: {e}")
+                            continue
 
             # Mark optimal backtest
             if optimal_tf in tf_backtest_ids:
