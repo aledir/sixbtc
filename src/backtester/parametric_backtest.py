@@ -277,9 +277,14 @@ def _calc_metrics(
     trade_pnls: np.ndarray,
     trade_wins: np.ndarray,
     initial_capital: float,
+    bars_per_year: float = 35040.0,  # Default: 15m crypto (96 bars/day * 365)
 ) -> Tuple[float, float, float, float, int, float]:
     """
     Calculate performance metrics from simulation results.
+
+    Args:
+        bars_per_year: Number of bars per year for Sharpe annualization.
+            15m = 35040, 30m = 17520, 1h = 8760, 4h = 2190, 1d = 365
 
     Returns:
         sharpe, max_drawdown, win_rate, expectancy, total_trades, total_return
@@ -360,7 +365,7 @@ def _calc_metrics(
         std_ret = var_ret ** 0.5
 
         if std_ret > 1e-10:
-            sharpe = mean_ret / std_ret * (252 ** 0.5)  # Annualize
+            sharpe = mean_ret / std_ret * (bars_per_year ** 0.5)  # Annualize
         else:
             sharpe = 0.0
 
@@ -422,10 +427,25 @@ class ParametricBacktester:
             'stability': class_config.get('stability', 0.10),
         }
 
+        # Default bars_per_year for 15m (crypto 24/7)
+        self.bars_per_year = 35040.0
+
         logger.info(
             f"ParametricBacktester initialized: "
             f"{self._count_strategies()} candidate strategies"
         )
+
+    def set_timeframe(self, timeframe: str) -> None:
+        """Set bars_per_year based on timeframe for correct Sharpe annualization."""
+        tf_to_bars = {
+            '5m': 105120,   # 12 bars/hour * 24 * 365
+            '15m': 35040,   # 4 bars/hour * 24 * 365
+            '30m': 17520,   # 2 bars/hour * 24 * 365
+            '1h': 8760,     # 1 bar/hour * 24 * 365
+            '4h': 2190,     # 0.25 bars/hour * 24 * 365
+            '1d': 365,      # 1 bar/day * 365
+        }
+        self.bars_per_year = float(tf_to_bars.get(timeframe, 35040))
 
     def _count_strategies(self) -> int:
         """Count total candidate strategies (parameter combinations)"""
@@ -515,7 +535,7 @@ class ParametricBacktester:
 
             # Calculate metrics
             sharpe, max_dd, win_rate, expectancy, n_trades, total_return = _calc_metrics(
-                equity_curve, trade_pnls, trade_wins, self.initial_capital
+                equity_curve, trade_pnls, trade_wins, self.initial_capital, self.bars_per_year
             )
 
             result = ParametricResult(

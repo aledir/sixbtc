@@ -1144,6 +1144,9 @@ class ContinuousBacktesterProcess:
             f"{total_signals} signals, {self.parametric_backtester._count_strategies()} candidate strategies"
         )
 
+        # Set timeframe for correct Sharpe annualization
+        self.parametric_backtester.set_timeframe(timeframe)
+
         # Run parametric backtest
         try:
             results_df = self.parametric_backtester.backtest_pattern(
