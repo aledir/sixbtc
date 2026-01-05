@@ -139,7 +139,7 @@ generation:
 # Pool of strategies ready for deployment, managed via leaderboard
 # New strategies enter if: score >= min_score_entry AND (pool not full OR score > min(pool))
 active_pool:
-  max_size: 300                  # Max strategies in pool (leaderboard)
+  max_size: 1000                 # Max strategies in pool (leaderboard)
   min_score_entry: 15            # Minimum score to enter pool
 
 # ==============================================================================
