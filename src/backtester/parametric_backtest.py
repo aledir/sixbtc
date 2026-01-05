@@ -28,6 +28,8 @@ import numpy as np
 import pandas as pd
 from numba import jit, prange
 
+from src.backtester.parametric_constants import PARAM_SPACE, LEVERAGE_VALUES
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,7 +62,8 @@ def _simulate_single_param_set(
     directions: np.ndarray, # (n_bars, n_symbols) int8
     sl_pct: float,
     tp_pct: float,
-    leverage: int,
+    leverage: int,          # Target leverage from strategy
+    max_leverages: np.ndarray,  # (n_symbols,) per-coin max leverage from CoinRegistry
     exit_bars: int,
     initial_capital: float,
     fee_rate: float,
@@ -198,19 +201,26 @@ def _simulate_single_param_set(
                 else:
                     continue  # Skip if no SL defined
 
-                # Step 2: Calculate margin needed
-                margin_needed = notional / leverage
+                # Step 2: Calculate actual leverage (capped by per-coin max)
+                actual_lev = leverage
+                if max_leverages[j] < leverage:
+                    actual_lev = max_leverages[j]
+                if actual_lev < 1:
+                    actual_lev = 1
 
-                # Step 3: Check margin available (simulate exchange rejection)
+                # Step 3: Calculate margin needed
+                margin_needed = notional / actual_lev
+
+                # Step 4: Check margin available (simulate exchange rejection)
                 margin_available = equity - margin_used
                 if margin_needed > margin_available:
                     continue  # Skip - insufficient margin
 
-                # Step 4: Check minimum notional (Hyperliquid requirement)
+                # Step 5: Check minimum notional (Hyperliquid requirement)
                 if notional < min_notional:
                     continue  # Skip - trade too small
 
-                # Step 5: Calculate position size
+                # Step 6: Calculate position size
                 size = notional / slipped_entry
 
                 # Calculate SL/TP prices
@@ -384,11 +394,22 @@ class ParametricBacktester:
     sharing OHLC data for memory efficiency.
     """
 
+    # Default parameter space (15m reference, will be scaled by timeframe)
     DEFAULT_PARAMETER_SPACE = {
         'sl_pct': [0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05],
-        'tp_pct': [0.02, 0.03, 0.05, 0.07, 0.10, 0.15],
-        'leverage': [1, 2, 3, 5, 10],
-        'exit_bars': [0, 10, 20, 50, 100],  # 0 = no time exit
+        'tp_pct': [0, 0.02, 0.03, 0.05, 0.07, 0.10],  # 0 = no TP (rely on time exit)
+        'leverage': [1, 2, 3, 5, 10, 20],  # Full range, capped by per-coin max at execution
+        'exit_bars': [0, 10, 20, 50, 100],  # 0 = no time exit (for 15m reference)
+    }
+
+    # Timeframe to minutes mapping
+    TF_TO_MINUTES = {
+        '5m': 5,
+        '15m': 15,
+        '30m': 30,
+        '1h': 60,
+        '4h': 240,
+        '1d': 1440,
     }
 
     def __init__(self, config: dict):
@@ -447,6 +468,32 @@ class ParametricBacktester:
         }
         self.bars_per_year = float(tf_to_bars.get(timeframe, 35040))
 
+    def _parse_timeframe_minutes(self, timeframe: str) -> int:
+        """
+        Parse timeframe string to minutes per bar.
+
+        Args:
+            timeframe: Timeframe string like '15m', '1h', '4h', '1d'
+
+        Returns:
+            Minutes per bar (e.g., 15 for '15m', 240 for '4h')
+        """
+        if timeframe in self.TF_TO_MINUTES:
+            return self.TF_TO_MINUTES[timeframe]
+
+        # Fallback: parse string format
+        tf_lower = timeframe.lower()
+        if tf_lower.endswith('m'):
+            return int(tf_lower[:-1])
+        elif tf_lower.endswith('h'):
+            return int(tf_lower[:-1]) * 60
+        elif tf_lower.endswith('d'):
+            return int(tf_lower[:-1]) * 1440
+
+        # Default to 15m if unknown
+        logger.warning(f"Unknown timeframe '{timeframe}', defaulting to 15m")
+        return 15
+
     def _count_strategies(self) -> int:
         """Count total candidate strategies (parameter combinations)"""
         count = 1
@@ -455,13 +502,24 @@ class ParametricBacktester:
         return count
 
     def _generate_parameter_sets(self) -> List[Tuple[float, float, int, int]]:
-        """Generate all parameter sets (each will create a strategy)"""
-        return list(itertools.product(
+        """
+        Generate all parameter sets (each will create a strategy).
+
+        Filters out invalid combinations:
+        - tp_pct=0 AND exit_bars=0: No exit condition except SL (invalid)
+        """
+        all_combos = itertools.product(
             self.parameter_space['sl_pct'],
             self.parameter_space['tp_pct'],
             self.parameter_space['leverage'],
             self.parameter_space['exit_bars'],
-        ))
+        )
+        # Filter: if tp=0, must have exit_bars > 0 (otherwise no exit except SL)
+        return [
+            (sl, tp, lev, exit_b)
+            for sl, tp, lev, exit_b in all_combos
+            if not (tp == 0 and exit_b == 0)
+        ]
 
     def _calculate_score(self, result: ParametricResult) -> float:
         """Calculate composite score matching classifier logic"""
@@ -492,7 +550,7 @@ class ParametricBacktester:
         pattern_signals: np.ndarray,
         ohlc_data: Dict[str, np.ndarray],
         directions: np.ndarray,
-        max_leverage: int = 10,
+        max_leverages: np.ndarray,
     ) -> pd.DataFrame:
         """
         Run parametric backtest for a pattern.
@@ -501,7 +559,7 @@ class ParametricBacktester:
             pattern_signals: (n_bars, n_symbols) boolean array of entry signals
             ohlc_data: Dict with 'close', 'high', 'low' arrays (n_bars, n_symbols)
             directions: (n_bars, n_symbols) int8 array: 1=long, -1=short
-            max_leverage: Maximum leverage allowed
+            max_leverages: (n_symbols,) int32 array - per-coin max leverage from CoinRegistry
 
         Returns:
             DataFrame with metrics for each parameter combination, sorted by score
@@ -511,24 +569,23 @@ class ParametricBacktester:
         low = ohlc_data['low'].astype(np.float64)
         entries = pattern_signals.astype(np.bool_)
         dirs = directions.astype(np.int8)
+        max_levs = max_leverages.astype(np.int32)
 
         n_bars, n_symbols = close.shape
         logger.info(
             f"Running parametric backtest: {n_bars} bars, {n_symbols} symbols, "
-            f"{self._count_strategies()} candidate strategies"
+            f"{self._count_strategies()} candidate strategies, "
+            f"max_leverage range: {max_levs.min()}-{max_levs.max()}x"
         )
 
         param_sets = self._generate_parameter_sets()
         results = []
 
         for sl_pct, tp_pct, leverage, exit_bars in param_sets:
-            # Cap leverage
-            actual_lev = min(leverage, max_leverage)
-
-            # Run simulation
+            # Run simulation (leverage capping done per-coin inside kernel)
             equity_curve, trade_pnls, trade_wins = _simulate_single_param_set(
                 close, high, low, entries, dirs,
-                sl_pct, tp_pct, actual_lev, exit_bars,
+                sl_pct, tp_pct, leverage, max_levs, exit_bars,
                 self.initial_capital, self.fee_rate, self.slippage,
                 self.max_positions, self.risk_pct, self.min_notional,
             )
@@ -541,7 +598,7 @@ class ParametricBacktester:
             result = ParametricResult(
                 sl_pct=sl_pct,
                 tp_pct=tp_pct,
-                leverage=actual_lev,
+                leverage=leverage,  # Target leverage (capped per-coin at runtime)
                 exit_bars=exit_bars,
                 sharpe=sharpe,
                 max_drawdown=max_dd,
@@ -611,12 +668,13 @@ class ParametricBacktester:
 
         REASONING FOR EACH PARAMETER:
 
-        TP (Take Profit) - 5 values:
+        TP (Take Profit) - 6 values:
+        - 0: No TP, rely on time exit only (requires exit_bars > 0)
         - Pattern's magnitude represents expected move
         - More conservative (0.5x-0.75x): Exit early, more trades complete
         - Pattern value (1.0x): Validated target
         - More aggressive (1.25x-1.5x): Let winners run, fewer completions
-        - Range 50%-150%, step 25% (finer differences are noise)
+        - Range: 0 + 50%-150%, step 25%
 
         SL (Stop Loss) - 5 values:
         - Must allow trade to "breathe" but limit losses
@@ -639,7 +697,7 @@ class ParametricBacktester:
         - 3x: Aggressive
         - No 4x+ to avoid excessive risk
 
-        TOTAL: 5 x 5 x 5 x 3 = 375 combinations
+        TOTAL: 6 x 5 x 5 x 3 = 450 combinations, minus invalid (tp=0, exit=0) = ~435
 
         Args:
             base_tp_pct: Pattern's target magnitude (e.g., 0.06 for 6%)
@@ -650,9 +708,10 @@ class ParametricBacktester:
         Returns:
             Parameter space dict suitable for set_parameter_space()
         """
-        # TP: 50% to 150% of base, 5 values (25% steps)
+        # TP: 0 (disabled) + 50% to 150% of base, 6 values
+        # 0 = no TP, rely on time exit only (requires exit_bars > 0)
         tp_multipliers = [0.5, 0.75, 1.0, 1.25, 1.5]
-        tp_pcts = sorted(set([round(base_tp_pct * m, 4) for m in tp_multipliers]))
+        tp_pcts = [0] + sorted(set([round(base_tp_pct * m, 4) for m in tp_multipliers]))
 
         # SL: 50% to 200% of base, 5 values
         sl_multipliers = [0.5, 0.75, 1.0, 1.5, 2.0]
@@ -663,8 +722,8 @@ class ParametricBacktester:
         exit_bars = sorted(set([max(1, int(base_exit_bars * m)) for m in exit_multipliers]))
         exit_bars = [0] + exit_bars  # Add 0 = no time exit
 
-        # Leverage: fixed 1, 2, 3 (3 values)
-        leverages = [1, 2, 3]
+        # Leverage: use LEVERAGE_VALUES from constants (capped per-coin at runtime)
+        leverages = LEVERAGE_VALUES.copy()
 
         space = {
             'sl_pct': sl_pcts,
@@ -672,80 +731,73 @@ class ParametricBacktester:
             'leverage': leverages,
             'exit_bars': exit_bars,
         }
+
+        # Calculate valid combinations (exclude tp=0 AND exit=0)
+        total = len(sl_pcts) * len(tp_pcts) * len(leverages) * len(exit_bars)
+        invalid = len(sl_pcts) * 1 * len(leverages) * 1  # tp=0, exit=0
+        valid = total - invalid
 
         logger.info(
             f"Built pattern-centered space: "
             f"TP={[f'{p:.1%}' for p in tp_pcts]}, "
             f"SL={[f'{p:.1%}' for p in sl_pcts]}, "
             f"exit={exit_bars}, lev={leverages} "
-            f"({self._count_strategies()} candidate strategies after set)"
+            f"({valid} valid combinations)"
         )
 
         return space
 
-    def build_absolute_space(self) -> Dict[str, List]:
+    def build_absolute_space(self, timeframe: str = '15m') -> Dict[str, List]:
         """
-        Build parameter space with absolute values for AI strategies.
+        Build parameter space for AI strategies using predefined constants.
 
-        AI strategies don't have validated base values from patterns.
-        Instead, we use reasonable absolute ranges for crypto trading.
+        Each timeframe has its own empirically validated parameter ranges
+        defined in parametric_constants.py.
 
-        REASONING FOR EACH PARAMETER:
+        Leverage values are tested against per-coin max from CoinRegistry at runtime.
 
-        TP (Take Profit) - 5 values:
-        - Crypto is volatile, 2-10% are realistic targets
-        - 2%: Conservative, high hit rate
-        - 5%: Moderate swing target
-        - 10%: Aggressive, fewer completions
-        - Values: 2%, 3%, 5%, 7%, 10%
-
-        SL (Stop Loss) - 5 values:
-        - Must limit losses while avoiding noise stops
-        - 1%: Very tight, high stop rate
-        - 3%: Moderate protection
-        - 5%: Wide, fewer false stops
-        - Values: 1%, 1.5%, 2%, 3%, 5%
-
-        EXIT BARS (Time Exit) - 5 values:
-        - Depends on timeframe but we use bar counts
-        - 0: No time exit (SL/TP only)
-        - 10-100: Scalping to swing
-        - Values: 0, 10, 20, 50, 100
-
-        LEVERAGE - 3 values:
-        - Same as pattern: 1x, 2x, 3x
-        - Values: 1, 2, 3
-
-        TOTAL: 5 x 5 x 5 x 3 = 375 combinations
+        Args:
+            timeframe: Target timeframe (e.g., '15m', '4h', '1d')
 
         Returns:
-            Parameter space dict suitable for set_parameter_space()
+            Parameter space dict for the timeframe
+
+        Raises:
+            ValueError: If timeframe not in PARAM_SPACE
         """
-        # Absolute TP values for crypto (5 values)
-        tp_pcts = [0.02, 0.03, 0.05, 0.07, 0.10]
+        if timeframe not in PARAM_SPACE:
+            supported = list(PARAM_SPACE.keys())
+            raise ValueError(
+                f"Unsupported timeframe '{timeframe}'. Supported: {supported}"
+            )
 
-        # Absolute SL values for crypto (5 values)
-        sl_pcts = [0.01, 0.015, 0.02, 0.03, 0.05]
-
-        # Exit bars: 0 (disabled) + reasonable bar counts (5 values total)
-        exit_bars = [0, 10, 20, 50, 100]
-
-        # Leverage: fixed 1, 2, 3 (3 values)
-        leverages = [1, 2, 3]
+        # Get predefined space for this timeframe
+        tf_space = PARAM_SPACE[timeframe]
 
         space = {
-            'sl_pct': sl_pcts,
-            'tp_pct': tp_pcts,
-            'leverage': leverages,
-            'exit_bars': exit_bars,
+            'sl_pct': tf_space['sl_pct'].copy(),
+            'tp_pct': tf_space['tp_pct'].copy(),
+            'leverage': LEVERAGE_VALUES.copy(),
+            'exit_bars': tf_space['exit_bars'].copy(),
         }
 
+        # Calculate total combinations
+        total = (
+            len(space['sl_pct']) *
+            len(space['tp_pct']) *
+            len(space['leverage']) *
+            len(space['exit_bars'])
+        )
+        # Minus invalid (tp=0 AND exit=0)
+        invalid = len(space['sl_pct']) * len(space['leverage'])
+        valid = total - invalid
+
         logger.info(
-            f"Built absolute space for AI strategy: "
-            f"TP={[f'{p:.1%}' for p in tp_pcts]}, "
-            f"SL={[f'{p:.1%}' for p in sl_pcts]}, "
-            f"exit={exit_bars}, lev={leverages} "
-            f"({self._count_strategies()} candidate strategies after set)"
+            f"Built absolute space for {timeframe}: "
+            f"SL={[f'{p:.1%}' for p in space['sl_pct']]}, "
+            f"TP={[f'{p:.1%}' for p in space['tp_pct']]}, "
+            f"exit={space['exit_bars']}, lev={space['leverage']} "
+            f"({valid} valid combinations)"
         )
 
         return space

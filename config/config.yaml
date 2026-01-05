@@ -137,10 +137,11 @@ generation:
 # ACTIVE POOL (Leaderboard Logic)
 # ==============================================================================
 # Pool of strategies ready for deployment, managed via leaderboard
-# New strategies enter if: score >= min_score_entry AND (pool not full OR score > min(pool))
+# New strategies enter if: score >= min_score AND (pool not full OR score > min(pool))
+# NOTE: All strategies in ACTIVE are eligible for LIVE deployment (single threshold)
 active_pool:
-  max_size: 1000                 # Max strategies in pool (leaderboard)
-  min_score_entry: 15            # Minimum score to enter pool
+  max_size: 300                  # Max strategies in pool (leaderboard)
+  min_score: 40                  # Minimum score to enter pool (and be LIVE eligible)
 
 # ==============================================================================
 # PIPELINE FLOW CONTROL (Multi-Level Backpressure System)
@@ -262,8 +263,7 @@ scorer:
 rotator:
   check_interval_minutes: 15     # Check every 15 min for deployment opportunities
   max_live_strategies: 10        # Max strategies in LIVE at once
-  min_score_live: 40             # Minimum score to be eligible for LIVE
-  # dry_run removed - uses hyperliquid.dry_run as single source of truth
+  # NOTE: min_score for LIVE eligibility uses active_pool.min_score (single threshold)
 
   # Diversification rules
   selection:

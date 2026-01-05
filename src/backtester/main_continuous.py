@@ -90,7 +90,7 @@ class ContinuousBacktesterProcess:
 
         # ACTIVE pool configuration
         self.pool_max_size = self.config.get('active_pool.max_size', 300)
-        self.pool_min_score = self.config.get('active_pool.min_score_entry', 15)
+        self.pool_min_score = self.config.get('active_pool.min_score', 40)
 
         # Pipeline backpressure configuration (downstream = ACTIVE pool)
         self.active_limit = self.pool_max_size  # Use pool size as limit
@@ -1064,8 +1064,8 @@ class ContinuousBacktesterProcess:
                 base_leverage=base_leverage
             )
         else:
-            # AI STRATEGY: use absolute ranges for crypto
-            space = self.parametric_backtester.build_absolute_space()
+            # AI STRATEGY: use timeframe-scaled absolute ranges
+            space = self.parametric_backtester.build_absolute_space(timeframe)
 
         self.parametric_backtester.set_parameter_space(space)
 
@@ -1147,12 +1147,24 @@ class ContinuousBacktesterProcess:
         # Set timeframe for correct Sharpe annualization
         self.parametric_backtester.set_timeframe(timeframe)
 
+        # Build max_leverages array from CoinRegistry (per-coin limits)
+        registry = get_registry()
+        max_leverages = np.zeros(n_symbols, dtype=np.int32)
+        for j, symbol in enumerate(symbols):
+            try:
+                max_leverages[j] = registry.get_max_leverage(symbol)
+            except Exception:
+                # Fallback if coin not found (shouldn't happen with proper setup)
+                max_leverages[j] = 10
+                logger.warning(f"Could not get max_leverage for {symbol}, using default 10")
+
         # Run parametric backtest
         try:
             results_df = self.parametric_backtester.backtest_pattern(
                 pattern_signals=entries_2d,
                 ohlc_data={'close': close_2d, 'high': high_2d, 'low': low_2d},
                 directions=directions_2d,
+                max_leverages=max_leverages,
             )
         except Exception as e:
             logger.error(f"Parametric backtest failed: {e}")
@@ -2113,7 +2125,7 @@ class ContinuousBacktesterProcess:
         After re-backtest:
         1. Calculate new score
         2. Update last_backtested_at
-        3. If score < min_score_entry -> RETIRED
+        3. If score < min_score -> RETIRED
         4. If score < min(pool) and pool full -> RETIRED
         5. Otherwise stays in ACTIVE with updated score
 

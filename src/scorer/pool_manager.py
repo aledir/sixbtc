@@ -3,7 +3,7 @@ ACTIVE Pool Manager - Leaderboard Logic
 
 Manages the ACTIVE strategy pool with leaderboard logic:
 - Pool has max_size limit (default 300)
-- New strategies enter if score >= min_score_entry AND (pool not full OR score > min(pool))
+- New strategies enter if score >= min_score AND (pool not full OR score > min(pool))
 - Lowest scoring strategy is evicted when pool is full and better strategy arrives
 
 Single Responsibility: Manage pool membership (no scoring, no deployment)
@@ -28,8 +28,8 @@ class PoolManager:
     Manages ACTIVE pool membership using leaderboard logic.
 
     Rules:
-    1. Score < min_score_entry -> RETIRED (never enters pool)
-    2. Pool not full AND score >= min_score_entry -> enters pool
+    1. Score < min_score -> RETIRED (never enters pool)
+    2. Pool not full AND score >= min_score -> enters pool
     3. Pool full AND score > min(pool) -> evict worst, enter pool
     4. Pool full AND score <= min(pool) -> RETIRED (doesn't enter)
     """
@@ -43,13 +43,13 @@ class PoolManager:
         """
         pool_config = config['active_pool']
         self.max_size = pool_config['max_size']
-        self.min_score_entry = pool_config['min_score_entry']
+        self.min_score = pool_config['min_score']
 
         self.scorer = BacktestScorer(config)
 
         logger.info(
             f"PoolManager initialized: max_size={self.max_size}, "
-            f"min_score_entry={self.min_score_entry}"
+            f"min_score={self.min_score}"
         )
 
     def get_pool_stats(self) -> dict:
@@ -125,9 +125,9 @@ class PoolManager:
             Tuple of (success: bool, reason: str)
         """
         # Rule 1: Score below minimum threshold
-        if score < self.min_score_entry:
-            self._retire_strategy(strategy_id, f"score {score:.1f} < threshold {self.min_score_entry}")
-            return False, f"Score {score:.1f} below minimum {self.min_score_entry}"
+        if score < self.min_score:
+            self._retire_strategy(strategy_id, f"score {score:.1f} < threshold {self.min_score}")
+            return False, f"Score {score:.1f} below minimum {self.min_score}"
 
         with get_session() as session:
             # Get current pool count
@@ -201,9 +201,9 @@ class PoolManager:
             Tuple of (still_active: bool, reason: str)
         """
         # Check threshold
-        if new_score < self.min_score_entry:
-            self._retire_strategy(strategy_id, f"re-test score {new_score:.1f} < threshold {self.min_score_entry}")
-            return False, f"Score dropped below threshold ({new_score:.1f} < {self.min_score_entry})"
+        if new_score < self.min_score:
+            self._retire_strategy(strategy_id, f"re-test score {new_score:.1f} < threshold {self.min_score}")
+            return False, f"Score dropped below threshold ({new_score:.1f} < {self.min_score})"
 
         with get_session() as session:
             strategy = session.query(Strategy).filter(Strategy.id == strategy_id).first()

@@ -4,7 +4,7 @@ Strategy Selector - Select Top Strategies for Deployment
 Single Responsibility: Select best strategies from ACTIVE pool with diversification.
 
 Selection criteria:
-- Score >= min_score_live (default 50)
+- Score >= min_score (from active_pool config - single threshold)
 - Diversification: max N per type, max M per timeframe
 - Not already in LIVE status
 """
@@ -34,14 +34,16 @@ class StrategySelector:
         Initialize selector with config.
 
         Args:
-            config: Configuration dict with 'rotator' section
+            config: Configuration dict with 'rotator' and 'active_pool' sections
 
         Raises:
             KeyError: If required config sections are missing (Fast Fail)
         """
         rotator_config = config['rotator']
 
-        self.min_score_live = rotator_config['min_score_live']
+        # Single threshold: all ACTIVE strategies are LIVE eligible
+        # min_score comes from active_pool (single source of truth)
+        self.min_score = config['active_pool']['min_score']
         self.max_live_strategies = rotator_config['max_live_strategies']
 
         # Diversification constraints
@@ -50,7 +52,7 @@ class StrategySelector:
         self.max_per_timeframe = selection_config['max_per_timeframe']
 
         logger.info(
-            f"StrategySelector initialized: min_score={self.min_score_live}, "
+            f"StrategySelector initialized: min_score={self.min_score}, "
             f"max_live={self.max_live_strategies}, max_per_type={self.max_per_type}, "
             f"max_per_timeframe={self.max_per_timeframe}"
         )
@@ -60,7 +62,7 @@ class StrategySelector:
         Get top candidates from ACTIVE pool for deployment.
 
         Applies:
-        1. Score threshold (>= min_score_live)
+        1. Score threshold (>= min_score from active_pool)
         2. Diversification constraints (type, timeframe)
         3. Sorts by score descending
 
@@ -78,7 +80,7 @@ class StrategySelector:
             eligible = (
                 session.query(Strategy)
                 .filter(Strategy.status == 'ACTIVE')
-                .filter(Strategy.score_backtest >= self.min_score_live)
+                .filter(Strategy.score_backtest >= self.min_score)
                 .order_by(Strategy.score_backtest.desc())
                 .all()
             )
