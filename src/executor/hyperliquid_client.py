@@ -98,17 +98,11 @@ class HyperliquidClient:
         Raises:
             ValueError: If live mode without valid credentials
         """
-        # Determine dry_run mode
+        # Determine dry_run mode - single source of truth: hyperliquid.dry_run
         if dry_run is not None:
             self.dry_run = dry_run
         elif config is not None:
-            try:
-                self.dry_run = config['development']['testing']['dry_run']
-            except KeyError:
-                try:
-                    self.dry_run = config.get('dry_run', True)
-                except (KeyError, TypeError):
-                    self.dry_run = True
+            self.dry_run = config.get('hyperliquid', {}).get('dry_run', True)
         else:
             self.dry_run = True
 
@@ -124,6 +118,10 @@ class HyperliquidClient:
             self.testnet = False
 
         self.current_subaccount = 1
+
+        # Get total subaccounts (auto-detect from .env)
+        from src.config.loader import get_subaccount_count
+        self.total_subaccounts = get_subaccount_count()
 
         # Initialize Info client (read-only, always available)
         api_url = constants.TESTNET_API_URL if self.testnet else constants.MAINNET_API_URL
@@ -223,13 +221,13 @@ class HyperliquidClient:
         Switch to specified subaccount
 
         Args:
-            subaccount_id: Target subaccount (1-10)
+            subaccount_id: Target subaccount (1 to configured max)
 
         Returns:
             True if switched successfully
         """
-        if not 1 <= subaccount_id <= 10:
-            logger.error(f"Invalid subaccount_id: {subaccount_id}")
+        if not 1 <= subaccount_id <= self.total_subaccounts:
+            logger.error(f"Invalid subaccount_id: {subaccount_id} (valid: 1-{self.total_subaccounts})")
             return False
 
         self.current_subaccount = subaccount_id

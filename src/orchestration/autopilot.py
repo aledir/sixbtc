@@ -321,7 +321,7 @@ class AutoPilot:
                     strategy_class = None
                     for name in dir(module):
                         obj = getattr(module, name)
-                        if isinstance(obj, type) and name.startswith('Strategy_'):
+                        if isinstance(obj, type) and name.startswith(('Strategy_', 'PatStrat_')):
                             strategy_class = obj
                             break
 
@@ -482,11 +482,9 @@ class AutoPilot:
             client = HyperliquidClient(self.config, dry_run=self.dry_run)
             manager = SubaccountManager(client, self.config)
 
-            # Get max subaccounts
-            if self.config.get('hyperliquid', {}).get('subaccounts', {}).get('test_mode', {}).get('enabled', False):
-                max_subaccounts = self.config.get('hyperliquid', {}).get('subaccounts', {}).get('test_mode', {}).get('count', 3)
-            else:
-                max_subaccounts = self.config.get('hyperliquid', {}).get('subaccounts', {}).get('total', 10)
+            # Auto-detect subaccounts from .env
+            from src.config.loader import get_subaccount_count
+            max_subaccounts = get_subaccount_count()
 
             deployed_count = 0
 

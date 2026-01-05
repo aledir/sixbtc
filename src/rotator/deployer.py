@@ -40,11 +40,13 @@ class StrategyDeployer:
         Raises:
             KeyError: If required config sections are missing (Fast Fail)
         """
-        trading_config = config['trading']
-        rotator_config = config['rotator']
+        from src.config.loader import get_subaccount_count
 
-        self.n_subaccounts = trading_config['n_subaccounts']
-        self.dry_run = rotator_config.get('dry_run', True)
+        trading_config = config['trading']
+
+        # Auto-detect N subaccounts from .env
+        self.n_subaccounts = get_subaccount_count()
+        self.dry_run = config.get('hyperliquid', {}).get('dry_run', True)
 
         # Capital allocation
         self.total_capital = trading_config['total_capital']

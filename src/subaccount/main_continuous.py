@@ -53,16 +53,16 @@ class SubaccountManagerProcess:
         self.max_degradation = 0.50  # 50% worse than backtest
         self.max_drawdown = risk_config.get('max_subaccount_drawdown', 0.25)
 
-        # Trading configuration
-        trading_config = self.config.get('trading', {})
-        subaccount_config = self.config.get('subaccount_manager', {})
-        self.dry_run = subaccount_config.get('dry_run', True)
+        from src.config.loader import get_subaccount_count
+
+        # Single source of truth for dry_run
+        self.dry_run = self.config.get('hyperliquid', {}).get('dry_run', True)
 
         # Hyperliquid client
         self.client = HyperliquidClient(self.config, dry_run=self.dry_run)
 
-        # Number of subaccounts
-        self.n_subaccounts = trading_config.get('n_subaccounts', 10)
+        # Auto-detect subaccounts from .env
+        self.n_subaccounts = get_subaccount_count()
 
         logger.info(
             f"SubaccountManagerProcess initialized: "

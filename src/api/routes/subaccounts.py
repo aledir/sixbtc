@@ -9,12 +9,19 @@ from typing import List
 from fastapi import APIRouter, HTTPException
 
 from src.api.schemas import SubaccountInfo, SubaccountsResponse
+from src.config.loader import load_config
 from src.database import Subaccount, Strategy, Trade, get_session
 from src.utils import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+def get_total_subaccounts() -> int:
+    """Get total subaccounts - auto-detect from .env."""
+    from src.config.loader import get_subaccount_count
+    return get_subaccount_count()
 
 
 def get_subaccount_data(session, subaccount: Subaccount) -> SubaccountInfo:
@@ -62,8 +69,10 @@ async def list_subaccounts():
     """
     Get all subaccounts with their current status.
 
-    Returns 10 subaccounts (1-10).
+    Returns configured number of subaccounts (from config).
     """
+    total = get_total_subaccounts()
+
     try:
         with get_session() as session:
             subaccounts = session.query(Subaccount).order_by(Subaccount.id).all()
@@ -71,7 +80,7 @@ async def list_subaccounts():
             # If no subaccounts exist, create default ones
             if not subaccounts:
                 items = []
-                for i in range(1, 11):
+                for i in range(1, total + 1):
                     items.append(SubaccountInfo(
                         index=i,
                         status="idle",
@@ -104,7 +113,7 @@ async def list_subaccounts():
         logger.error(f"Error listing subaccounts: {e}")
         # Return empty default response
         items = []
-        for i in range(1, 11):
+        for i in range(1, total + 1):
             items.append(SubaccountInfo(
                 index=i,
                 status="idle",
@@ -124,8 +133,9 @@ async def get_subaccount(subaccount_id: int):
     """
     Get details for a specific subaccount.
     """
-    if subaccount_id < 1 or subaccount_id > 10:
-        raise HTTPException(status_code=400, detail="Subaccount ID must be between 1 and 10")
+    total = get_total_subaccounts()
+    if subaccount_id < 1 or subaccount_id > total:
+        raise HTTPException(status_code=400, detail=f"Subaccount ID must be between 1 and {total}")
 
     try:
         with get_session() as session:

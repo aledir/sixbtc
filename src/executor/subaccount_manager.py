@@ -1,7 +1,8 @@
 """
 Subaccount Manager - Hyperliquid Subaccount Management
 
-Manages deployment of strategies to 10 Hyperliquid subaccounts.
+Manages deployment of strategies to N Hyperliquid subaccounts.
+N is auto-detected from .env credentials (HYPERLIQUID_PRIVATE_KEY_1, _2, etc.)
 """
 
 import logging
@@ -14,7 +15,7 @@ class SubaccountManager:
     """
     Manages deployment to Hyperliquid subaccounts
 
-    Each of the 10 subaccounts runs one strategy.
+    Number of subaccounts is auto-detected from .env credentials.
     This class handles:
     - Strategy assignment to subaccounts
     - Starting/stopping strategies
@@ -45,26 +46,15 @@ class SubaccountManager:
             client = client_or_config
 
         if config is not None and isinstance(config, dict):
-            # Config provided - extract settings (NO defaults, fast fail)
-            try:
-                self.dry_run = config['development']['testing']['dry_run']
-            except KeyError:
-                # Fallback for test configs that may not have nested structure
-                self.dry_run = config['dry_run']
+            from src.config.loader import get_subaccount_count
 
-            # Get subaccount config from hyperliquid section
-            subaccount_config = config['hyperliquid']['subaccounts']
-            self.total_subaccounts = subaccount_config['total']
+            # Single source of truth for dry_run
+            self.dry_run = config.get('hyperliquid', {}).get('dry_run', True)
 
-            # For test mode, use test_mode config
-            test_mode = subaccount_config.get('test_mode', {})
-            if test_mode.get('enabled', False):
-                self.active_subaccounts = test_mode['count']
-                self.capital_per_account = test_mode['capital_per_account']
-            else:
-                # Production mode - all subaccounts active, no default capital
-                self.active_subaccounts = self.total_subaccounts
-                self.capital_per_account = None  # Must be set externally in production
+            # Auto-detect subaccounts from .env
+            self.total_subaccounts = get_subaccount_count()
+            self.active_subaccounts = self.total_subaccounts
+            self.capital_per_account = None  # Determined by actual subaccount balance
 
             # Create client if not provided
             if client is None:
@@ -73,15 +63,20 @@ class SubaccountManager:
             else:
                 self.client = client
         else:
-            # No config - use defaults (test mode)
+            # No config provided - FAIL FAST (config is required for production)
+            # Only for test mode with explicit parameters
+            if client is None:
+                raise ValueError("SubaccountManager requires either config dict or client with explicit params")
             self.client = client
             self.dry_run = dry_run
-            self.total_subaccounts = 10
+            # For tests without config, must be set explicitly via test setup
+            self.total_subaccounts = 3  # Safe default for tests only
             self.active_subaccounts = 3
             self.capital_per_account = 100
 
+        # Dynamic assignment dict based on configured total
         self.assignments: Dict[int, Optional[Dict[str, Any]]] = {
-            i: None for i in range(1, 11)
+            i: None for i in range(1, self.total_subaccounts + 1)
         }
         self.subaccount_strategies: Dict[int, str] = {}
 
@@ -89,6 +84,13 @@ class SubaccountManager:
             f"SubaccountManager initialized (dry_run={self.dry_run}, "
             f"total={self.total_subaccounts}, active={self.active_subaccounts})"
         )
+
+    def _validate_subaccount_id(self, subaccount_id: int) -> bool:
+        """Validate subaccount ID is within configured range."""
+        if not 1 <= subaccount_id <= self.total_subaccounts:
+            logger.error(f"Invalid subaccount_id: {subaccount_id} (valid: 1-{self.total_subaccounts})")
+            return False
+        return True
 
     def deploy_strategy(
         self,
@@ -103,14 +105,13 @@ class SubaccountManager:
         Args:
             strategy_id: Unique strategy identifier
             strategy_instance: StrategyCore instance
-            subaccount_id: Target subaccount (1-10)
+            subaccount_id: Target subaccount (1 to configured max)
             metadata: Optional metadata dict
 
         Returns:
             True if deployed successfully
         """
-        if not 1 <= subaccount_id <= 10:
-            logger.error(f"Invalid subaccount_id: {subaccount_id}")
+        if not self._validate_subaccount_id(subaccount_id):
             return False
 
         # Stop any existing strategy
@@ -138,14 +139,13 @@ class SubaccountManager:
         Stop strategy on subaccount
 
         Args:
-            subaccount_id: Subaccount to stop (1-10)
+            subaccount_id: Subaccount to stop (1 to configured max)
             close_positions: If True, close all positions
 
         Returns:
             True if stopped successfully
         """
-        if not 1 <= subaccount_id <= 10:
-            logger.error(f"Invalid subaccount_id: {subaccount_id}")
+        if not self._validate_subaccount_id(subaccount_id):
             return False
 
         assignment = self.assignments[subaccount_id]
@@ -175,7 +175,7 @@ class SubaccountManager:
 
     def get_assignment(self, subaccount_id: int) -> Optional[Dict[str, Any]]:
         """Get current strategy assignment for subaccount"""
-        if not 1 <= subaccount_id <= 10:
+        if not self._validate_subaccount_id(subaccount_id):
             return None
         return self.assignments[subaccount_id]
 
@@ -196,8 +196,8 @@ class SubaccountManager:
         """
         logger.info("Stopping all strategies...")
 
-        for subaccount_id in range(1, 11):
-            if self.assignments[subaccount_id] is not None:
+        for subaccount_id in range(1, self.total_subaccounts + 1):
+            if self.assignments.get(subaccount_id) is not None:
                 self.stop_strategy(subaccount_id, close_positions=close_positions)
 
         logger.info("All strategies stopped")
@@ -215,7 +215,7 @@ class SubaccountManager:
                 - strategy_id: Unique ID
                 - strategy: StrategyCore instance
                 - metadata: Optional metadata
-            start_subaccount: Starting subaccount ID (1-10)
+            start_subaccount: Starting subaccount ID (1 to configured max)
 
         Returns:
             Number of strategies deployed successfully
@@ -225,9 +225,9 @@ class SubaccountManager:
         for i, strategy in enumerate(strategies):
             subaccount_id = start_subaccount + i
 
-            if subaccount_id > 10:
+            if subaccount_id > self.total_subaccounts:
                 logger.warning(
-                    f"Subaccount {subaccount_id} > 10, "
+                    f"Subaccount {subaccount_id} > {self.total_subaccounts}, "
                     f"stopping batch deployment"
                 )
                 break
@@ -250,13 +250,12 @@ class SubaccountManager:
         Get balance for specific subaccount
 
         Args:
-            subaccount_id: Subaccount ID (1-10)
+            subaccount_id: Subaccount ID (1 to configured max)
 
         Returns:
             Balance in USD
         """
-        if not 1 <= subaccount_id <= 10:
-            logger.error(f"Invalid subaccount_id: {subaccount_id}")
+        if not self._validate_subaccount_id(subaccount_id):
             return 0.0
 
         # Switch to subaccount and get state
@@ -279,13 +278,12 @@ class SubaccountManager:
         Get positions for specific subaccount
 
         Args:
-            subaccount_id: Subaccount ID (1-10)
+            subaccount_id: Subaccount ID (1 to configured max)
 
         Returns:
             List of position dicts
         """
-        if not 1 <= subaccount_id <= 10:
-            logger.error(f"Invalid subaccount_id: {subaccount_id}")
+        if not self._validate_subaccount_id(subaccount_id):
             return []
 
         # Switch to subaccount and get positions
@@ -297,14 +295,13 @@ class SubaccountManager:
         Assign strategy to subaccount
 
         Args:
-            subaccount_id: Subaccount ID (1-10)
+            subaccount_id: Subaccount ID (1 to configured max)
             strategy_id: Strategy identifier
 
         Returns:
             True if assigned successfully
         """
-        if not 1 <= subaccount_id <= 10:
-            logger.error(f"Invalid subaccount_id: {subaccount_id}")
+        if not self._validate_subaccount_id(subaccount_id):
             return False
 
         # Check if already assigned

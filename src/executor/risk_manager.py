@@ -56,26 +56,25 @@ class RiskManager:
         else:
             self.config = config
 
-        self.sizing_mode = self.config['sizing_mode']
+        # Fixed fractional is the only supported mode
+        self.sizing_mode = 'fixed'
 
         # Fixed fractional settings
         ff_config = self.config['fixed_fractional']
         self.risk_per_trade_pct = ff_config['risk_per_trade_pct']
         self.max_position_size_pct = ff_config['max_position_size_pct']
 
-        # ATR settings
-        atr_config = self.config['atr']
-        self.atr_period = atr_config['period']
-        self.atr_stop_multiplier = atr_config['stop_multiplier']
-        self.atr_take_profit_multiplier = atr_config['take_profit_multiplier']
-        self.min_risk_reward = atr_config['min_risk_reward']
+        # ATR settings (defaults for backwards compatibility, not used with fixed mode)
+        self.atr_period = 14
+        self.atr_stop_multiplier = 2.0
+        self.atr_take_profit_multiplier = 3.0
+        self.min_risk_reward = 1.5
 
-        # Volatility scaling
-        self.volatility_scaling = atr_config['volatility_scaling']
-        self.scaling_enabled = self.volatility_scaling['enabled']
-        self.low_vol_threshold = self.volatility_scaling['low_volatility_threshold']
-        self.high_vol_threshold = self.volatility_scaling['high_volatility_threshold']
-        self.scaling_factor = self.volatility_scaling['scaling_factor']
+        # Volatility scaling disabled
+        self.scaling_enabled = False
+        self.low_vol_threshold = 0.015
+        self.high_vol_threshold = 0.05
+        self.scaling_factor = 0.5
 
         # Position limits
         limits_config = self.config['limits']

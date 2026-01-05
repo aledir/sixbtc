@@ -73,7 +73,7 @@ from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitTy
 {pattern_function}
 
 
-class Strategy_{strategy_type}_{strategy_id}(StrategyCore):
+class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
     """
     Pattern-based strategy: {pattern_name}
     Target: {target_name}
@@ -213,7 +213,7 @@ class Strategy_{strategy_type}_{strategy_id}(StrategyCore):
 
         logger.info(
             f"Generating strategy via Direct Embedding: "
-            f"{pattern.name} -> Strategy_{strategy_type}_{strategy_id}"
+            f"{pattern.name} -> PatStrat_{strategy_type}_{strategy_id}"
         )
 
         try:
@@ -369,8 +369,8 @@ def bars_24h(): return 96"""
             return False, errors
 
         # Required elements
-        if 'class Strategy_' not in code:
-            errors.append("Missing Strategy class definition")
+        if 'class PatStrat_' not in code:
+            errors.append("Missing PatStrat class definition")
         if 'def generate_signal' not in code:
             errors.append("Missing generate_signal method")
         if 'StrategyCore' not in code:

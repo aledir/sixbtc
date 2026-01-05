@@ -330,15 +330,15 @@ class ParametricGenerator:
         """Update class name in code to match strategy ID"""
         import re
 
-        # Find existing class name pattern
-        pattern = r'class Strategy_\w+_\w+\(StrategyCore\)'
+        # Find existing class name pattern (supports Strategy_ and PatStrat_)
+        pattern = r'class (?:Strategy|PatStrat)_\w+_\w+\(StrategyCore\)'
         new_class = f'class Strategy_{strategy_type}_{strategy_id}(StrategyCore)'
 
         updated = re.sub(pattern, new_class, code)
 
         if updated == code:
             # Pattern didn't match, try simpler pattern
-            pattern = r'class Strategy_\w+\(StrategyCore\)'
+            pattern = r'class (?:Strategy|PatStrat)_\w+\(StrategyCore\)'
             updated = re.sub(pattern, new_class, code)
 
         return updated

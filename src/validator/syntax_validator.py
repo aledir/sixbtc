@@ -141,16 +141,18 @@ class SyntaxValidator:
 
             # Validate class name format:
             # - Strategy_TYPE_hash (e.g., Strategy_MOM_abc123)
+            # - PatStrat_TYPE_hash (e.g., PatStrat_MOM_abc123) - pattern-based
             # - Strategy_TYPE_templatehash_paramhash (e.g., Strategy_MOM_d524c121_52e390)
             valid_formats = [
                 r'^Strategy_[A-Z]+_[a-f0-9]+$',           # Basic: Strategy_MOM_abc123
+                r'^PatStrat_[A-Z]+_[a-f0-9]+$',           # Pattern: PatStrat_MOM_abc123
                 r'^Strategy_[A-Z]+_[a-f0-9]+_[a-f0-9]+$', # Template: Strategy_MOM_tpl_param
                 r'^Strategy_[A-Z]+_[a-zA-Z0-9]+$',        # Alphanumeric (for tests)
             ]
             if not any(re.match(pattern, class_name) for pattern in valid_formats):
                 errors.append(
                     f"Invalid class name format: {class_name}. "
-                    "Expected: Strategy_TYPE_hash (e.g., Strategy_MOM_abc123)"
+                    "Expected: Strategy_TYPE_hash or PatStrat_TYPE_hash"
                 )
 
         return class_name, errors

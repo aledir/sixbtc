@@ -121,7 +121,13 @@ class PositionTracker:
     - Position lifecycle management
     """
 
-    def __init__(self, client=None, dry_run: bool = True, subaccount_id: int = 1):
+    def __init__(
+        self,
+        client=None,
+        dry_run: bool = True,
+        subaccount_id: int = 1,
+        total_subaccounts: int = 3
+    ):
         """
         Initialize position tracker
 
@@ -129,10 +135,12 @@ class PositionTracker:
             client: HyperliquidClient instance (optional for testing)
             dry_run: Dry-run mode flag
             subaccount_id: Default subaccount ID
+            total_subaccounts: Total number of configured subaccounts
         """
         self.client = client
         self.dry_run = dry_run
         self.subaccount_id = subaccount_id
+        self.total_subaccounts = total_subaccounts
         self.positions: Dict[str, TrackedPosition] = {}
         self.closed_positions: List[Dict] = []
         # Key: position_id (e.g., "1_BTC_Strategy_MOM_001")
@@ -157,7 +165,7 @@ class PositionTracker:
         Add new position to tracking
 
         Args:
-            subaccount_id: Subaccount ID (1-10)
+            subaccount_id: Subaccount ID (1 to configured max)
             symbol: Trading pair
             side: 'long' or 'short'
             size: Position size
@@ -430,7 +438,7 @@ class PositionTracker:
         discrepancies = 0
 
         # Get positions from exchange for all subaccounts
-        for subaccount_id in range(1, 11):
+        for subaccount_id in range(1, self.total_subaccounts + 1):
             self.client.switch_subaccount(subaccount_id)
             exchange_positions = self.client.get_positions()
 

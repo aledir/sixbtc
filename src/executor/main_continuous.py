@@ -60,8 +60,8 @@ class ContinuousExecutorProcess:
         self.shutdown_event = threading.Event()
         self.force_exit = False
 
-        # Process configuration - NO defaults (Fast Fail principle)
-        self.dry_run = self.config.get_required('subaccount_manager.dry_run')
+        # Single source of truth for dry_run: hyperliquid.dry_run
+        self.dry_run = self.config.get('hyperliquid.dry_run', True)
 
         # Components - use injected or create new (Dependency Injection pattern)
         self.client = client or HyperliquidClient(self.config._raw_config, dry_run=self.dry_run)
@@ -395,9 +395,9 @@ class ContinuousExecutorProcess:
             return self._strategy_cache[strategy_id]
 
         try:
-            # Extract class name
+            # Extract class name (supports Strategy_ and PatStrat_)
             import re
-            match = re.search(r'class\s+(Strategy_\w+)\s*\(', code)
+            match = re.search(r'class\s+((?:Strategy|PatStrat)_\w+)\s*\(', code)
             if not match:
                 return None
 

@@ -55,6 +55,7 @@ hyperliquid:
   # Fees for backtesting (taker fee = market orders)
   fee_rate: 0.00045  # 0.045% taker fee
   slippage: 0.0005   # 0.05% estimated slippage
+  min_notional: 10.0  # Minimum trade size in USDC (Hyperliquid requirement)
 
   websocket:
     ping_interval: 30
@@ -66,33 +67,22 @@ hyperliquid:
     enabled: true
     fills_lookback_days: 7  # How far back to look for fills
 
-  subaccounts:
-    total: 10
-    test_mode:
-      enabled: false
-      count: 3
-      capital_per_account: 100
+  # MASTER dry_run flag - controls ALL trading behavior
+  # true = no real orders (safe testing)
+  # false = real orders (live trading)
+  dry_run: true
+
+  # Number of subaccounts is AUTO-DETECTED from .env
+  # Count of HYPERLIQUID_PRIVATE_KEY_1, _2, _3... variables
 
 # ==============================================================================
 # RISK MANAGEMENT
 # ==============================================================================
 risk:
-  sizing_mode: atr  # 'fixed' or 'atr'
-
+  # Fixed Fractional position sizing (only mode supported)
   fixed_fractional:
-    risk_per_trade_pct: 0.02
-    max_position_size_pct: 0.20
-
-  atr:
-    period: 14
-    stop_multiplier: 2.0
-    take_profit_multiplier: 3.0
-    min_risk_reward: 1.5
-    volatility_scaling:
-      enabled: true
-      low_volatility_threshold: 0.015
-      high_volatility_threshold: 0.05
-      scaling_factor: 0.5
+    risk_per_trade_pct: 0.02       # 2% risk per trade
+    max_position_size_pct: 0.20   # Max 20% of equity per position
 
   limits:
     max_open_positions_per_subaccount: 10  # Increased from 6
@@ -249,8 +239,8 @@ backtesting:
 # TRADING (Live Execution Policy)
 # ==============================================================================
 trading:
-  n_subaccounts: 10            # Number of Hyperliquid subaccounts for deployment
-  total_capital: 1000          # Total capital across all subaccounts ($)
+  # NOTE: n_subaccounts REMOVED - use hyperliquid.subaccounts.total instead
+  total_capital: 300           # Total capital across all subaccounts ($) - 3 x $100
   min_volume_24h: 1000000      # $1M min volume for live trading (liquidity filter)
   pairs_mode: strict           # strict, adaptive, intersection
   require_backtest: true       # Only trade pairs that were backtested
@@ -273,7 +263,7 @@ rotator:
   check_interval_minutes: 15     # Check every 15 min for deployment opportunities
   max_live_strategies: 10        # Max strategies in LIVE at once
   min_score_live: 40             # Minimum score to be eligible for LIVE
-  dry_run: true                  # Don't actually trade (for testing)
+  # dry_run removed - uses hyperliquid.dry_run as single source of truth
 
   # Diversification rules
   selection:
@@ -354,7 +344,7 @@ deployment:
 # SUBACCOUNT MANAGER
 # ==============================================================================
 subaccount_manager:
-  dry_run: true
+  # dry_run removed - uses hyperliquid.dry_run as single source of truth
   rotation_interval_hours: 24
   rebalance_enabled: true
 

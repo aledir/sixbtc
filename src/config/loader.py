@@ -123,6 +123,38 @@ def _interpolate_env_vars(config_str: str) -> str:
     return pattern.sub(replacer, config_str)
 
 
+def detect_subaccount_count() -> int:
+    """
+    Auto-detect number of subaccounts from .env credentials.
+
+    Counts HYPERLIQUID_PRIVATE_KEY_1, _2, _3... variables.
+
+    Returns:
+        Number of configured subaccounts (0 if none found)
+    """
+    count = 0
+    for i in range(1, 101):  # Support up to 100 subaccounts
+        key_var = f"HYPERLIQUID_PRIVATE_KEY_{i}"
+        if os.getenv(key_var):
+            count += 1
+        else:
+            break  # Stop at first missing
+    return count
+
+
+def get_subaccount_count() -> int:
+    """
+    Get number of subaccounts from .env credentials.
+
+    Counts HYPERLIQUID_PRIVATE_KEY_1, _2, _3... variables.
+    Returns minimum 1 to allow system to run.
+
+    Returns:
+        Number of subaccounts (minimum 1)
+    """
+    return max(1, detect_subaccount_count())
+
+
 # Global config cache to avoid duplicate loads and prints
 _cached_config: Config | None = None
 
@@ -242,13 +274,6 @@ def _validate_config(config: Config) -> None:
                 f"Valid options: {valid_timeframes}"
             )
 
-    # Validate risk management
-    sizing_mode = config.get('risk.sizing_mode')
-    if sizing_mode not in ['fixed', 'atr']:
-        raise ValueError(
-            f"risk.sizing_mode must be 'fixed' or 'atr', got '{sizing_mode}'"
-        )
-
     # Validate database config
     db_host = config.get('database.host')
     db_port = config.get('database.port')
@@ -280,7 +305,7 @@ if __name__ == "__main__":
         print("="*60)
         print(f"\nSystem: {config.get('system.name')} v{config.get('system.version')}")
         print(f"Timeframes: {config.get('timeframes')}")
-        print(f"Risk sizing: {config.get('risk.sizing_mode')}")
+        print(f"Risk per trade: {config.get('risk.fixed_fractional.risk_per_trade_pct')}")
         print(f"Execution mode: {config.get('system.execution_mode')}")
         print(f"\nDatabase: {config.get('database.host')}:{config.get('database.port')}")
         print(f"Database name: {config.get('database.database')}")

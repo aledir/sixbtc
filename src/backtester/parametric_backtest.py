@@ -67,6 +67,7 @@ def _simulate_single_param_set(
     slippage: float,
     max_positions: int,
     risk_pct: float,
+    min_notional: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Simulate one parameter set across all symbols.
@@ -96,8 +97,10 @@ def _simulate_single_param_set(
     pos_direction = np.zeros(n_symbols, dtype=np.int8)
     pos_sl = np.zeros(n_symbols, dtype=np.float64)
     pos_tp = np.zeros(n_symbols, dtype=np.float64)
+    pos_margin = np.zeros(n_symbols, dtype=np.float64)  # Margin used per position
 
     n_open = 0
+    margin_used = 0.0  # Total margin currently in use
 
     for i in range(n_bars):
         # 1. Check exits for open positions
@@ -159,7 +162,9 @@ def _simulate_single_param_set(
                     trade_wins[n_trades] = pnl > 0
                     n_trades += 1
 
-                # Clear position
+                # Clear position and release margin
+                margin_used -= pos_margin[j]
+                pos_margin[j] = 0.0
                 pos_entry_idx[j] = -1
                 n_open -= 1
 
@@ -185,15 +190,27 @@ def _simulate_single_param_set(
                 else:
                     slipped_entry = price * (1.0 - slippage)
 
-                # Calculate position size
-                # margin_pct = risk_pct / sl_pct
+                # Risk-based position sizing with margin tracking
+                # Step 1: Calculate target notional based on risk
+                risk_amount = equity * risk_pct
                 if sl_pct > 0:
-                    margin_pct = min(risk_pct / sl_pct, 1.0)
+                    notional = risk_amount / sl_pct
                 else:
-                    margin_pct = 0.01
+                    continue  # Skip if no SL defined
 
-                margin = equity * margin_pct
-                notional = margin * leverage
+                # Step 2: Calculate margin needed
+                margin_needed = notional / leverage
+
+                # Step 3: Check margin available (simulate exchange rejection)
+                margin_available = equity - margin_used
+                if margin_needed > margin_available:
+                    continue  # Skip - insufficient margin
+
+                # Step 4: Check minimum notional (Hyperliquid requirement)
+                if notional < min_notional:
+                    continue  # Skip - trade too small
+
+                # Step 5: Calculate position size
                 size = notional / slipped_entry
 
                 # Calculate SL/TP prices
@@ -204,13 +221,15 @@ def _simulate_single_param_set(
                     sl_price = slipped_entry * (1.0 + sl_pct)
                     tp_price = slipped_entry * (1.0 - tp_pct) if tp_pct > 0 else 0.0
 
-                # Store position
+                # Store position and track margin
                 pos_entry_idx[j] = i
                 pos_entry_price[j] = slipped_entry
                 pos_size[j] = size
                 pos_direction[j] = direction
                 pos_sl[j] = sl_price
                 pos_tp[j] = tp_price
+                pos_margin[j] = margin_needed
+                margin_used += margin_needed
                 n_open += 1
 
         equity_curve[i + 1] = equity
@@ -386,6 +405,7 @@ class ParametricBacktester:
         hl_config = config.get('hyperliquid', {})
         self.fee_rate = hl_config.get('fee_rate', 0.00045)
         self.slippage = hl_config.get('slippage', 0.0005)
+        self.min_notional = hl_config['min_notional']  # Crash if missing (CLAUDE.md Rule #3)
 
         risk_config = config.get('risk', {}).get('fixed_fractional', {})
         self.risk_pct = risk_config.get('risk_per_trade_pct', 0.02)
@@ -490,7 +510,7 @@ class ParametricBacktester:
                 close, high, low, entries, dirs,
                 sl_pct, tp_pct, actual_lev, exit_bars,
                 self.initial_capital, self.fee_rate, self.slippage,
-                self.max_positions, self.risk_pct,
+                self.max_positions, self.risk_pct, self.min_notional,
             )
 
             # Calculate metrics

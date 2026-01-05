@@ -1200,11 +1200,15 @@ class ContinuousBacktesterProcess:
                 best_sharpe = results_df['sharpe'].max()
                 best_wr = results_df['win_rate'].max()
                 max_trades = results_df['total_trades'].max()
+                best_expectancy = results_df['expectancy'].max()
+                min_dd = results_df['max_drawdown'].min()
                 logger.info(
                     f"Parametric: 0/{n_tested} passed thresholds | "
                     f"Best metrics: Sharpe={best_sharpe:.2f} (need {self.min_sharpe}), "
                     f"WR={best_wr:.1%} (need {self.min_win_rate:.1%}), "
-                    f"Trades={max_trades} (need {self.min_trades})"
+                    f"Trades={max_trades} (need {self.min_trades}), "
+                    f"Expectancy={best_expectancy:.4f} (need {self.min_expectancy}), "
+                    f"MinDD={min_dd:.1%} (need <{self.max_drawdown:.0%})"
                 )
 
         return results
@@ -2005,9 +2009,9 @@ class ContinuousBacktesterProcess:
             logger.error(f"Failed to mark optimal backtest: {e}")
 
     def _extract_class_name(self, code: str) -> Optional[str]:
-        """Extract class name from strategy code"""
+        """Extract class name from strategy code (supports Strategy_ and PatStrat_)"""
         import re
-        match = re.search(r'class\s+(Strategy_\w+)\s*\(', code)
+        match = re.search(r'class\s+((?:Strategy|PatStrat)_\w+)\s*\(', code)
         return match.group(1) if match else None
 
     def _load_strategy_instance(self, code: str, class_name: str):

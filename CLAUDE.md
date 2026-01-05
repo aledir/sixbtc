@@ -626,248 +626,80 @@ class AdaptiveScheduler:
 
 ---
 
-## 💰 RISK MANAGEMENT (ATR-Based Position Sizing)
+## 💰 RISK MANAGEMENT (Fixed Fractional Position Sizing)
 
-### Position Sizing Modes
+### Position Sizing Formula
 
-#### **Mode 1: Fixed Fractional (Simple)**
+SixBTC uses **Fixed Fractional** position sizing with **margin tracking**.
+
 ```python
-def calculate_position_size_fixed(
-    account_balance: float,
-    risk_pct: float = 0.02,
-    entry_price: float,
-    stop_loss: float
-) -> float:
-    """
-    Fixed fractional position sizing
+# Risk-based position sizing
+risk_amount = equity * risk_pct      # How much to risk in USD
+notional = risk_amount / sl_pct      # Position size needed for that risk
+margin_needed = notional / leverage  # Margin required
 
-    Risk fixed % of capital per trade
-    """
-    risk_dollars = account_balance * risk_pct
-    price_distance = abs(entry_price - stop_loss)
-    position_size = risk_dollars / price_distance
+# Margin check (simulate exchange)
+if margin_needed > (equity - margin_used):
+    skip_trade()  # Insufficient margin
 
-    return position_size
+# Minimum notional check (Hyperliquid requirement)
+if notional < min_notional:  # 10 USDC
+    skip_trade()
 ```
 
 **Example**:
 ```
-Account: $1000
-Risk: 2% = $20
-Entry: $50,000 (BTC)
-Stop: $49,000 (2% below)
-Distance: $1,000
+Account: $10,000
+Risk: 2% = $200
+SL: 2%
+Leverage: 3x
 
-Position = $20 / $1000 = 0.02 BTC = $1000 notional
-Margin (10x leverage) = $100
+notional = $200 / 2% = $10,000
+margin_needed = $10,000 / 3 = $3,333
+
+If SL hit: Loss = $10,000 x 2% = $200 = 2% of account ✓
 ```
 
-**Pros**:
-- ✅ Simple to understand
-- ✅ Fixed risk per trade
+### Why Margin Tracking Matters
 
-**Cons**:
-- ❌ Ignores volatility differences between assets
-- ❌ Stop may be too tight (high volatility) or too wide (low volatility)
+Without tracking, the backtest can "use" more margin than available:
 
----
-
-#### **Mode 2: ATR-Based (Recommended)** ⭐⭐⭐
-
-```python
-def calculate_position_size_atr(
-    account_balance: float,
-    risk_pct: float = 0.02,
-    atr: float,
-    atr_stop_multiplier: float = 2.0,
-    current_price: float
-) -> tuple[float, float, float]:
-    """
-    ATR-based position sizing
-
-    Stop loss adapts to market volatility
-    """
-    # Calculate stop distance based on ATR
-    stop_distance = atr * atr_stop_multiplier
-
-    # Calculate position size
-    risk_dollars = account_balance * risk_pct
-    position_size = risk_dollars / stop_distance
-
-    # Calculate actual stop price
-    stop_loss = current_price - stop_distance  # for long
-    take_profit = current_price + (atr * 3.0)  # 1.5:1 R:R
-
-    return position_size, stop_loss, take_profit
 ```
+❌ WITHOUT tracking (bug):
+Trade 1: uses $10,000 margin (100%)
+Trade 2: uses $10,000 margin (100%)
+Total: $20,000 margin with $10,000 equity = IMPOSSIBLE
 
-**Example**:
-```
-Account: $1000
-Risk: 2% = $20
-BTC ATR(14): $1500
-ATR Multiplier: 2.0
-Current Price: $50,000
-
-Stop Distance = $1500 × 2.0 = $3000
-Position = $20 / $3000 = 0.00667 BTC = $333 notional
-Stop Loss = $50,000 - $3000 = $47,000
-Take Profit = $50,000 + ($1500 × 3.0) = $54,500
-
-Risk/Reward = $4500 / $3000 = 1.5:1 ✅
-```
-
-**Advantages**:
-- ✅ **Adapts to volatility** (BTC vs shitcoin have different ATR)
-- ✅ **Breathing room** (stop not hit by normal noise)
-- ✅ **Consistent risk** (2% of capital regardless of volatility)
-- ✅ **Industry standard** for commodity/crypto trading
-
-**Volatility Scaling**:
-```python
-# Low volatility → increase size
-if atr / price < 0.015:  # <1.5% ATR
-    position_size *= 1.5
-
-# High volatility → decrease size
-if atr / price > 0.05:  # >5% ATR
-    position_size *= 0.5
+✅ WITH tracking (correct):
+Trade 1: uses $3,333 margin → margin_used = $3,333
+Trade 2: available = $10,000 - $3,333 = $6,667
+         needs $3,333 → OK, margin_used = $6,666
+Trade 3: available = $3,334, needs $3,333 → OK
+Trade 4: available = $1, needs $3,333 → REJECTED (like exchange would)
 ```
 
 ---
 
-### StrategyCore Signal with ATR
-
-```python
-@dataclass
-class Signal:
-    """Trading signal with ATR-based risk management"""
-    direction: str  # 'long', 'short', 'close'
-
-    # ATR-based (preferred)
-    atr_stop_multiplier: float = 2.0  # Stop at 2×ATR
-    atr_take_multiplier: float = 3.0  # TP at 3×ATR
-
-    # OR Fixed price (fallback)
-    stop_loss: float = None  # Absolute price
-    take_profit: float = None  # Absolute price
-
-    # Position sizing (calculated by executor)
-    size: float = None  # Will be calculated
-
-    # Metadata
-    reason: str = ""
-    confidence: float = 1.0
-
-class Strategy_MOM_abc123(StrategyCore):
-    def generate_signal(self, df: pd.DataFrame) -> Signal | None:
-        # Calculate ATR
-        atr = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-        current_atr = atr.iloc[-1]
-
-        # Entry conditions
-        if entry_conditions_met:
-            return Signal(
-                direction='long',
-                atr_stop_multiplier=2.0,  # Stop at 2×ATR
-                atr_take_multiplier=3.0,  # TP at 3×ATR (1.5:1 R:R)
-                reason="RSI oversold + volume spike"
-            )
-```
-
----
-
-### Position Sizer (Executor Component)
-
-```python
-class PositionSizer:
-    """Calculates position size based on risk management config"""
-
-    def __init__(self, config: dict):
-        self.mode = config['risk']['sizing_mode']  # 'fixed' or 'atr'
-        self.risk_pct = config['risk']['fixed_fractional']['risk_per_trade_pct']
-        self.atr_config = config['risk']['atr']
-
-    def calculate(
-        self,
-        signal: Signal,
-        account_balance: float,
-        current_price: float,
-        atr: float
-    ) -> tuple[float, float, float]:
-        """
-        Calculate position size, stop loss, take profit
-
-        Returns:
-            (position_size, stop_loss, take_profit)
-        """
-        if self.mode == 'atr' and atr is not None:
-            # ATR-based sizing
-            stop_distance = atr * signal.atr_stop_multiplier
-            risk_dollars = account_balance * self.risk_pct
-
-            # Apply volatility scaling
-            atr_pct = atr / current_price
-            if atr_pct < 0.015:  # Low volatility
-                risk_dollars *= 1.5
-            elif atr_pct > 0.05:  # High volatility
-                risk_dollars *= 0.5
-
-            position_size = risk_dollars / stop_distance
-
-            # Calculate actual prices
-            if signal.direction == 'long':
-                stop_loss = current_price - stop_distance
-                take_profit = current_price + (atr * signal.atr_take_multiplier)
-            else:
-                stop_loss = current_price + stop_distance
-                take_profit = current_price - (atr * signal.atr_take_multiplier)
-
-        else:
-            # Fixed fractional sizing
-            stop_distance = abs(current_price - signal.stop_loss)
-            risk_dollars = account_balance * self.risk_pct
-            position_size = risk_dollars / stop_distance
-            stop_loss = signal.stop_loss
-            take_profit = signal.take_profit
-
-        # Apply position size limits
-        max_size = account_balance * self.config['risk']['fixed_fractional']['max_position_size_pct']
-        position_size = min(position_size, max_size)
-
-        return position_size, stop_loss, take_profit
-```
-
----
-
-### Risk Management Limits
+### Risk Management Config
 
 ```yaml
 # config/config.yaml
 risk:
-  sizing_mode: atr  # ATR recommended
-
   fixed_fractional:
-    risk_per_trade_pct: 0.02  # 2% per trade
-    max_position_size_pct: 0.20  # Max 20% in one position
-
-  atr:
-    period: 14
-    stop_multiplier: 2.0  # 2×ATR stop
-    take_profit_multiplier: 3.0  # 3×ATR TP (1.5:1 R:R)
-    min_risk_reward: 1.5
+    risk_per_trade_pct: 0.02       # 2% risk per trade
+    max_position_size_pct: 0.20   # Max 20% of equity per position
 
   limits:
-    # See config/config.yaml for actual values
-    max_open_positions_total: ...
-    max_open_positions_per_subaccount: ...
-    max_leverage: ...
-    max_correlated_positions: ...
+    max_open_positions_per_subaccount: 10
 
   emergency:
     max_portfolio_drawdown: 0.30  # 30% total DD
-    max_subaccount_drawdown: 0.25  # 25% subaccount DD
+    max_daily_loss: 0.10          # 10% daily DD
+    max_subaccount_drawdown: 0.25 # 25% subaccount DD
     max_consecutive_losses: 5
+
+hyperliquid:
+  min_notional: 10.0  # Minimum trade size in USDC
 ```
 
 ---

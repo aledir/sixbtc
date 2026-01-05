@@ -210,7 +210,9 @@ class TestDryRunFullCycle:
         """Test trading across multiple subaccounts (dry-run)"""
         from unittest.mock import patch, MagicMock
 
-        with patch('src.executor.hyperliquid_client.Info') as mock_info:
+        # Mock get_subaccount_count to return 3 (simulate 3 credentials in .env)
+        with patch('src.config.loader.get_subaccount_count', return_value=3), \
+             patch('src.executor.hyperliquid_client.Info') as mock_info:
             mock_info_instance = MagicMock()
             mock_info_instance.meta.return_value = {'universe': [
                 {'name': 'BTC', 'szDecimals': 4, 'maxLeverage': 50},
