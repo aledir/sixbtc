@@ -11,6 +11,7 @@ Coordinates scheduled tasks across the system:
 import asyncio
 import os
 import signal
+import subprocess
 import threading
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
@@ -48,12 +49,25 @@ class ContinuousSchedulerProcess:
         self.last_run: Dict[str, datetime] = {}
 
         # Scheduled tasks and their intervals (hours)
+        # Core tasks (always enabled)
         self.tasks = {
             'cleanup_stale_processing': 0.5,  # Every 30 min
             'cleanup_old_failed': 24,  # Daily
             'generate_daily_report': 24,  # Daily
             'refresh_data_cache': 4,  # Every 4 hours
         }
+
+        # Configurable tasks (check enabled flag)
+        scheduler_config = self.config._raw_config.get('scheduler', {}).get('tasks', {})
+
+        zombie_config = scheduler_config.get('cleanup_zombie_processes', {})
+        if zombie_config.get('enabled', False):
+            self.tasks['cleanup_zombie_processes'] = zombie_config['interval_hours']
+
+        restart_config = scheduler_config.get('daily_restart_services', {})
+        if restart_config.get('enabled', False):
+            self.tasks['daily_restart_services'] = restart_config['interval_hours']
+            self.restart_hour = restart_config['restart_hour']
 
         # Initialize last run times (use timezone-aware datetime)
         for task in self.tasks:
@@ -105,6 +119,14 @@ class ContinuousSchedulerProcess:
             elif task_name == 'refresh_data_cache':
                 result = await self._refresh_data_cache()
                 tracker.add_metadata('refreshed_timeframes', result.get('timeframes', []))
+
+            elif task_name == 'cleanup_zombie_processes':
+                result = await self._cleanup_zombie_processes()
+                tracker.add_metadata('killed_count', result.get('killed', 0))
+
+            elif task_name == 'daily_restart_services':
+                result = await self._daily_restart_services()
+                tracker.add_metadata('restarted', result.get('restarted', False))
 
             else:
                 logger.warning(f"Unknown task: {task_name}")
@@ -208,6 +230,157 @@ class ContinuousSchedulerProcess:
             logger.error(f"Data refresh failed: {e}")
 
         return {'timeframes': refreshed_timeframes}
+
+    async def _cleanup_zombie_processes(self) -> dict:
+        """
+        Kill zombie processes that accumulate over time.
+
+        Targets:
+        - Vite dev server instances (multiple can spawn from restarts)
+        - Only kills processes NOT in the supervisor process tree
+        """
+        killed = 0
+
+        try:
+            # Get current supervisor-managed frontend PID and all its descendants
+            result = subprocess.run(
+                ['supervisorctl', 'pid', 'sixbtc:frontend'],
+                capture_output=True,
+                text=True
+            )
+            supervisor_pid = result.stdout.strip() if result.returncode == 0 else None
+
+            # Get all descendants of supervisor frontend process
+            protected_pids: Set[str] = set()
+            if supervisor_pid:
+                protected_pids.add(supervisor_pid)
+                # Get all child PIDs recursively using pgrep -P
+                result = subprocess.run(
+                    ['pgrep', '-P', supervisor_pid],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    for child in result.stdout.strip().split('\n'):
+                        if child.strip():
+                            protected_pids.add(child.strip())
+                            # Also get grandchildren
+                            result2 = subprocess.run(
+                                ['pgrep', '-P', child.strip()],
+                                capture_output=True,
+                                text=True
+                            )
+                            if result2.returncode == 0:
+                                for grandchild in result2.stdout.strip().split('\n'):
+                                    if grandchild.strip():
+                                        protected_pids.add(grandchild.strip())
+
+            # Find all vite processes
+            result = subprocess.run(
+                ['pgrep', '-f', 'vite.*5173'],
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode != 0:
+                return {'killed': 0}
+
+            vite_pids = result.stdout.strip().split('\n')
+
+            for pid in vite_pids:
+                pid = pid.strip()
+                if not pid or not pid.isdigit():
+                    continue
+
+                # Skip protected processes (supervisor tree)
+                if pid in protected_pids:
+                    continue
+
+                # Kill the zombie process
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                    killed += 1
+                    logger.info(f"Killed zombie vite process: PID {pid}")
+                except (ProcessLookupError, PermissionError):
+                    pass
+
+            if killed > 0:
+                logger.info(f"Cleanup complete: killed {killed} zombie processes")
+            else:
+                logger.debug("No zombie processes found")
+
+        except Exception as e:
+            logger.error(f"Zombie cleanup failed: {e}")
+
+        return {'killed': killed}
+
+    async def _daily_restart_services(self) -> dict:
+        """
+        Restart all sixbtc services once per day.
+
+        Only runs at the configured restart_hour. No default - config required.
+        Skips restarting the scheduler itself (would interrupt this task).
+        """
+        # Check if it's the right hour (exact match only)
+        current_hour = datetime.now(UTC).hour
+        target_hour = self.restart_hour  # No default - must be in config
+
+        if current_hour != target_hour:
+            logger.debug(
+                f"Skipping daily restart: current hour {current_hour}, target {target_hour}"
+            )
+            return {'restarted': False, 'reason': 'wrong_hour'}
+
+        try:
+            logger.info("Starting daily services restart...")
+
+            # Get list of sixbtc services (excluding scheduler)
+            result = subprocess.run(
+                ['supervisorctl', 'status'],
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode != 0:
+                logger.error("Failed to get supervisor status")
+                return {'restarted': False, 'reason': 'supervisor_error'}
+
+            # Parse services to restart
+            services_to_restart = []
+            for line in result.stdout.strip().split('\n'):
+                if line.startswith('sixbtc:') and 'RUNNING' in line:
+                    service = line.split()[0]
+                    # Skip scheduler (would kill this process)
+                    if 'scheduler' not in service:
+                        services_to_restart.append(service)
+
+            if not services_to_restart:
+                logger.info("No services to restart")
+                return {'restarted': False, 'reason': 'no_services'}
+
+            # Restart services one by one
+            restarted = []
+            for service in services_to_restart:
+                result = subprocess.run(
+                    ['supervisorctl', 'restart', service],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    restarted.append(service)
+                    logger.info(f"Restarted {service}")
+                else:
+                    logger.warning(f"Failed to restart {service}: {result.stderr}")
+
+                # Small delay between restarts
+                await asyncio.sleep(2)
+
+            logger.info(f"Daily restart complete: {len(restarted)} services restarted")
+            return {'restarted': True, 'services': restarted, 'count': len(restarted)}
+
+        except Exception as e:
+            logger.error(f"Daily restart failed: {e}")
+            return {'restarted': False, 'reason': str(e)}
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""

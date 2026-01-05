@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Test completo del ciclo di vita di una strategia
+Full strategy lifecycle test
 
-Testa:
-1. Generazione strategia (da template)
-2. Salvataggio nel database
-3. Backtesting con VectorBT
-4. Classificazione e scoring
-5. Deployment simulato su subaccount
-6. Esecuzione segnali in dry-run
+Tests:
+1. Strategy generation (from template)
+2. Database save
+3. Backtesting with Numba-JIT engine
+4. Classification and scoring
+5. Simulated subaccount deployment
+6. Dry-run signal execution
 
-Eseguire con:
+Run with:
     python scripts/test_lifecycle.py
 """
 

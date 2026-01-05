@@ -53,9 +53,9 @@ The backtester reads entry_signal as a numpy array - NO per-bar loops!
 
 {% if strategy_type == 'MOM' %}
 MOMENTUM Strategy:
-- Identify trending moves early using momentum indicators
-- RSI divergences, MACD crossovers, ROC, momentum oscillators
-- Entry on breakouts or momentum confirmation
+- Identify trending moves using momentum state (not crossover events)
+- RSI above/below threshold, MACD histogram positive/negative, ROC direction
+- Entry when momentum STATE is favorable (e.g., RSI > 50 AND MACD > 0)
 {% elif strategy_type == 'REV' %}
 MEAN REVERSION Strategy:
 - Identify overbought/oversold extreme conditions
@@ -63,9 +63,9 @@ MEAN REVERSION Strategy:
 - Entry on bounces from statistical extremes
 {% elif strategy_type == 'TRN' %}
 TREND FOLLOWING Strategy:
-- Ride established trends
-- Moving average crossovers, ADX confirmation, trend strength
-- Entry on pullbacks within strong trends
+- Ride established trends using trend STATE indicators
+- EMA alignment (fast > slow = uptrend), ADX > threshold, price above MA
+- Entry when trend STATE is confirmed (e.g., close > EMA50 AND ADX > 25)
 {% elif strategy_type == 'BRE' %}
 BREAKOUT Strategy:
 - Trade range/consolidation breakouts
@@ -96,9 +96,9 @@ Choose ONE primary category for your entry logic. This creates diversity across 
    Example: `rsi = ta.RSI(df['close'], {{ "{{ indicator_period }}" }})`
 
 **2. PRICE ACTION** (No indicators, pure price)
-   - Break of previous N bars high or low
+   - Price above/below N-bar high or low (state, not breakout event)
    - Higher highs / lower lows sequence
-   - Example: `break_high = df['close'] > df['high'].shift(1).rolling({{ "{{ lookback }}" }}).max()`
+   - Example: `above_range = df['close'] > df['high'].rolling({{ "{{ lookback }}" }}).max().shift(1)`
 
 **3. STRUCTURE-BASED** (Market structure)
    - Support/resistance levels (swing highs/lows)
@@ -108,6 +108,39 @@ Choose ONE primary category for your entry logic. This creates diversity across 
 **4. VOLUME-BASED** (Volume as primary trigger)
    - Volume spike entry (volume > N x average)
    - Example: `vol_spike = df['volume'] > df['volume'].rolling(20).mean() * {{ "{{ volume_mult }}" }}`
+
+=== CRITICAL: STATE-BASED vs CROSSOVER LOGIC ===
+
+Your entry logic MUST use STATE-BASED conditions, NOT crossover events.
+
+**WRONG - CROSSOVER (too rare, may produce 0 signals in 30 days):**
+```python
+# This requires a TRANSITION to happen at exactly this bar
+ema_fast_prev = df['ema_fast'].shift(1)
+ema_slow_prev = df['ema_slow'].shift(1)
+crossover = (ema_fast_prev <= ema_slow_prev) & (df['ema_fast'] > df['ema_slow'])
+df['entry_signal'] = crossover  # BAD: may be False for entire holdout period!
+```
+
+**CORRECT - STATE-BASED (reliable, regular signals):**
+```python
+# This checks CURRENT CONDITIONS - triggers whenever state is true
+trend_up = df['ema_fast'] > df['ema_slow']
+momentum_strong = df['rsi'] > 50
+df['entry_signal'] = trend_up & momentum_strong  # GOOD: signals on any matching bar
+```
+
+**RULES:**
+1. NEVER use shift(1) to compare previous vs current values for entry detection
+2. Check CURRENT indicator values, not transitions between bars
+3. Combine 2-3 state conditions for filtering (e.g., trend + momentum + volume)
+4. Entry should trigger on ANY bar meeting conditions, not on specific events
+
+**WHY THIS MATTERS:**
+- Crossover events happen ~1-2 times per month
+- Your strategy is validated on 30-day holdout period
+- If crossover doesn't happen in holdout → 0 trades → strategy rejected
+- State-based logic triggers regularly → meaningful validation
 
 === PARAMETERIZATION RULES ===
 
@@ -350,6 +383,17 @@ Before generating, verify:
 [ ] All Jinja2 placeholders use double braces {{ "{{ }}" }}
 [ ] Parameter schema includes sl_pct and tp_pct
 [ ] 50-200 total parameter combinations
+
+=== SELF-CHECK: ENTRY LOGIC VALIDATION ===
+
+Before generating, verify your entry_signal logic:
+
+[ ] Uses STATE-BASED conditions (e.g., RSI < 30, EMA_fast > EMA_slow)
+[ ] Does NOT use shift(1) comparisons for entry detection (crossover pattern)
+[ ] Combines 2-3 conditions for filtering
+[ ] Expected to trigger on ~5-20% of bars (not <1%)
+
+If your entry logic requires a TRANSITION (previous vs current), REWRITE IT as a STATE check.
 
 Generate the complete parameterized template now.
 

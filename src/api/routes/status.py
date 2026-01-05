@@ -140,8 +140,7 @@ def get_pipeline_counts() -> Dict[str, int]:
     counts = {
         "GENERATED": 0,
         "VALIDATED": 0,
-        "TESTED": 0,
-        "SELECTED": 0,
+        "ACTIVE": 0,
         "LIVE": 0,
         "RETIRED": 0,
         "FAILED": 0,

@@ -128,7 +128,7 @@ class StrategyProcessor:
 
         Args:
             strategy_id: Strategy ID (UUID)
-            new_status: New status to set (e.g., "VALIDATED", "TESTED")
+            new_status: New status to set (e.g., "VALIDATED", "ACTIVE")
 
         Returns:
             True if released successfully, False otherwise
@@ -156,8 +156,8 @@ class StrategyProcessor:
             strategy.processing_started_at = None
 
             # Update relevant timestamps based on new status
-            if new_status == "TESTED":
-                strategy.tested_at = datetime.now(UTC)
+            if new_status == "ACTIVE":
+                strategy.last_backtested_at = datetime.now(UTC)
             elif new_status == "LIVE":
                 strategy.live_since = datetime.now(UTC)
             elif new_status == "RETIRED":
@@ -457,7 +457,7 @@ class StrategyProcessor:
 
         try:
             results = {}
-            for status in ['GENERATED', 'VALIDATED', 'TESTED', 'SELECTED', 'LIVE', 'RETIRED']:
+            for status in ['GENERATED', 'VALIDATED', 'ACTIVE', 'LIVE', 'RETIRED', 'FAILED']:
                 count = (
                     session.query(Strategy)
                     .filter(

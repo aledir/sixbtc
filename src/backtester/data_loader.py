@@ -165,7 +165,7 @@ class BacktestDataLoader:
         holdout_days: int = 30,
         end_date: Optional[datetime] = None,
         target_count: Optional[int] = None,
-        min_coverage_pct: float = 0.90
+        min_coverage_pct: float = 0.80
     ) -> tuple:
         """
         Load training/holdout data for multiple symbols
@@ -219,10 +219,26 @@ class BacktestDataLoader:
                 training_coverage = len(training_df) / expected_training
                 holdout_coverage = len(holdout_df) / expected_holdout
 
-                if training_coverage < min_coverage_pct or holdout_coverage < min_coverage_pct:
+                # DEBUG: Log actual bars loaded vs expected
+                logger.debug(
+                    f"{symbol} {timeframe}: "
+                    f"Training {len(training_df)}/{expected_training:.0f} bars ({training_coverage:.1%}), "
+                    f"Holdout {len(holdout_df)}/{expected_holdout:.0f} bars ({holdout_coverage:.1%})"
+                )
+
+                # Smart coverage check: Accept if >= 80% coverage OR >= min absolute bars
+                # This handles data gaps gracefully (maintenance windows, delistings, etc.)
+                min_relaxed_coverage = 0.80
+                min_training_bars = 1000  # Absolute minimum for statistical significance
+                min_holdout_bars = 50     # Absolute minimum for holdout validation
+
+                training_ok = (training_coverage >= min_relaxed_coverage or len(training_df) >= min_training_bars)
+                holdout_ok = (holdout_coverage >= min_relaxed_coverage or len(holdout_df) >= min_holdout_bars)
+
+                if not training_ok or not holdout_ok:
                     logger.debug(
-                        f"Skipping {symbol}: coverage too low "
-                        f"(training={training_coverage:.1%}, holdout={holdout_coverage:.1%})"
+                        f"Skipping {symbol}: insufficient data "
+                        f"(training={len(training_df):.0f} bars, holdout={len(holdout_df):.0f} bars)"
                     )
                     continue
 
@@ -255,7 +271,7 @@ class BacktestDataLoader:
         days: int = 180,
         end_date: Optional[datetime] = None,
         target_count: Optional[int] = None,
-        min_coverage_pct: float = 0.90
+        min_coverage_pct: float = 0.80
     ) -> Dict[str, pd.DataFrame]:
         """
         Load OHLCV data for multiple symbols

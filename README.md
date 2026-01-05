@@ -1,12 +1,12 @@
 # SixBTC - AI-Powered Multi-Strategy Trading System
 
-**Autonomous trading system for Hyperliquid perpetual futures** powered by AI-generated strategies, VectorBT backtesting, and adaptive risk management.
+**Autonomous trading system for Hyperliquid perpetual futures** powered by AI-generated strategies, Numba-JIT backtesting, and adaptive risk management.
 
 ## 🎯 Overview
 
 SixBTC is a production-grade cryptocurrency trading system that:
 - **Generates** trading strategies using AI (Claude, Gemini, Codex)
-- **Backtests** strategies with VectorBT (1000x faster than Freqtrade)
+- **Backtests** strategies with Numba-JIT engine (ultra-fast vectorized simulation)
 - **Validates** strategies with lookahead detection and shuffle testing
 - **Deploys** top performers to Hyperliquid subaccounts
 - **Monitors** live performance and auto-rotates underperformers
@@ -351,6 +351,6 @@ Proprietary - All Rights Reserved
 
 ---
 
-**Built with**: Python, VectorBT, Hyperliquid SDK, PostgreSQL, Claude AI
+**Built with**: Python, Numba, Hyperliquid SDK, PostgreSQL, Claude AI
 
 **Last Updated**: 2025-12-20 | **Version**: 1.0.0

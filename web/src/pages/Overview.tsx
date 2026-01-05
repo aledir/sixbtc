@@ -61,8 +61,7 @@ function PipelineStatus({ pipeline }: { pipeline: PipelineCounts }) {
   const stages: { key: keyof PipelineCounts; label: string; color: string }[] = [
     { key: 'GENERATED', label: 'Generated', color: 'bg-gray-500' },
     { key: 'VALIDATED', label: 'Validated', color: 'bg-blue-500' },
-    { key: 'TESTED', label: 'Tested', color: 'bg-purple-500' },
-    { key: 'SELECTED', label: 'Selected', color: 'bg-warning' },
+    { key: 'ACTIVE', label: 'Active Pool', color: 'bg-purple-500' },
     { key: 'LIVE', label: 'Live', color: 'bg-profit' },
   ];
 
@@ -228,7 +227,7 @@ export default function Overview() {
         <KPICard
           label="Live Strategies"
           value={`${status.pipeline.LIVE || 0}`}
-          subValue={`${status.pipeline.TESTED || 0} tested`}
+          subValue={`${status.pipeline.ACTIVE || 0} in pool`}
           icon={Zap}
           trend="neutral"
         />

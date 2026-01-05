@@ -15,6 +15,7 @@ from .logs import router as logs_router
 from .config import router as config_router
 from .scheduler import router as scheduler_router
 from .coins import router as coins_router
+from .metrics import router as metrics_router
 
 __all__ = [
     "status_router",
@@ -31,4 +32,5 @@ __all__ = [
     "config_router",
     "scheduler_router",
     "coins_router",
+    "metrics_router",
 ]

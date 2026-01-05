@@ -45,11 +45,13 @@ async def get_pipeline_health():
 
             # Get limits from config (NO hardcoding!)
             limits_config = config['pipeline']['queue_limits']
+            active_pool_config = config.get('active_pool', {})
+            rotator_config = config.get('rotator', {})
             limits = {
                 'GENERATED': limits_config['generated'],
                 'VALIDATED': limits_config['validated'],
-                'TESTED': limits_config['tested'],
-                'SELECTED': 10,  # Max 10 selected (from config if exists)
+                'ACTIVE': active_pool_config.get('max_size', 300),
+                'LIVE': rotator_config.get('max_live_strategies', 10),
             }
 
             # Build stage health for each pipeline stage
@@ -77,24 +79,24 @@ async def get_pipeline_health():
             )
             stages.append(stage_data)
 
-            # Stage 3: Backtesting
+            # Stage 3: Active Pool (backtested strategies)
             stage_data = _build_stage_health(
                 session=session,
-                stage_name="backtesting",
-                status="TESTED",
-                queue_depth=depths['TESTED'],
-                queue_limit=limits['TESTED'],
+                stage_name="active_pool",
+                status="ACTIVE",
+                queue_depth=depths.get('ACTIVE', 0),
+                queue_limit=limits['ACTIVE'],
                 config=config
             )
             stages.append(stage_data)
 
-            # Stage 4: Classification
+            # Stage 4: Live (deployed strategies)
             stage_data = _build_stage_health(
                 session=session,
-                stage_name="classification",
-                status="SELECTED",
-                queue_depth=depths['SELECTED'],
-                queue_limit=limits['SELECTED'],
+                stage_name="live",
+                status="LIVE",
+                queue_depth=depths.get('LIVE', 0),
+                queue_limit=limits['LIVE'],
                 config=config
             )
             stages.append(stage_data)
@@ -246,8 +248,8 @@ async def get_pipeline_stats(
             for status_name, db_status in [
                 ("generation", "GENERATED"),
                 ("validation", "VALIDATED"),
-                ("backtesting", "TESTED"),
-                ("classification", "SELECTED"),
+                ("active_pool", "ACTIVE"),
+                ("live", "LIVE"),
             ]:
                 # Current throughput
                 throughput = PipelineMetrics.calculate_throughput(session, db_status, hours=1)
@@ -275,8 +277,8 @@ async def get_pipeline_stats(
             # Totals
             total_generated = depths['GENERATED']
             total_validated = depths['VALIDATED']
-            total_backtested = depths['TESTED']
-            total_selected = depths['SELECTED']
+            total_active = depths.get('ACTIVE', 0)
+            total_live = depths.get('LIVE', 0)
 
             # Overall throughput
             overall_throughput = PipelineMetrics.get_end_to_end_throughput(session, hours=1)
@@ -284,11 +286,13 @@ async def get_pipeline_stats(
             # Bottleneck
             config = load_config()._raw_config
             limits_config = config['pipeline']['queue_limits']
+            active_pool_config = config.get('active_pool', {})
+            rotator_config = config.get('rotator', {})
             limits = {
                 'GENERATED': limits_config['generated'],
                 'VALIDATED': limits_config['validated'],
-                'TESTED': limits_config['tested'],
-                'SELECTED': 10,
+                'ACTIVE': active_pool_config.get('max_size', 300),
+                'LIVE': rotator_config.get('max_live_strategies', 10),
             }
             bottleneck = PipelineMetrics.detect_bottleneck(depths, limits) or "none"
 
@@ -297,8 +301,8 @@ async def get_pipeline_stats(
                 data_points=data_points,
                 total_generated=total_generated,
                 total_validated=total_validated,
-                total_backtested=total_backtested,
-                total_selected=total_selected,
+                total_active=total_active,
+                total_live=total_live,
                 overall_throughput=round(overall_throughput, 2),
                 bottleneck_stage=bottleneck
             )
@@ -320,8 +324,8 @@ async def get_quality_distribution():
         with get_session() as session:
             distributions = []
 
-            # Analyze TESTED, SELECTED, and LIVE stages
-            for status in ['TESTED', 'SELECTED', 'LIVE']:
+            # Analyze ACTIVE and LIVE stages
+            for status in ['ACTIVE', 'LIVE']:
                 # Get strategies at this stage with backtest results
                 strategies = session.query(Strategy, BacktestResult).join(
                     BacktestResult,

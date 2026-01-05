@@ -7,8 +7,7 @@ import { X, Search, Code, BarChart2, Activity } from 'lucide-react';
 const STATUS_COLORS: Record<string, string> = {
   GENERATED: 'bg-gray-500/20 text-gray-400',
   VALIDATED: 'bg-blue-500/20 text-blue-400',
-  TESTED: 'bg-purple-500/20 text-purple-400',
-  SELECTED: 'bg-amber-500/20 text-amber-400',
+  ACTIVE: 'bg-purple-500/20 text-purple-400',
   LIVE: 'bg-profit/20 text-profit',
   RETIRED: 'bg-gray-500/20 text-gray-500',
   FAILED: 'bg-loss/20 text-loss',
@@ -302,8 +301,7 @@ export default function Strategies() {
           <option value="">All Status</option>
           <option value="GENERATED">Generated</option>
           <option value="VALIDATED">Validated</option>
-          <option value="TESTED">Tested</option>
-          <option value="SELECTED">Selected</option>
+          <option value="ACTIVE">Active Pool</option>
           <option value="LIVE">Live</option>
           <option value="RETIRED">Retired</option>
           <option value="FAILED">Failed</option>

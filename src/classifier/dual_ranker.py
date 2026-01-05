@@ -64,11 +64,12 @@ class DualRanker:
             List of strategy dicts with ranking info
         """
         with get_session() as session:
-            # Get strategies with their backtest results
+            # Get strategies with their OPTIMAL TF backtest results
             results = (
                 session.query(Strategy, BacktestResult)
                 .join(BacktestResult, Strategy.id == BacktestResult.strategy_id)
-                .filter(Strategy.status.in_(['TESTED', 'SELECTED']))
+                .filter(Strategy.status.in_(['TESTED', 'SELECTED', 'ACTIVE']))
+                .filter(BacktestResult.is_optimal_tf == True)  # Only optimal TF results
                 .order_by(BacktestResult.sharpe_ratio.desc())
                 .limit(limit * 2)  # Get more to filter
                 .all()
@@ -99,12 +100,21 @@ class DualRanker:
 
                 # Calculate score if not cached
                 if strategy.score_backtest is None:
+                    # Fast Fail: skip strategies without weighted metrics
+                    if backtest.weighted_max_drawdown is None:
+                        logger.warning(
+                            f"Strategy {strategy.name} missing weighted_max_drawdown, skipping. "
+                            f"Re-run backtest to populate weighted fields."
+                        )
+                        continue
+
                     # Use weighted metrics (training 40% + holdout 60%)
                     metrics = {
-                        'expectancy': backtest.weighted_expectancy or 0,
-                        'sharpe_ratio': backtest.weighted_sharpe_pure or 0,
-                        'consistency': backtest.weighted_win_rate or 0,
-                        'wf_stability': backtest.weighted_walk_forward_stability or 0
+                        'expectancy': backtest.weighted_expectancy or 0.0,
+                        'sharpe_ratio': backtest.weighted_sharpe_pure or 0.0,
+                        'consistency': backtest.weighted_win_rate or 0.0,
+                        'wf_stability': (backtest.weighted_walk_forward_stability if backtest.weighted_walk_forward_stability is not None else 1.0),  # 1.0 = worst stability
+                        'max_drawdown': backtest.weighted_max_drawdown,
                     }
                     score = self.backtest_scorer.score(metrics)
 

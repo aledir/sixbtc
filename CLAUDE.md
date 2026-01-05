@@ -1,6 +1,6 @@
 # SixBTC - AI-Powered Trading System Development Guide
 
-**Last Updated**: 2025-12-28 | **Python**: 3.11+ | **Core**: VectorBT + Hyperliquid SDK
+**Last Updated**: 2026-01-04 | **Python**: 3.11+ | **Core**: Numba-JIT Backtester + Hyperliquid SDK
 
 ---
 
@@ -139,6 +139,58 @@ class Executor:
 
 ---
 
+## ⚠️ TERMINOLOGY - CRITICAL
+
+### THERE IS ONLY ONE CONCEPT: STRATEGY
+
+**FUNDAMENTAL RULE - NO EXCEPTIONS**:
+There is NO such thing as "parametric variation", "template instance", or "strategy variant".
+There is ONLY: **STRATEGY**.
+
+**WHAT IS A STRATEGY**:
+- ✅ A unique entity with: UUID, code, parameters, backtest results, deployment capability
+- ✅ Each strategy is INDEPENDENT and COMPLETE
+- ✅ How it was generated (AI prompt, pattern-based, parametric expansion) is IRRELEVANT to its identity
+- ✅ One strategy = one UUID = one database record = one deployable entity
+
+**CORRECT TERMINOLOGY**:
+- ✅ "Parametric backtest generates 400 STRATEGIES from base code"
+- ✅ "Each strategy has unique code (parameters embedded), unique UUID, unique results"
+- ✅ "The fact that 400 strategies derive from the same base code is a GENERATION DETAIL, not an ontological property"
+- ✅ "Pattern-based generates 1 strategy, AI-based generates 400 strategies - both are just STRATEGIES"
+
+**INCORRECT TERMINOLOGY** (causes confusion and bugs):
+- ❌ "Parametric variation" → Say: "strategy generated via parametric expansion"
+- ❌ "Template vs variations" → Say: "base code → N strategies"
+- ❌ "Variant #47 of template abc123" → Say: "strategy xyz789"
+- ❌ "Combination" when referring to a strategy → Say: "strategy"
+
+**NAMING CONVENTION**:
+- ✅ `Strategy_MOM_xyz789` (ONE UUID - the strategy's unique ID)
+- ❌ `Strategy_MOM_abc123_p8a9f2d1c` (double UUID - implies template hierarchy)
+
+**CODE IMPLICATIONS**:
+- Variable names: `strategies` not `variations`, `generated_strategies` not `template_instances`
+- No "template_id" field in Strategy model (it's just metadata, not identity)
+- Each strategy goes through FULL pipeline: GENERATED → VALIDATED → TESTED → SELECTED → LIVE
+- Pattern-based strategies = AI-based strategies = Parametric strategies (all are STRATEGIES)
+
+**WHY THIS MATTERS**:
+- Prevents bugs like "parametric variations skip validation" (wrong - they're strategies, need validation)
+- Prevents confusion like "400 variations of one strategy" (wrong - 400 separate strategies)
+- Ensures uniform treatment in pipeline (all strategies follow same flow)
+
+**EXCEPTIONS** (where "combination" IS correct):
+- ✅ "Parameter combination" = the SET of parameters (SL × TP × leverage × exit) used to generate a strategy
+- ✅ "Symbol × timeframe combinations" = data planning (not strategies)
+- ✅ Mathematical context: "5 × 5 × 4 × 3 = 300 parameter combinations → 300 strategies"
+
+**GOLDEN RULE**:
+If it has a UUID and lives in the `strategies` table → it's a **STRATEGY**.
+Period. No prefixes, no hierarchies, no "types of strategies".
+
+---
+
 ## 🌍 LANGUAGE AND CODE STYLE
 
 ### Rule #0: Language Requirements
@@ -179,7 +231,7 @@ class Strategy_MOM_a7f3d8b2(StrategyCore):
         pass
 ```
 
-**Why**: Ensures same code works in both backtest (VectorBT) and live (Hyperliquid SDK).
+**Why**: Ensures same code works in both backtest and live (Hyperliquid SDK).
 
 ### Rule #2: No Lookahead Bias
 ```python
@@ -275,8 +327,8 @@ sixbtc/
 │   │   ├── strategy_builder.py # Combine patterns → StrategyCore
 │   │   └── templates/          # Jinja2 prompts
 │   │
-│   ├── backtester/             # VectorBT engine
-│   │   ├── vectorbt_engine.py  # Backtest executor
+│   ├── backtester/             # Numba-JIT backtest engine
+│   │   ├── backtest_engine.py  # Backtest executor (Numba-optimized)
 │   │   ├── data_loader.py      # Binance data downloader
 │   │   ├── optimizer.py        # Walk-forward parameter tuning
 │   │   └── validator.py        # Lookahead + shuffle test
@@ -334,7 +386,7 @@ sixbtc/
 │ PHASE 2: BACKTESTING (parallel, 10 workers)                 │
 ├──────────────────────────────────────────────────────────────┤
 │ 1. Load Binance data (HL-Binance intersection)              │
-│ 2. Run VectorBT backtest (6 months, all timeframes)         │
+│ 2. Run backtest (6 months, all timeframes)                  │
 │ 3. Calculate metrics: Sharpe, Win%, DD, Edge, Consistency   │
 │ 4. Lookahead validation (AST + shuffle test)                │
 │ 5. Walk-forward optimization (limited parameters)           │
@@ -977,7 +1029,7 @@ After testing phase passes:
 ## 📚 EXTERNAL REFERENCES
 
 ### Key Dependencies
-- **VectorBT**: https://vectorbt.dev/
+- **Numba**: https://numba.pydata.org/ (JIT compilation for fast backtesting)
 - **Hyperliquid SDK**: https://github.com/hyperliquid-dex/hyperliquid-python-sdk
 - **Pattern Discovery**: Internal API at `http://localhost:8001`
 - **Binance CCXT**: https://docs.ccxt.com/

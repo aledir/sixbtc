@@ -21,11 +21,11 @@ async def get_validation_report():
         with get_session() as session:
             # Count strategies by validation status
             total = session.query(Strategy).filter(
-                Strategy.status.in_(['VALIDATED', 'TESTED', 'SELECTED', 'LIVE', 'FAILED'])
+                Strategy.status.in_(['VALIDATED', 'ACTIVE', 'LIVE', 'FAILED'])
             ).count()
 
             passed_lookahead = session.query(Strategy).filter(
-                Strategy.status.in_(['VALIDATED', 'TESTED', 'SELECTED', 'LIVE']),
+                Strategy.status.in_(['VALIDATED', 'ACTIVE', 'LIVE']),
             ).count()
 
             failed = session.query(Strategy).filter(

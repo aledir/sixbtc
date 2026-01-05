@@ -29,14 +29,9 @@ async def list_templates():
                 ).count()
 
                 # Count by status
-                tested = session.query(Strategy).filter(
+                active = session.query(Strategy).filter(
                     Strategy.template_id == t.id,
-                    Strategy.status == 'TESTED'
-                ).count()
-
-                selected = session.query(Strategy).filter(
-                    Strategy.template_id == t.id,
-                    Strategy.status == 'SELECTED'
+                    Strategy.status == 'ACTIVE'
                 ).count()
 
                 live = session.query(Strategy).filter(
@@ -51,10 +46,9 @@ async def list_templates():
                     'timeframe': t.timeframe,
                     'structure_id': t.structure_id,
                     'total_generated': total_generated,
-                    'tested': tested,
-                    'selected': selected,
+                    'active': active,
                     'live': live,
-                    'success_rate': selected / max(tested, 1),
+                    'success_rate': live / max(active, 1),
                     'created_at': t.created_at.isoformat() if t.created_at else None,
                 })
 

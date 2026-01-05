@@ -6,7 +6,6 @@
 
 # Core Trading & Backtesting
 # ==============================================================================
-vectorbt==0.26.0                # Fast backtesting engine (1000x faster than Freqtrade)
 pandas==2.2.0                   # Data manipulation
 numpy==1.26.3                   # Numerical operations
 ta-lib==0.4.28                  # Technical indicators (requires TA-Lib C library)

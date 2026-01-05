@@ -7,6 +7,8 @@ Monitors system health and performance:
 3. Live trading performance
 4. Emergency stop conditions
 5. Trade synchronization from Hyperliquid
+6. Live strategy performance tracking (new)
+7. Strategy retirement decisions (new)
 
 Runs every 15-30 seconds to track system health and sync closed trades.
 """
@@ -22,6 +24,8 @@ from src.config import load_config
 from src.database import get_session, Strategy, Subaccount, Trade, PerformanceSnapshot, StrategyProcessor
 from src.data.hyperliquid_websocket import HyperliquidDataProvider, get_data_provider
 from src.executor.trade_sync import TradeSync
+from src.monitor.performance_tracker import PerformanceTracker
+from src.monitor.retirement_policy import RetirementPolicy
 from src.utils import get_logger, setup_logging
 
 # Initialize logging at module load
@@ -78,9 +82,21 @@ class ContinuousMonitorProcess:
             else:
                 logger.info("Trade sync disabled in config")
 
+        # Performance tracking and retirement (new components)
+        self.performance_tracker = PerformanceTracker(self.config)
+        self.retirement_policy = RetirementPolicy(self.config)
+
+        # Check interval for retirement (from monitor config)
+        monitor_config = self.config.get('monitor', {})
+        self.retirement_check_interval = monitor_config.get('check_interval_minutes', 15) * 60
+
+        # Track last retirement check (use UTC-aware datetime)
+        self._last_retirement_check = datetime.min.replace(tzinfo=UTC)
+
         logger.info(
             f"ContinuousMonitorProcess initialized: "
-            f"interval={self.check_interval_seconds}s, trade_sync={self.trade_sync_enabled}"
+            f"interval={self.check_interval_seconds}s, trade_sync={self.trade_sync_enabled}, "
+            f"retirement_check_interval={self.retirement_check_interval}s"
         )
 
     async def run_continuous(self):
@@ -108,12 +124,44 @@ class ContinuousMonitorProcess:
                 # Record health snapshot
                 self._record_health_snapshot(health)
 
+                # Performance tracking and retirement check (every N minutes)
+                await self._run_retirement_cycle()
+
             except Exception as e:
                 logger.error(f"Monitoring error: {e}", exc_info=True)
 
             await asyncio.sleep(self.check_interval_seconds)
 
         logger.info("Monitoring loop ended")
+
+    async def _run_retirement_cycle(self):
+        """
+        Run performance update and retirement check.
+
+        Only runs every retirement_check_interval to avoid too frequent checks.
+        """
+        now = datetime.now(UTC)
+        elapsed = (now - self._last_retirement_check).total_seconds()
+
+        if elapsed < self.retirement_check_interval:
+            return
+
+        self._last_retirement_check = now
+
+        try:
+            # 1. Update live performance metrics for all LIVE strategies
+            perf_results = self.performance_tracker.update_all_live_strategies()
+
+            # 2. Run retirement check (evaluate and retire underperformers)
+            retire_results = self.retirement_policy.run_retirement_check()
+
+            logger.info(
+                f"Retirement cycle: updated={perf_results.get('updated', 0)}, "
+                f"retired={retire_results.get('retired', 0)}"
+            )
+
+        except Exception as e:
+            logger.error(f"Retirement cycle failed: {e}", exc_info=True)
 
     async def _initialize_data_provider(self):
         """Initialize WebSocket data provider for trade sync."""

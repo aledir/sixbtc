@@ -29,17 +29,25 @@ class StrategyScorer:
         Initialize scorer with weights
 
         Args:
-            config: Configuration dict with 'classification' section
+            config: Configuration dict or Pydantic object with 'classification' section
         """
-        if config and 'classification' in config:
+        # Support both dict and Pydantic config objects
+        has_classification = (
+            (hasattr(config, 'classification') and config.classification) or
+            (isinstance(config, dict) and 'classification' in config)
+        )
+
+        if config and has_classification:
+            # Get classification section (works for both dict and Pydantic)
+            classification = getattr(config, 'classification', None) or config.get('classification')
             # NO defaults - use config values directly (Fast Fail)
-            self.weights = config['classification']['score_weights']
-            # Load filter thresholds from config (with sensible defaults)
-            filter_config = config['classification'].get('filter_thresholds', {})
+            self.weights = classification['score_weights']
+            # Load filter thresholds from config
+            filter_config = classification.get('filter_thresholds', {})
             self.filter_min_sharpe = filter_config.get('min_sharpe', 0.5)
             self.filter_min_win_rate = filter_config.get('min_win_rate', 0.40)
             self.filter_min_trades = filter_config.get('min_trades', 20)
-        elif config and 'score_weights' in config:
+        elif config and (hasattr(config, 'score_weights') or (isinstance(config, dict) and 'score_weights' in config)):
             # Direct config (for tests)
             self.weights = config['score_weights']
             self.filter_min_sharpe = config.get('filter_min_sharpe', 0.5)
@@ -72,15 +80,26 @@ class StrategyScorer:
                 - sharpe_ratio: Sharpe ratio
                 - consistency: Time-in-profit percentage (0-1)
                 - wf_stability: Walk-forward stability (0-1, lower=better)
+                - max_drawdown: Maximum drawdown (0-1, lower=better)
 
         Returns:
             Composite score (0-100 scale)
         """
+        # Extract with fallbacks (guard against None values)
+        edge = metrics.get('expectancy', 0) or 0.0
+        sharpe = metrics.get('sharpe_ratio', 0) or 0.0
+        consistency = metrics.get('consistency', 0) or 0.0
+        wf_stability = metrics.get('wf_stability', 1)
+        if wf_stability is None:
+            wf_stability = 1.0  # Worst stability = no walk-forward data
+        max_drawdown = metrics.get('max_drawdown', 0) or 0.0
+
         # Normalize each metric to 0-1 scale
-        edge_score = self._normalize_edge(metrics.get('expectancy', 0))
-        sharpe_score = self._normalize_sharpe(metrics.get('sharpe_ratio', 0))
-        consistency_score = metrics.get('consistency', 0)  # Already 0-1
-        stability_score = 1 - metrics.get('wf_stability', 1)  # Lower is better
+        edge_score = self._normalize_edge(edge)
+        sharpe_score = self._normalize_sharpe(sharpe)
+        consistency_score = consistency  # Already 0-1
+        stability_score = 1 - wf_stability  # Lower is better (now safe)
+        drawdown_score = self._normalize_drawdown(max_drawdown)  # Lower DD = higher score
 
         # Weighted sum
         score = (
@@ -89,6 +108,10 @@ class StrategyScorer:
             self.weights['consistency'] * consistency_score +
             self.weights['stability'] * stability_score
         )
+
+        # Add drawdown penalty if weight configured
+        if 'drawdown' in self.weights:
+            score += self.weights['drawdown'] * drawdown_score
 
         # Scale to 0-100
         return min(max(score * 100, 0), 100)
@@ -126,6 +149,23 @@ class StrategyScorer:
         """
         return self._normalize(sharpe, min_val, max_val)
 
+    def _normalize_drawdown(self, drawdown: float, max_dd: float = 0.30) -> float:
+        """
+        Normalize drawdown to 0-1 scale (inverted: lower DD = higher score)
+
+        Args:
+            drawdown: Max drawdown as decimal (e.g., 0.15 = 15%)
+            max_dd: Maximum acceptable drawdown (default 30%)
+
+        Returns:
+            Score 0-1 where 0% DD = 1.0, 30% DD = 0.0
+        """
+        if drawdown is None or drawdown <= 0:
+            return 1.0  # No drawdown = best score
+        if drawdown >= max_dd:
+            return 0.0  # Max or worse = worst score
+        return 1.0 - (drawdown / max_dd)
+
     def _normalize(self, value: float, min_val: float, max_val: float) -> float:
         """
         Normalize value to 0-1 range
@@ -138,8 +178,12 @@ class StrategyScorer:
         Returns:
             Normalized value (0-1)
         """
+        # Guard against None values
+        if value is None:
+            return 0.0  # Neutral score for missing data
+
         if max_val == min_val:
-            return 0
+            return 0.5  # Neutral score when no variation
 
         normalized = (value - min_val) / (max_val - min_val)
         return min(max(normalized, 0), 1)  # Clamp to [0, 1]

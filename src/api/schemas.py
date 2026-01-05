@@ -24,8 +24,7 @@ class PipelineCounts(BaseModel):
     """Strategy counts by status"""
     generated: int = Field(alias="GENERATED", default=0)
     validated: int = Field(alias="VALIDATED", default=0)
-    tested: int = Field(alias="TESTED", default=0)
-    selected: int = Field(alias="SELECTED", default=0)
+    active: int = Field(alias="ACTIVE", default=0)
     live: int = Field(alias="LIVE", default=0)
     retired: int = Field(alias="RETIRED", default=0)
     failed: int = Field(alias="FAILED", default=0)
@@ -294,8 +293,8 @@ class PipelineStatsResponse(BaseModel):
     data_points: List[PipelineTimeSeriesPoint]
     total_generated: int
     total_validated: int
-    total_backtested: int
-    total_selected: int
+    total_active: int
+    total_live: int
     overall_throughput: float
     bottleneck_stage: str
 
@@ -310,7 +309,7 @@ class QualityBucket(BaseModel):
 
 class QualityDistribution(BaseModel):
     """Quality distribution for one stage"""
-    stage: str  # "TESTED", "SELECTED", "LIVE"
+    stage: str  # "ACTIVE", "LIVE"
     buckets: List[QualityBucket]
     by_type: Dict[str, int]  # {"MOM": 45, "REV": 23, ...}
     by_timeframe: Dict[str, int]  # {"15m": 30, "1h": 25, ...}

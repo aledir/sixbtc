@@ -1,12 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
-import * as api from '../lib/api';
+import { API_BASE } from '../lib/api';
 import { FileCode, AlertCircle } from 'lucide-react';
 
 export default function Templates() {
   const { data, isLoading, error } = useQuery({
     queryKey: ['templates'],
     queryFn: async () => {
-      const res = await fetch(`${(api as any).API_BASE || 'http://localhost:8080/api'}/templates`);
+      const res = await fetch(`${API_BASE}/templates`);
       if (!res.ok) throw new Error('Failed to fetch templates');
       return res.json();
     },

@@ -144,6 +144,15 @@ generation:
       exit_bars: [0, 10, 20, 50]
 
 # ==============================================================================
+# ACTIVE POOL (Leaderboard Logic)
+# ==============================================================================
+# Pool of strategies ready for deployment, managed via leaderboard
+# New strategies enter if: score >= min_score_entry AND (pool not full OR score > min(pool))
+active_pool:
+  max_size: 300                  # Max strategies in pool (leaderboard)
+  min_score_entry: 15            # Minimum score to enter pool
+
+# ==============================================================================
 # PIPELINE FLOW CONTROL (Multi-Level Backpressure System)
 # ==============================================================================
 # Prevents queue overflow by limiting strategies at each stage.
@@ -153,7 +162,7 @@ pipeline:
   queue_limits:
     generated: 500      # Max GENERATED strategies (supports one parametric batch ~400)
     validated: 50       # Max VALIDATED strategies waiting for backtest
-    tested: 400         # Max TESTED strategies waiting for classification (increased from 300 to reduce backpressure)
+    # ACTIVE pool uses active_pool.max_size (leaderboard logic)
 
   backpressure:
     check_interval: 10        # Seconds between backpressure checks
@@ -189,14 +198,23 @@ pattern_discovery:
 # VALIDATION (Strategy Code Validation)
 # ==============================================================================
 validation:
-  parallel_threads: 5
+  parallel_threads: 6
 
 # ==============================================================================
 # BACKTESTING
 # ==============================================================================
 backtesting:
   initial_capital: 10000
-  parallel_threads: 5  # Reduced from 10 to avoid server saturation
+
+  # Thread allocation (3+1 elastic model for LIVE mode)
+  threads:
+    validated: 3             # Dedicated threads for new VALIDATED strategies
+    retest: 1                # Elastic thread: re-backtest first, then VALIDATED if empty
+
+  # Re-backtest configuration for ACTIVE pool freshness
+  retest:
+    interval_days: 3         # Re-test ACTIVE strategies every 3 days
+    # Re-backtest uses: optimal TF only, 365+30 days, same parameters (no parametric)
 
   # Coins per backtest (applies to BOTH pattern and AI strategies)
   # Pattern: selects top N coins by edge from pattern's coin_performance
@@ -207,6 +225,7 @@ backtesting:
   # Total period = training_days + holdout_days = 210 days
   training_days: 365         # 12 months for training (robust statistical validation)
   holdout_days: 30           # Last 30 days for validation (anti-overfitting + recency)
+  min_coverage_pct: 0.80     # 80% minimum data coverage required for coins
 
   # Holdout validation thresholds
   holdout:
@@ -230,52 +249,100 @@ backtesting:
 # TRADING (Live Execution Policy)
 # ==============================================================================
 trading:
+  n_subaccounts: 10            # Number of Hyperliquid subaccounts for deployment
+  total_capital: 1000          # Total capital across all subaccounts ($)
   min_volume_24h: 1000000      # $1M min volume for live trading (liquidity filter)
   pairs_mode: strict           # strict, adaptive, intersection
   require_backtest: true       # Only trade pairs that were backtested
 
 # ==============================================================================
-# CLASSIFICATION & SELECTION
+# SCORER (Score Calculation)
 # ==============================================================================
-classification:
-  frequency_hours: 0.25  # Every 15 minutes (increased from 1 hour to reduce bottleneck)
-
+scorer:
   # Backtest scoring weights (expectancy is dominant)
-  score_weights:
+  weights:
     edge: 0.50        # Expectancy - most important metric
     sharpe: 0.25      # Risk-adjusted return
     consistency: 0.15 # Win rate / time-in-profit
     stability: 0.10   # Walk-forward stability
 
-  # Filter thresholds for eligible strategies
-  filter_thresholds:
-    min_sharpe: 0.5           # Minimum Sharpe ratio
-    min_win_rate: 0.40        # Minimum win rate (40%)
-    min_trades: 20            # Minimum trades for statistical significance
+# ==============================================================================
+# ROTATOR (ACTIVE -> LIVE Deployment)
+# ==============================================================================
+rotator:
+  check_interval_minutes: 15     # Check every 15 min for deployment opportunities
+  max_live_strategies: 10        # Max strategies in LIVE at once
+  min_score_live: 40             # Minimum score to be eligible for LIVE
+  dry_run: true                  # Don't actually trade (for testing)
 
-  # Live ranking configuration
-  live_ranking:
-    enabled: true
-    min_trades_live: 10          # Minimum trades before calculating live metrics
-    min_trades_for_frequency: 10 # Minimum trades to calculate trade frequency for Sharpe annualization
-    min_days_for_frequency: 7    # Minimum days active for reliable frequency calculation
-    retire_score_threshold: 30   # Score < 30 = retire
-    max_degradation_pct: 0.50    # 50% worse than backtest = retire
-    max_drawdown_live: 0.30      # 30% live drawdown = retire
-
-  # Selection configuration
+  # Diversification rules
   selection:
-    top_n: 10                    # Max strategies to select
     max_per_type: 3              # Max strategies per type (MOM, REV, etc.)
     max_per_timeframe: 3         # Max strategies per timeframe
 
-  # Diversification (deprecated, use selection above)
+# ==============================================================================
+# MONITOR (LIVE Performance & Retirement)
+# ==============================================================================
+monitor:
+  check_interval_minutes: 15     # Check every 15 min for retirement candidates
+
+  # Retirement criteria (any triggers retirement)
+  retirement:
+    min_score: 30                # Score < 30 = retire
+    max_degradation: 0.50        # 50% worse than backtest = retire
+    max_drawdown: 0.30           # 30% live drawdown = retire
+    min_trades: 10               # Min trades before evaluating
+
+  # Live scoring (for calculating score_live)
+  live_scoring:
+    min_trades_for_frequency: 10 # Min trades to calculate trade frequency
+    min_days_for_frequency: 7    # Min days active for reliable frequency
+
+# ==============================================================================
+# CLASSIFICATION (LEGACY - Will be removed in Phase 6)
+# ==============================================================================
+classification:
+  frequency_hours: 0.25  # Every 15 minutes
+
+  # Backtest scoring weights (moved to scorer section)
+  score_weights:
+    edge: 0.40
+    sharpe: 0.20
+    consistency: 0.15
+    stability: 0.10
+    drawdown: 0.15  # Penalizes high drawdown (lower DD = higher score)
+
+  filter_thresholds:
+    min_sharpe: 0.5
+    min_win_rate: 0.40
+    min_trades: 20
+
+  live_ranking:
+    enabled: true
+    min_trades_live: 10
+    min_trades_for_frequency: 10
+    min_days_for_frequency: 7
+    retire_score_threshold: 30
+    max_degradation_pct: 0.50
+    max_drawdown_live: 0.30
+
+  selection:
+    top_n: 10
+    max_per_type: 3
+    max_per_timeframe: 3
+
   diversification:
     max_same_type: 3
     max_same_timeframe: 5
 
+  archival:
+    enabled: true
+    score_threshold: 15
+    max_per_cycle: 50
+    min_age_hours: 1
+
 # ==============================================================================
-# DEPLOYMENT & ROTATION
+# DEPLOYMENT (LEGACY - Will be replaced by ROTATOR)
 # ==============================================================================
 deployment:
   rotation_frequency_hours: 24
@@ -302,7 +369,7 @@ executor:
 # ==============================================================================
 monitoring:
   snapshot_interval_minutes: 15
-  check_interval_seconds: 30
+  check_interval_seconds: 15
 
 # ==============================================================================
 # METRICS & ANALYTICS
@@ -347,6 +414,19 @@ logging:
     backtester: INFO
     generator: INFO
     data_provider: WARNING
+
+# ==============================================================================
+# SCHEDULER (Maintenance Tasks)
+# ==============================================================================
+scheduler:
+  tasks:
+    cleanup_zombie_processes:
+      enabled: true
+      interval_hours: 3           # Every 3 hours
+    daily_restart_services:
+      enabled: true
+      interval_hours: 24          # Once per day
+      restart_hour: 2             # Run at 2 AM (low activity)
 
 # ==============================================================================
 # DATA SCHEDULER

@@ -101,6 +101,7 @@ from src.api.routes import (
     config_router,
     execution_router,
     logs_router,
+    metrics_router,
     performance_router,
     pipeline_router,
     scheduler_router,
@@ -128,6 +129,7 @@ app.include_router(coins_router, prefix="/api", tags=["Coins"])
 app.include_router(services_router, prefix="/api", tags=["Services"])
 app.include_router(logs_router, prefix="/api", tags=["Logs"])
 app.include_router(config_router, prefix="/api", tags=["Config"])
+app.include_router(metrics_router, tags=["Metrics"])  # Already has /api prefix in router
 
 
 # =============================================================================

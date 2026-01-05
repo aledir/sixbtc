@@ -143,7 +143,7 @@ class ContinuousGeneratorProcess:
             depths = self.strategy_processor.get_queue_depths()
             logger.info(
                 f"Pipeline: GEN={depths.get('GENERATED', 0)}/{self.generated_limit} "
-                f"VAL={depths.get('VALIDATED', 0)} TST={depths.get('TESTED', 0)} "
+                f"VAL={depths.get('VALIDATED', 0)} ACT={depths.get('ACTIVE', 0)} "
                 f"LIVE={depths.get('LIVE', 0)}"
             )
             self._last_log_time = now

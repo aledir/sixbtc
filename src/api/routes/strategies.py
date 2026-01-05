@@ -109,7 +109,7 @@ async def get_backtest_ranking(
     limit: int = Query(50, ge=1, le=200, description="Max results to return"),
 ):
     """
-    Get backtest ranking for TESTED and SELECTED strategies.
+    Get backtest ranking for ACTIVE strategies.
 
     Returns strategies ordered by backtest score (combination of Sharpe,
     Expectancy, Consistency, and Walk-Forward Stability).

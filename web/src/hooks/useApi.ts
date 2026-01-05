@@ -241,3 +241,36 @@ export function usePairsUpdateHistory(limit: number = 20) {
     refetchInterval: SLOW_REFRESH,
   });
 }
+
+// Pipeline Metrics hooks
+export function useMetricsTimeseries(params: Parameters<typeof api.getMetricsTimeseries>[0]) {
+  return useQuery({
+    queryKey: ['metricsTimeseries', params],
+    queryFn: () => api.getMetricsTimeseries(params),
+    refetchInterval: SLOW_REFRESH,  // 60s - historical data
+  });
+}
+
+export function useMetricsAggregated(params?: Parameters<typeof api.getMetricsAggregated>[0]) {
+  return useQuery({
+    queryKey: ['metricsAggregated', params],
+    queryFn: () => api.getMetricsAggregated(params),
+    refetchInterval: SLOW_REFRESH,  // 60s - aggregate stats
+  });
+}
+
+export function useMetricsAlerts() {
+  return useQuery({
+    queryKey: ['metricsAlerts'],
+    queryFn: api.getMetricsAlerts,
+    refetchInterval: FAST_REFRESH,  // 10s - critical for alerts
+  });
+}
+
+export function useMetricsCurrent() {
+  return useQuery({
+    queryKey: ['metricsCurrent'],
+    queryFn: api.getMetricsCurrent,
+    refetchInterval: FAST_REFRESH,  // 10s - current state
+  });
+}

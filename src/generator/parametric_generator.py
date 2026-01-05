@@ -309,16 +309,12 @@ class ParametricGenerator:
         """
         Generate unique strategy ID from template + params
 
-        Format: {template_short}_{param_hash_short}
+        Format: {param_hash} (single UUID per CLAUDE.md naming convention)
         """
-        # Extract template short ID
-        template_short = template_name.split('_')[-1] if '_' in template_name else template_name[:8]
-
-        # Hash parameters - use 8 chars to avoid collisions
-        param_str = '_'.join(f"{k}:{v}" for k, v in sorted(params.items()))
-        param_hash = hashlib.sha256(param_str.encode()).hexdigest()[:8]
-
-        return f"{template_short}_{param_hash}"
+        # Hash template + parameters together for unique ID
+        # Include template name to ensure uniqueness across templates
+        combined = f"{template_name}:" + '_'.join(f"{k}:{v}" for k, v in sorted(params.items()))
+        return hashlib.sha256(combined.encode()).hexdigest()[:8]
 
     def _hash_parameters(self, params: dict) -> str:
         """Generate hash of parameters for deduplication"""

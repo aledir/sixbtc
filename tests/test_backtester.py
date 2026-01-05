@@ -20,8 +20,6 @@ from src.backtester.backtest_engine import BacktestEngine
 from src.backtester.validator import LookaheadValidator
 from src.strategies.base import StrategyCore, Signal
 
-# Alias for backward compatibility
-VectorBTBacktester = BacktestEngine
 
 
 class MockStrategy(StrategyCore):
@@ -176,7 +174,7 @@ class TestBacktestEngine:
         mock_session.return_value.__exit__ = Mock(return_value=None)
 
         strategy = MockStrategy()
-        backtester = VectorBTBacktester()
+        backtester = BacktestEngine()
 
         # backtest() now requires Dict[str, pd.DataFrame]
         data = {'BTC': sample_ohlcv_data}
@@ -222,7 +220,7 @@ class TestBacktestEngine:
         mock_session.return_value.__exit__ = Mock(return_value=None)
 
         strategy = MockStrategy()
-        backtester = VectorBTBacktester()
+        backtester = BacktestEngine()
 
         data = {
             'BTC': sample_ohlcv_data,
@@ -346,7 +344,7 @@ class TestBacktesterIntegration:
 
         # 2. Run backtest (now uses Dict format)
         strategy = MockStrategy()
-        backtester = VectorBTBacktester()
+        backtester = BacktestEngine()
         results = backtester.backtest(strategy, {'BTC': data})
 
         # 3. Validate

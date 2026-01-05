@@ -174,7 +174,7 @@ class BacktestCacheReader:
         timeframe: str,
         days: int = 180,
         end_date: Optional[datetime] = None,
-        min_coverage_pct: float = 0.90
+        min_coverage_pct: float = 0.80
     ) -> Dict[str, pd.DataFrame]:
         """
         Read data for multiple symbols
@@ -228,7 +228,7 @@ class BacktestCacheReader:
         full_period_days: int = 180,
         recent_period_days: int = 60,
         end_date: Optional[datetime] = None,
-        min_coverage_pct: float = 0.90
+        min_coverage_pct: float = 0.80
     ) -> tuple:
         """
         Read dual-period data for multiple symbols

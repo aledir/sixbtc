@@ -33,10 +33,10 @@ class PipelineMetrics:
 
         Returns:
             Dict mapping status to count
-            Example: {"GENERATED": 100, "VALIDATED": 50, "TESTED": 37, "SELECTED": 0}
+            Example: {"GENERATED": 100, "VALIDATED": 50, "ACTIVE": 37, "LIVE": 5}
         """
         depths = {}
-        statuses = ['GENERATED', 'VALIDATED', 'TESTED', 'SELECTED', 'LIVE', 'RETIRED', 'FAILED']
+        statuses = ['GENERATED', 'VALIDATED', 'ACTIVE', 'LIVE', 'RETIRED', 'FAILED']
 
         for status in statuses:
             count = session.query(Strategy).filter(Strategy.status == status).count()
@@ -71,10 +71,9 @@ class PipelineMetrics:
         # Count strategies created in time window that reached or passed this status
         # (Current status is this OR any status after it)
         next_statuses = {
-            'GENERATED': ['GENERATED', 'VALIDATED', 'TESTED', 'SELECTED', 'LIVE', 'RETIRED'],
-            'VALIDATED': ['VALIDATED', 'TESTED', 'SELECTED', 'LIVE', 'RETIRED'],
-            'TESTED': ['TESTED', 'SELECTED', 'LIVE', 'RETIRED'],
-            'SELECTED': ['SELECTED', 'LIVE', 'RETIRED'],
+            'GENERATED': ['GENERATED', 'VALIDATED', 'ACTIVE', 'LIVE', 'RETIRED'],
+            'VALIDATED': ['VALIDATED', 'ACTIVE', 'LIVE', 'RETIRED'],
+            'ACTIVE': ['ACTIVE', 'LIVE', 'RETIRED'],
             'LIVE': ['LIVE', 'RETIRED'],
         }
 
@@ -267,7 +266,7 @@ class PipelineMetrics:
                 )
 
         # Check for stalled pipeline (no processing in last hour)
-        for status in ['GENERATED', 'VALIDATED', 'TESTED']:
+        for status in ['GENERATED', 'VALIDATED', 'ACTIVE']:
             throughput = PipelineMetrics.calculate_throughput(session, status, hours)
             if queue_depths.get(status, 0) > 0 and throughput == 0:
                 issues.append(
@@ -276,7 +275,7 @@ class PipelineMetrics:
                 )
 
         # Check for high failure rate (>20%)
-        for status in ['GENERATED', 'VALIDATED', 'TESTED']:
+        for status in ['GENERATED', 'VALIDATED', 'ACTIVE']:
             failure_rate = PipelineMetrics.calculate_failure_rate(session, status, hours)
             if failure_rate > 20:
                 issues.append(
@@ -326,7 +325,7 @@ class PipelineMetrics:
         """
         Calculate end-to-end pipeline throughput
 
-        Measures strategies that went from GENERATED to TESTED/SELECTED/LIVE
+        Measures strategies that went from GENERATED to ACTIVE/LIVE
         in the time window.
 
         Args:
@@ -341,10 +340,10 @@ class PipelineMetrics:
 
         since = datetime.now(UTC) - timedelta(hours=hours)
 
-        # Count strategies created in window that reached TESTED or beyond
+        # Count strategies created in window that reached ACTIVE or beyond
         count = session.query(Strategy).filter(
             Strategy.created_at >= since,
-            Strategy.status.in_(['TESTED', 'SELECTED', 'LIVE', 'RETIRED'])
+            Strategy.status.in_(['ACTIVE', 'LIVE', 'RETIRED'])
         ).count()
 
         return count / hours

@@ -116,11 +116,13 @@ class Strategy(Base):
         Enum(
             "GENERATED",  # Created by AI, not validated yet
             "VALIDATED",  # Passed 4-phase validation (syntax, AST, shuffle, execution)
-            "TESTED",  # Backtest complete
-            "SELECTED",  # Top performer, ready for live
-            "LIVE",  # Currently trading live
-            "RETIRED",  # Removed from live trading
-            "FAILED",  # Failed validation or backtest
+            "ACTIVE",     # Backtest complete, in pool (max 300, leaderboard logic)
+            "LIVE",       # Currently trading live
+            "RETIRED",    # Removed from live trading
+            "FAILED",     # Failed validation or backtest
+            # Legacy values still in DB enum but not used:
+            # "TESTED" - renamed to ACTIVE
+            # "SELECTED" - removed (direct ACTIVE -> LIVE flow)
             name="strategy_status"
         ),
         nullable=False,
@@ -161,7 +163,8 @@ class Strategy(Base):
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    tested_at = Column(DateTime)  # When backtest completed
+    tested_at = Column(DateTime)  # When initial backtest completed
+    last_backtested_at = Column(DateTime)  # When last re-backtested (for ACTIVE pool FIFO)
     live_since = Column(DateTime)  # When deployed to live
     retired_at = Column(DateTime)  # When retired from live
 
@@ -273,6 +276,7 @@ class BacktestResult(Base):
     # Individual weighted metrics (training 40% + holdout 60%) - for accurate classifier ranking
     weighted_sharpe_pure = Column(Float, nullable=True)  # Sharpe only (no composite)
     weighted_walk_forward_stability = Column(Float, nullable=True)  # Stability metric
+    weighted_max_drawdown = Column(Float, nullable=True)  # Max drawdown weighted
 
     recency_ratio = Column(Float)         # recent_sharpe / full_sharpe (measures "in-form")
     recency_penalty = Column(Float)       # 0-20% penalty for poor recent performance
@@ -309,11 +313,13 @@ class PipelineMetricsSnapshot(Base):
     # Queue depths (counts)
     queue_generated = Column(Integer, nullable=False, default=0)
     queue_validated = Column(Integer, nullable=False, default=0)
-    queue_tested = Column(Integer, nullable=False, default=0)
-    queue_selected = Column(Integer, nullable=False, default=0)
+    queue_active = Column(Integer, nullable=False, default=0)  # Pool size (max 300)
     queue_live = Column(Integer, nullable=False, default=0)
     queue_retired = Column(Integer, nullable=False, default=0)
     queue_failed = Column(Integer, nullable=False, default=0)
+    # Legacy columns (kept for backwards compatibility with existing data)
+    queue_tested = Column(Integer, nullable=True, default=0)  # Renamed to queue_active
+    queue_selected = Column(Integer, nullable=True, default=0)  # Removed state
 
     # Throughput (strategies/hour for each stage)
     throughput_generation = Column(Float, nullable=True)  # NULL = not calculated
@@ -324,7 +330,9 @@ class PipelineMetricsSnapshot(Base):
     # Utilization (0.0-1.0, percentage of queue limit used)
     utilization_generated = Column(Float, nullable=True)
     utilization_validated = Column(Float, nullable=True)
-    utilization_tested = Column(Float, nullable=True)
+    utilization_active = Column(Float, nullable=True)  # Pool utilization (queue_active / max_size)
+    # Legacy (kept for backwards compatibility)
+    utilization_tested = Column(Float, nullable=True)  # Renamed to utilization_active
 
     # Success rates (0.0-1.0)
     success_rate_validation = Column(Float, nullable=True)

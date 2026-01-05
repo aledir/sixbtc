@@ -1,8 +1,13 @@
 """
-Parametric Backtester with Numba Parallelization
+Parametric Strategy Generator with Numba Parallelization
 
-Runs N parameter combinations in parallel using Numba prange.
-Shares OHLC data across all combinations for memory efficiency.
+Generates N strategies from parameter space using parallel testing.
+Shares OHLC data across all strategies for memory efficiency.
+
+TERMINOLOGY:
+- "Parameter combination" = one SET of (SL, TP, leverage, exit_bars)
+- "Strategy" = complete entity created from template + parameter set
+- This module generates STRATEGIES by testing parameter combinations
 
 Usage:
     backtester = ParametricBacktester(config)
@@ -11,7 +16,7 @@ Usage:
         ohlc_data={'close': ..., 'high': ..., 'low': ...},
         directions=directions,  # (n_bars, n_symbols) int8 array: 1=long, -1=short
     )
-    # results is DataFrame with metrics for each parameter combination
+    # results is DataFrame with metrics for each generated strategy
 """
 
 import itertools
@@ -351,7 +356,7 @@ class ParametricBacktester:
     """
     Runs parametric backtests with Numba parallelization.
 
-    Generates N parameter combinations and runs them all in parallel,
+    Tests N parameter combinations in parallel to generate candidate strategies,
     sharing OHLC data for memory efficiency.
     """
 
@@ -399,18 +404,18 @@ class ParametricBacktester:
 
         logger.info(
             f"ParametricBacktester initialized: "
-            f"{self._count_combinations()} combinations"
+            f"{self._count_strategies()} candidate strategies"
         )
 
-    def _count_combinations(self) -> int:
-        """Count total parameter combinations"""
+    def _count_strategies(self) -> int:
+        """Count total candidate strategies (parameter combinations)"""
         count = 1
         for values in self.parameter_space.values():
             count *= len(values)
         return count
 
-    def _generate_combinations(self) -> List[Tuple[float, float, int, int]]:
-        """Generate all parameter combinations"""
+    def _generate_parameter_sets(self) -> List[Tuple[float, float, int, int]]:
+        """Generate all parameter sets (each will create a strategy)"""
         return list(itertools.product(
             self.parameter_space['sl_pct'],
             self.parameter_space['tp_pct'],
@@ -470,13 +475,13 @@ class ParametricBacktester:
         n_bars, n_symbols = close.shape
         logger.info(
             f"Running parametric backtest: {n_bars} bars, {n_symbols} symbols, "
-            f"{self._count_combinations()} combinations"
+            f"{self._count_strategies()} candidate strategies"
         )
 
-        combinations = self._generate_combinations()
+        param_sets = self._generate_parameter_sets()
         results = []
 
-        for sl_pct, tp_pct, leverage, exit_bars in combinations:
+        for sl_pct, tp_pct, leverage, exit_bars in param_sets:
             # Cap leverage
             actual_lev = min(leverage, max_leverage)
 
@@ -541,7 +546,7 @@ class ParametricBacktester:
         return df
 
     def get_top_k(self, df: pd.DataFrame, k: int = 5) -> pd.DataFrame:
-        """Get top K parameter combinations"""
+        """Get top K candidate strategies"""
         return df.head(k).copy()
 
     def set_parameter_space(self, space: Dict[str, List]) -> None:
@@ -552,7 +557,7 @@ class ParametricBacktester:
             space: Dict with 'sl_pct', 'tp_pct', 'leverage', 'exit_bars' lists
         """
         self.parameter_space.update(space)
-        logger.info(f"Parameter space updated: {self._count_combinations()} combinations")
+        logger.info(f"Parameter space updated: {self._count_strategies()} candidate strategies")
 
     def build_pattern_centered_space(
         self,
@@ -633,7 +638,7 @@ class ParametricBacktester:
             f"TP={[f'{p:.1%}' for p in tp_pcts]}, "
             f"SL={[f'{p:.1%}' for p in sl_pcts]}, "
             f"exit={exit_bars}, lev={leverages} "
-            f"({self._count_combinations()} combinations after set)"
+            f"({self._count_strategies()} candidate strategies after set)"
         )
 
         return space
@@ -700,7 +705,7 @@ class ParametricBacktester:
             f"TP={[f'{p:.1%}' for p in tp_pcts]}, "
             f"SL={[f'{p:.1%}' for p in sl_pcts]}, "
             f"exit={exit_bars}, lev={leverages} "
-            f"({self._count_combinations()} combinations after set)"
+            f"({self._count_strategies()} candidate strategies after set)"
         )
 
         return space

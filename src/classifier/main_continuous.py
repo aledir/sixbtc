@@ -9,7 +9,7 @@ import asyncio
 import os
 import signal
 import threading
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import List, Dict
 
 from src.config import load_config
@@ -63,10 +63,18 @@ class ContinuousClassifierProcess:
         live_config = self.config.get('classification', {}).get('live_ranking', {})
         self.live_ranking_enabled = live_config.get('enabled', True)
 
+        # Archival config
+        archival_config = self.config.get('classification', {}).get('archival', {})
+        self.archival_enabled = archival_config.get('enabled', True)
+        self.archival_score_threshold = archival_config.get('score_threshold', 15)
+        self.archival_max_per_cycle = archival_config.get('max_per_cycle', 50)
+        self.archival_min_age_hours = archival_config.get('min_age_hours', 1)
+
         logger.info(
             f"ContinuousClassifierProcess initialized: "
             f"interval={self.interval_hours}h, top_n={self.top_n}, "
-            f"live_ranking={self.live_ranking_enabled}"
+            f"live_ranking={self.live_ranking_enabled}, "
+            f"archival={self.archival_enabled} (threshold={self.archival_score_threshold})"
         )
 
     async def run_continuous(self):
@@ -163,6 +171,10 @@ class ContinuousClassifierProcess:
         else:
             logger.info("No slots available - all positions filled")
 
+        # Step 5: Archive low-scoring TESTED strategies to free up space
+        if self.archival_enabled:
+            self._archive_low_scoring_strategies()
+
     def _update_live_metrics(self):
         """Update live performance metrics for all LIVE strategies"""
         logger.info("Updating live metrics for LIVE strategies")
@@ -217,11 +229,12 @@ class ContinuousClassifierProcess:
         strategies = []
 
         with get_session() as session:
-            # Get TESTED strategies
+            # Get TESTED strategies with OPTIMAL TF backtest results
             results = (
                 session.query(Strategy, BacktestResult)
                 .join(BacktestResult, Strategy.id == BacktestResult.strategy_id)
                 .filter(Strategy.status.in_(["TESTED", "SELECTED"]))
+                .filter(BacktestResult.is_optimal_tf == True)  # Only optimal TF results
                 .all()
             )
 
@@ -313,6 +326,68 @@ class ContinuousClassifierProcess:
                 if strategy and strategy.status != "SELECTED":
                     strategy.status = "SELECTED"
                     logger.info(f"Promoted {strategy.name} to SELECTED (score: {s['score']:.4f})")
+
+            # Ensure changes are committed
+            session.commit()
+
+    def _archive_low_scoring_strategies(self):
+        """
+        Archive low-scoring TESTED strategies to keep the pool manageable.
+
+        This helps prevent backpressure by removing strategies that will
+        never be selected for deployment.
+        """
+        from datetime import timedelta
+
+        archived_count = 0
+        min_age = datetime.now(UTC) - timedelta(hours=self.archival_min_age_hours)
+
+        with get_session() as session:
+            # Get TESTED strategies with their optimal backtest results
+            results = (
+                session.query(Strategy, BacktestResult)
+                .join(BacktestResult, Strategy.id == BacktestResult.strategy_id)
+                .filter(Strategy.status == "TESTED")
+                .filter(BacktestResult.is_optimal_tf == True)
+                .filter(Strategy.created_at < min_age)
+                .all()
+            )
+
+            # Score and identify low performers
+            for strategy, backtest in results:
+                if archived_count >= self.archival_max_per_cycle:
+                    break
+
+                # Skip if missing weighted metrics
+                if backtest.weighted_sharpe_pure is None:
+                    continue
+
+                # Calculate score
+                try:
+                    metrics = {
+                        'expectancy': backtest.weighted_expectancy or 0.0,
+                        'sharpe_ratio': backtest.weighted_sharpe_pure or 0.0,
+                        'consistency': backtest.weighted_win_rate or 0.0,
+                        'wf_stability': backtest.weighted_walk_forward_stability or 1.0,
+                    }
+                    score = self.scorer.score(metrics)
+                except Exception:
+                    continue
+
+                # Archive if below threshold
+                if score < self.archival_score_threshold:
+                    strategy.status = "RETIRED"
+                    strategy.retired_at = datetime.now(UTC)
+                    archived_count += 1
+
+                    logger.info(
+                        f"Archived {strategy.name}: score={score:.2f} < {self.archival_score_threshold}"
+                    )
+
+            session.commit()
+
+        if archived_count > 0:
+            logger.info(f"Archived {archived_count} low-scoring TESTED strategies")
 
     async def _wait_interval(self):
         """Wait for next classification cycle"""

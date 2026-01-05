@@ -10,8 +10,7 @@ export interface ServiceInfo {
 export interface PipelineCounts {
   GENERATED: number;
   VALIDATED: number;
-  TESTED: number;
-  SELECTED: number;
+  ACTIVE: number;
   LIVE: number;
   RETIRED: number;
   FAILED: number;
@@ -206,8 +205,8 @@ export interface PipelineStatsResponse {
   data_points: PipelineTimeSeriesPoint[];
   total_generated: number;
   total_validated: number;
-  total_backtested: number;
-  total_selected: number;
+  total_active: number;
+  total_live: number;
   overall_throughput: number;
   bottleneck_stage: string;
 }
@@ -380,4 +379,127 @@ export interface PairsUpdateDetail {
 export interface PairsUpdateHistoryResponse {
   updates: PairsUpdateDetail[];
   total: number;
+}
+
+// =============================================================================
+// PIPELINE METRICS API
+// =============================================================================
+
+export type MetricsPeriod = '1h' | '6h' | '24h' | '7d' | '30d';
+export type MetricsType = 'queue_depths' | 'throughput' | 'quality' | 'utilization';
+
+// GET /api/metrics/timeseries - Queue Depths data point
+export interface QueueDepthsDataPoint {
+  timestamp: string;
+  generated: number;
+  validated: number;
+  active: number;
+  live: number;
+  retired: number;
+  failed: number;
+}
+
+// GET /api/metrics/timeseries - Throughput data point
+export interface ThroughputDataPoint {
+  timestamp: string;
+  generation: number | null;
+  validation: number | null;
+  backtesting: number | null;
+}
+
+// GET /api/metrics/timeseries - Quality data point
+export interface QualityDataPoint {
+  timestamp: string;
+  avg_sharpe: number | null;
+  avg_win_rate: number | null;
+  avg_expectancy: number | null;
+}
+
+// GET /api/metrics/timeseries - Utilization data point
+export interface UtilizationDataPoint {
+  timestamp: string;
+  generated: number | null;
+  validated: number | null;
+  active: number | null;
+}
+
+// GET /api/metrics/timeseries response
+export interface MetricsTimeseriesResponse {
+  period: MetricsPeriod;
+  metric: MetricsType;
+  data_points: number;
+  data: QueueDepthsDataPoint[] | ThroughputDataPoint[] | QualityDataPoint[] | UtilizationDataPoint[];
+}
+
+// GET /api/metrics/aggregated response
+export interface MetricsAggregatedResponse {
+  period: MetricsPeriod;
+  snapshots_analyzed: number;
+  queue_depths: {
+    avg_generated: number;
+    avg_validated: number;
+    avg_active: number;
+  };
+  utilization: {
+    max_generated: number;
+    max_validated: number;
+    max_active: number;
+  };
+  quality: {
+    avg_sharpe: number | null;
+    avg_win_rate: number | null;
+  };
+}
+
+// GET /api/metrics/alerts
+export type AlertSeverity = 'info' | 'warning' | 'critical';
+export type AlertType = 'backpressure' | 'low_throughput' | 'quality_degradation' | 'system_critical';
+
+export interface MetricAlert {
+  severity: AlertSeverity;
+  type: AlertType;
+  message: string;
+  duration_minutes: number;
+  current_value?: number;
+  bottleneck?: string;
+}
+
+export interface MetricsAlertsResponse {
+  timestamp: string;
+  alerts_count: number;
+  alerts: MetricAlert[];
+}
+
+// GET /api/metrics/current response
+export interface MetricsCurrentResponse {
+  timestamp: string;
+  overall_status: 'healthy' | 'degraded' | 'critical';
+  bottleneck_stage: string | null;
+  queue_depths: {
+    generated: number;
+    validated: number;
+    active: number;
+    live: number;
+    retired: number;
+    failed: number;
+  };
+  utilization: {
+    generated: number | null;
+    validated: number | null;
+    active: number | null;
+  };
+  throughput: {
+    generation: number | null;
+    validation: number | null;
+    backtesting: number | null;
+  };
+  quality: {
+    avg_sharpe: number | null;
+    avg_win_rate: number | null;
+    avg_expectancy: number | null;
+  };
+  breakdown: {
+    pattern_strategies: number;
+    ai_strategies: number;
+  };
 }

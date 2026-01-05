@@ -14,11 +14,15 @@ import asyncio
 import os
 import signal
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import pandas as pd
+
+# Suppress pandas FutureWarning about fillna downcasting (from AI-generated strategies)
+warnings.filterwarnings('ignore', category=FutureWarning, message='.*Downcasting.*fillna.*')
 
 from src.config import load_config
 from src.database import get_session, Strategy, StrategyProcessor
@@ -139,7 +143,7 @@ class ContinuousValidatorProcess:
             logger.info(
                 f"Pipeline: GEN={depths.get('GENERATED', 0)} "
                 f"VAL={depths.get('VALIDATED', 0)}/{self.validated_limit} "
-                f"TST={depths.get('TESTED', 0)} LIVE={depths.get('LIVE', 0)}"
+                f"ACT={depths.get('ACTIVE', 0)} LIVE={depths.get('LIVE', 0)}"
             )
             self._last_log_time = now
         except Exception as e:

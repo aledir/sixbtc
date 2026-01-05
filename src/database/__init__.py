@@ -8,7 +8,7 @@ Provides:
 - Multi-process strategy coordination
 """
 
-from .models import Base, Strategy, StrategyTemplate, BacktestResult, Trade, PerformanceSnapshot, Subaccount, Coin, ScheduledTaskExecution, PairsUpdateLog
+from .models import Base, Strategy, StrategyTemplate, BacktestResult, PipelineMetricsSnapshot, Trade, PerformanceSnapshot, Subaccount, Coin, ScheduledTaskExecution, PairsUpdateLog
 from .connection import get_engine, get_session, init_db
 from .strategy_processor import StrategyProcessor
 
@@ -17,6 +17,7 @@ __all__ = [
     "Strategy",
     "StrategyTemplate",
     "BacktestResult",
+    "PipelineMetricsSnapshot",
     "Trade",
     "PerformanceSnapshot",
     "Subaccount",
