@@ -3,7 +3,7 @@ Continuous Backtester Process
 
 Backtests validated strategies with portfolio simulation.
 - Multi-pair backtesting (top 30 coins by volume)
-- Timeframe optimization (test all TFs, select optimal)
+- Backtest on assigned timeframe with training/holdout validation
 - Training/Holdout split for anti-overfitting
 - Uses ThreadPoolExecutor for parallel backtesting
 """
@@ -54,8 +54,8 @@ class ContinuousBacktesterProcess:
     Continuous backtesting process.
 
     Claims VALIDATED strategies and runs multi-pair backtests.
-    Tests all timeframes and selects optimal TF.
-    Strategies that pass thresholds are promoted to TESTED.
+    Backtests strategies on their assigned timeframe.
+    Strategies that pass thresholds are promoted to ACTIVE.
     """
 
     def __init__(
@@ -536,7 +536,7 @@ class ContinuousBacktesterProcess:
                 strategy = self.processor.claim_strategy("VALIDATED")
                 if strategy:
                     future = self.executor.submit(
-                        self._backtest_strategy_all_tf,
+                        self._backtest_strategy,
                         strategy.id,
                         strategy.name,
                         strategy.code,
@@ -553,7 +553,7 @@ class ContinuousBacktesterProcess:
 
         logger.info("Backtesting loop ended")
 
-    def _backtest_strategy_all_tf(
+    def _backtest_strategy(
         self,
         strategy_id,
         strategy_name: str,
@@ -758,8 +758,8 @@ class ContinuousBacktesterProcess:
             optimal_tf = self._find_optimal_timeframe(tf_results)
 
             if optimal_tf is None:
-                self._delete_strategy(strategy_id, "No TF passed thresholds")
-                return (False, "No TF passed thresholds")
+                self._delete_strategy(strategy_id, "Backtest failed thresholds")
+                return (False, "Backtest failed thresholds")
 
             # Get validated coins for optimal TF (these are the coins to use in live trading)
             optimal_tf_coins = tf_validated_coins.get(optimal_tf, [])
@@ -2123,7 +2123,7 @@ class ContinuousBacktesterProcess:
         """
         Re-backtest an ACTIVE strategy on its optimal TF only.
 
-        Simplified version of _backtest_strategy_all_tf:
+        Simplified version of _backtest_strategy:
         - Only tests optimal TF (not all 6 TFs)
         - Uses same parameters (no parametric)
         - Training + holdout (365 + 30 days)
@@ -2266,17 +2266,33 @@ class ContinuousBacktesterProcess:
         Returns:
             (success, reason) tuple
         """
+        from src.database.event_tracker import EventTracker
+
         try:
             # Calculate score from backtest result
             score = self.scorer.score_from_backtest_result(backtest_result)
+            strategy = backtest_result.strategy
+            strategy_name = strategy.name if strategy else str(strategy_id)
+
+            # Emit scoring event
+            EventTracker.backtest_scored(
+                strategy_id, strategy_name, score,
+                sharpe=backtest_result.weighted_sharpe_pure or 0,
+                win_rate=backtest_result.weighted_win_rate or 0,
+                edge=backtest_result.weighted_expectancy or 0,
+                consistency=backtest_result.weighted_consistency or 0,
+                drawdown=backtest_result.weighted_max_drawdown or 0
+            )
 
             # Check minimum score threshold first (avoid unnecessary shuffle test)
             if score < self.pool_min_score:
                 logger.debug(f"Strategy {strategy_id} score {score:.1f} < {self.pool_min_score}, skipping shuffle test")
+                EventTracker.backtest_score_rejected(
+                    strategy_id, strategy_name, score, self.pool_min_score
+                )
                 return (False, f"score_below_threshold:{score:.1f}")
 
             # Run shuffle test (only for strategies that could enter pool)
-            strategy = backtest_result.strategy
             if not self._run_shuffle_test(strategy_id, strategy):
                 return (False, "shuffle_test_failed")
 
@@ -2289,7 +2305,22 @@ class ContinuousBacktesterProcess:
                     return (False, f"multi_window_failed:{mw_reason}")
 
             # Try to enter pool (handles leaderboard logic)
+            EventTracker.pool_attempted(
+                strategy_id, strategy_name, score,
+                pool_size=self.pool_manager.get_pool_size()
+            )
+
             success, reason = self.pool_manager.try_enter_pool(strategy_id, score)
+
+            if success:
+                EventTracker.pool_entered(
+                    strategy_id, strategy_name, score,
+                    pool_size=self.pool_manager.get_pool_size()
+                )
+            else:
+                EventTracker.pool_rejected(
+                    strategy_id, strategy_name, score, reason
+                )
 
             return (success, reason)
 
@@ -2334,39 +2365,75 @@ class ContinuousBacktesterProcess:
         Returns:
             True if passed, False if failed
         """
+        import time
+        from src.database.event_tracker import EventTracker
+
         base_code_hash = strategy.base_code_hash
+        start_time = time.time()
 
         # Check cache first
         cached_result = self._get_cached_shuffle_result(base_code_hash)
         if cached_result is not None:
+            duration_ms = int((time.time() - start_time) * 1000)
             if cached_result:
                 logger.debug(f"Strategy {strategy.name}: shuffle test PASSED (cached)")
+                EventTracker.shuffle_test_passed(
+                    strategy_id, strategy.name, cached=True,
+                    duration_ms=duration_ms, base_code_hash=base_code_hash
+                )
             else:
                 logger.info(f"Strategy {strategy.name}: shuffle test FAILED (cached)")
+                EventTracker.shuffle_test_failed(
+                    strategy_id, strategy.name, reason="cached_failure",
+                    cached=True, duration_ms=duration_ms, base_code_hash=base_code_hash
+                )
             return cached_result
 
         # Cache miss - run actual shuffle test
+        EventTracker.shuffle_test_started(
+            strategy_id, strategy.name, cached=False, base_code_hash=base_code_hash
+        )
+
         try:
             strategy_instance = self._load_strategy_instance(strategy.code, strategy.name)
 
             if strategy_instance is None:
                 logger.warning(f"Strategy {strategy.name}: cannot load instance for shuffle test")
+                duration_ms = int((time.time() - start_time) * 1000)
+                EventTracker.shuffle_test_failed(
+                    strategy_id, strategy.name, reason="instance_load_failed",
+                    duration_ms=duration_ms, base_code_hash=base_code_hash
+                )
                 return False
 
             result = self.lookahead_tester.validate(strategy_instance, self.test_data)
+            duration_ms = int((time.time() - start_time) * 1000)
 
             # Cache the result
             self._cache_shuffle_result(base_code_hash, result.passed)
 
             if result.passed:
                 logger.debug(f"Strategy {strategy.name}: shuffle test PASSED")
+                EventTracker.shuffle_test_passed(
+                    strategy_id, strategy.name, cached=False,
+                    duration_ms=duration_ms, base_code_hash=base_code_hash
+                )
             else:
                 logger.info(f"Strategy {strategy.name}: shuffle test FAILED - {result.details}")
+                EventTracker.shuffle_test_failed(
+                    strategy_id, strategy.name, reason=str(result.details),
+                    duration_ms=duration_ms, base_code_hash=base_code_hash
+                )
 
             return result.passed
 
         except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
             logger.error(f"Shuffle test error for {strategy.name}: {e}")
+            EventTracker.shuffle_test_failed(
+                strategy_id, strategy.name, reason=f"error:{e}",
+                duration_ms=duration_ms, base_code_hash=base_code_hash
+            )
             return False
 
     def _load_strategy_instance(self, code: str, class_name: str):
@@ -2465,6 +2532,18 @@ class ContinuousBacktesterProcess:
         Returns:
             (passed, reason) tuple
         """
+        import time
+        from src.database.event_tracker import EventTracker
+
+        start_time = time.time()
+        windows_count = self.multi_window_validator.config.get('windows', 3)
+        base_code_hash = strategy.base_code_hash
+
+        EventTracker.multi_window_started(
+            strategy.id, strategy.name, windows_count,
+            cached=False, base_code_hash=base_code_hash
+        )
+
         try:
             # Load strategy instance
             strategy_instance = self._load_strategy_instance(strategy.code, strategy.name)
@@ -2487,16 +2566,33 @@ class ContinuousBacktesterProcess:
                 timeframe=timeframe,
                 base_code_hash=strategy.base_code_hash
             )
+            duration_ms = int((time.time() - start_time) * 1000)
 
             if passed:
                 logger.debug(f"Strategy {strategy.name}: multi-window PASSED ({reason})")
+                avg_sharpe = metrics.get('avg_sharpe', 0) if metrics else 0
+                cv = metrics.get('cv', 0) if metrics else 0
+                EventTracker.multi_window_passed(
+                    strategy.id, strategy.name, avg_sharpe, cv,
+                    duration_ms=duration_ms, base_code_hash=base_code_hash
+                )
             else:
                 logger.info(f"Strategy {strategy.name}: multi-window FAILED ({reason})")
+                EventTracker.multi_window_failed(
+                    strategy.id, strategy.name, reason,
+                    duration_ms=duration_ms, base_code_hash=base_code_hash,
+                    metrics=metrics
+                )
 
             return (passed, reason)
 
         except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
             logger.warning(f"Multi-window validation error for {strategy.name}: {e}")
+            EventTracker.multi_window_failed(
+                strategy.id, strategy.name, f"error:{e}",
+                duration_ms=duration_ms, base_code_hash=base_code_hash
+            )
             # On error, skip validation (don't block promotion)
             return (True, f"error_skip:{e}")
 

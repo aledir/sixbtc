@@ -699,6 +699,78 @@ class ValidationCache(Base):
 
 
 # ==============================================================================
+# STRATEGY EVENTS (Pipeline Tracking)
+# ==============================================================================
+
+class StrategyEvent(Base):
+    """
+    Immutable event log for pipeline tracking.
+
+    Events persist even when strategies are deleted, enabling:
+    - Accurate success rates (not affected by DELETE)
+    - Failure reason tracking
+    - Timing analysis per phase
+    - Pipeline funnel visualization
+
+    Event types by stage:
+    - generation: created
+    - validation: syntax_started, syntax_passed, syntax_failed,
+                  lookahead_started, lookahead_passed, lookahead_failed,
+                  execution_started, execution_passed, execution_failed,
+                  completed
+    - backtest: started, tf_completed, scored, score_rejected
+    - shuffle_test: started, passed, failed
+    - multi_window: started, passed, failed
+    - pool: attempted, entered, rejected
+    - deployment: started, succeeded, failed
+    - live: promoted, retired
+    - emergency: stop_triggered
+    """
+    __tablename__ = 'strategy_events'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True,
+                       default=lambda: datetime.now(UTC))
+
+    # Strategy identification (name persists even if strategy deleted)
+    strategy_id = Column(UUID(as_uuid=True), nullable=True)  # NULL if strategy deleted
+    strategy_name = Column(String(100), nullable=False, index=True)
+    base_code_hash = Column(String(64), nullable=True)  # For template tracking
+
+    # Event classification
+    event_type = Column(String(50), nullable=False, index=True)
+    # Examples: "syntax_passed", "shuffle_failed", "pool_entered"
+
+    stage = Column(String(30), nullable=False, index=True)
+    # Examples: "generation", "validation", "backtest", "shuffle_test", "pool", "live"
+
+    status = Column(String(20), nullable=False)
+    # One of: "started", "passed", "failed", "completed"
+
+    # Timing (milliseconds)
+    duration_ms = Column(Integer, nullable=True)
+
+    # Flexible event data (JSON for extensibility)
+    # Note: "metadata" is reserved by SQLAlchemy, so we use "event_data"
+    event_data = Column(JSON, nullable=True)
+    # Examples:
+    # validation_failed: {"reason": "ast_forbidden", "pattern": "shift(-1)", "line": 42}
+    # backtest_scored: {"score": 67, "sharpe": 1.2, "win_rate": 0.58}
+    # shuffle_failed: {"original_signals": 100, "shuffled_signals": 95}
+    # pool_rejected: {"reason": "score_below_min", "min_in_pool": 72}
+
+    __table_args__ = (
+        Index('idx_events_timestamp', 'timestamp'),
+        Index('idx_events_stage_status', 'stage', 'status'),
+        Index('idx_events_type_time', 'event_type', 'timestamp'),
+        Index('idx_events_strategy_time', 'strategy_name', 'timestamp'),
+    )
+
+    def __repr__(self):
+        return f"<StrategyEvent({self.event_type}, {self.strategy_name}, {self.status})>"
+
+
+# ==============================================================================
 # UTILITY FUNCTIONS
 # ==============================================================================
 

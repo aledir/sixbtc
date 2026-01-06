@@ -22,6 +22,7 @@ from typing import Dict, Optional
 
 from src.config import load_config
 from src.database import get_session, Strategy, Subaccount, Trade, PerformanceSnapshot, StrategyProcessor
+from src.database.event_tracker import EventTracker
 from src.data.hyperliquid_websocket import HyperliquidDataProvider, get_data_provider
 from src.executor.trade_sync import TradeSync
 from src.monitor.performance_tracker import PerformanceTracker
@@ -364,9 +365,34 @@ class ContinuousMonitorProcess:
             strategies = session.query(Strategy).filter(Strategy.status == "LIVE").all()
 
             for s in strategies:
+                # Calculate live duration
+                live_duration_hours = None
+                if s.live_since:
+                    delta = datetime.now(UTC) - s.live_since
+                    live_duration_hours = delta.total_seconds() / 3600
+
                 s.status = "RETIRED"
                 s.retired_at = datetime.now(UTC)
+
+                # Emit retirement event for each strategy
+                EventTracker.strategy_retired(
+                    strategy_id=s.id,
+                    strategy_name=s.name,
+                    reason=f"emergency_stop: {reason}",
+                    live_duration_hours=live_duration_hours,
+                    final_pnl=s.total_pnl_live
+                )
+
                 logger.warning(f"Retired strategy {s.name}")
+
+            session.commit()
+
+            # Emit emergency stop event
+            EventTracker.emergency_stop_triggered(
+                reason=reason,
+                affected_strategies=len(strategies),
+                affected_subaccounts=len(subaccounts)
+            )
 
     def _record_health_snapshot(self, health: Dict):
         """Record health snapshot to database"""

@@ -456,6 +456,20 @@ class ContinuousGeneratorProcess:
                     base_code_hash=base_code_hash
                 )
                 session.add(strategy)
+                session.flush()  # Get ID before commit
+
+                # Emit generation event
+                from src.database.event_tracker import EventTracker
+                EventTracker.generation_created(
+                    strategy_id=strategy.id,
+                    strategy_name=name,
+                    strategy_type=strategy_type,
+                    timeframe=timeframe,
+                    ai_provider=ai_provider,
+                    pattern_based=pattern_based,
+                    base_code_hash=base_code_hash
+                )
+
             logger.debug(f"Saved strategy {name} to database")
         except Exception as e:
             logger.error(f"Failed to save strategy {name} to database: {e}", exc_info=True)

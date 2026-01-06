@@ -52,6 +52,16 @@ class PoolManager:
             f"min_score={self.min_score}"
         )
 
+    def get_pool_size(self) -> int:
+        """
+        Get current number of strategies in the ACTIVE pool.
+
+        Returns:
+            Number of ACTIVE strategies
+        """
+        with get_session() as session:
+            return session.query(Strategy).filter(Strategy.status == 'ACTIVE').count()
+
     def get_pool_stats(self) -> dict:
         """
         Get current pool statistics.

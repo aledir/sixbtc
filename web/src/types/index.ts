@@ -518,3 +518,76 @@ export interface MetricsCurrentResponse {
     ai_strategies: number;
   };
 }
+
+// =============================================================================
+// PIPELINE EVENTS (Event-based tracking)
+// =============================================================================
+
+// GET /api/metrics/events
+export interface StrategyEvent {
+  id: string;
+  timestamp: string;
+  strategy_name: string;
+  stage: string;
+  event_type: string;
+  status: 'started' | 'passed' | 'failed' | 'completed';
+  duration_ms: number | null;
+  metadata: Record<string, any> | null;
+}
+
+export interface EventsResponse {
+  period_hours: number;
+  filters: {
+    stage: string | null;
+    status: string | null;
+  };
+  count: number;
+  events: StrategyEvent[];
+}
+
+// GET /api/metrics/funnel
+export interface FunnelStage {
+  stage: string;
+  count: number;
+  failed?: number;
+  conversion_rate: number;
+}
+
+export interface FunnelResponse {
+  period_hours: number;
+  funnel: FunnelStage[];
+  overall_conversion: number;
+  retired_count: number;
+}
+
+// GET /api/metrics/failures
+export interface FailureReason {
+  reason: string;
+  count: number;
+  percentage: number;
+}
+
+export interface StageFailures {
+  stage: string;
+  total: number;
+  reasons: FailureReason[];
+}
+
+export interface FailuresResponse {
+  period_hours: number;
+  total_failures: number;
+  by_stage: StageFailures[];
+}
+
+// GET /api/metrics/timing
+export interface StageTiming {
+  avg_ms: number | null;
+  min_ms: number | null;
+  max_ms: number | null;
+  sample_count: number;
+}
+
+export interface TimingResponse {
+  period_hours: number;
+  timing: Record<string, StageTiming>;
+}

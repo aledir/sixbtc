@@ -16,6 +16,7 @@ from uuid import UUID
 
 from src.database import get_session
 from src.database.models import Strategy, Subaccount
+from src.database.event_tracker import EventTracker
 from src.executor.hyperliquid_client import HyperliquidClient
 from src.utils.logger import get_logger
 
@@ -119,6 +120,9 @@ class StrategyDeployer:
 
         logger.info(f"Deploying {strategy_name} to subaccount {subaccount_id}")
 
+        # Emit deployment started event
+        EventTracker.deployment_started(strategy_id, strategy_name, subaccount_id)
+
         try:
             # Calculate capital allocation (equal distribution)
             with get_session() as session:
@@ -160,6 +164,12 @@ class StrategyDeployer:
 
                 session.commit()
 
+            # Emit events for successful deployment
+            EventTracker.strategy_promoted_live(strategy_id, strategy_name, subaccount_id)
+            EventTracker.deployment_succeeded(
+                strategy_id, strategy_name, subaccount_id, capital_per
+            )
+
             logger.info(
                 f"Deployed {strategy_name} to subaccount {subaccount_id} "
                 f"(capital=${capital_per:.2f})"
@@ -168,6 +178,10 @@ class StrategyDeployer:
             return True
 
         except Exception as e:
+            # Emit deployment failed event
+            EventTracker.deployment_failed(
+                strategy_id, strategy_name, subaccount_id, str(e)
+            )
             logger.error(f"Deployment failed for {strategy_name}: {e}")
             return False
 
@@ -208,8 +222,23 @@ class StrategyDeployer:
                 ).first()
 
                 if strategy:
+                    # Calculate live duration if available
+                    live_duration_hours = None
+                    if strategy.live_since:
+                        delta = datetime.now(UTC) - strategy.live_since
+                        live_duration_hours = delta.total_seconds() / 3600
+
                     strategy.status = 'RETIRED'
                     strategy.retired_at = datetime.now(UTC)
+
+                    # Emit retirement event
+                    EventTracker.strategy_retired(
+                        strategy_id=strategy_id,
+                        strategy_name=strategy.name,
+                        reason=reason,
+                        live_duration_hours=live_duration_hours
+                    )
+
                     logger.info(f"Undeployed {strategy.name}: {reason}")
 
                 session.commit()

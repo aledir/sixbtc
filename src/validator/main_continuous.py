@@ -211,41 +211,92 @@ class ContinuousValidatorProcess:
         Returns:
             (passed, reason) tuple
         """
+        import time
+        from src.database.event_tracker import EventTracker
+
+        total_start = time.time()
+
         try:
             # Phase 1: Syntax validation
             logger.debug(f"[{strategy_name}] Phase 1: Syntax validation")
+            phase_start = time.time()
             syntax_result = self.syntax_validator.validate(code)
+            phase_ms = int((time.time() - phase_start) * 1000)
 
             if not syntax_result.passed:
+                EventTracker.validation_failed(
+                    strategy_id, strategy_name, "syntax",
+                    reason=str(syntax_result.errors),
+                    duration_ms=phase_ms,
+                    errors=syntax_result.errors
+                )
                 self._delete_strategy(strategy_id, f"Syntax: {syntax_result.errors}")
                 return (False, f"Syntax: {syntax_result.errors}")
 
+            EventTracker.validation_passed(
+                strategy_id, strategy_name, "syntax",
+                duration_ms=phase_ms,
+                class_name=syntax_result.class_name
+            )
             class_name = syntax_result.class_name
 
             # Phase 2: Lookahead detection (AST-based)
             logger.debug(f"[{strategy_name}] Phase 2: Lookahead detection")
+            phase_start = time.time()
             lookahead_result = self.lookahead_detector.validate(code)
+            phase_ms = int((time.time() - phase_start) * 1000)
 
             if not lookahead_result.passed:
+                EventTracker.validation_failed(
+                    strategy_id, strategy_name, "lookahead",
+                    reason=str(lookahead_result.violations),
+                    duration_ms=phase_ms,
+                    violations=lookahead_result.violations
+                )
                 self._delete_strategy(strategy_id, f"Lookahead: {lookahead_result.violations}")
                 return (False, f"Lookahead: {lookahead_result.violations}")
 
+            EventTracker.validation_passed(
+                strategy_id, strategy_name, "lookahead",
+                duration_ms=phase_ms
+            )
+
             # Phase 3: Execution validation
             logger.debug(f"[{strategy_name}] Phase 3: Execution validation")
+            phase_start = time.time()
             exec_result = self.execution_validator.validate(code, class_name, None)
+            phase_ms = int((time.time() - phase_start) * 1000)
 
             if not exec_result.passed:
+                EventTracker.validation_failed(
+                    strategy_id, strategy_name, "execution",
+                    reason=str(exec_result.errors),
+                    duration_ms=phase_ms,
+                    errors=exec_result.errors
+                )
                 self._delete_strategy(strategy_id, f"Execution: {exec_result.errors}")
                 return (False, f"Execution: {exec_result.errors}")
 
+            EventTracker.validation_passed(
+                strategy_id, strategy_name, "execution",
+                duration_ms=phase_ms
+            )
+
             # All 3 phases passed - promote to VALIDATED
             # Note: Shuffle test will run in backtester after scoring
+            total_ms = int((time.time() - total_start) * 1000)
+            EventTracker.validation_completed(strategy_id, strategy_name, total_ms)
+
             self.processor.release_strategy(strategy_id, "VALIDATED")
             logger.debug(f"[{strategy_name}] Passed pre-backtest validation (3 phases)")
             return (True, "All phases passed")
 
         except Exception as e:
             logger.error(f"Validation error for {strategy_name}: {e}", exc_info=True)
+            EventTracker.validation_failed(
+                strategy_id, strategy_name, "unknown",
+                reason=str(e)
+            )
             self.processor.mark_failed(strategy_id, str(e), delete=True)
             return (False, str(e))
 

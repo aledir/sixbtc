@@ -8,10 +8,11 @@ from datetime import datetime, timedelta, UTC
 from typing import Optional, List, Dict
 
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import select, func
+from sqlalchemy import select, func, and_
 from sqlalchemy.orm import Session
 
 from src.database import get_session, PipelineMetricsSnapshot
+from src.database.models import StrategyEvent
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
@@ -334,4 +335,316 @@ async def get_current_metrics(
             'pattern_strategies': latest.pattern_count,
             'ai_strategies': latest.ai_count,
         }
+    }
+
+
+# =============================================================================
+# EVENT-BASED ENDPOINTS (New)
+# =============================================================================
+
+@router.get("/events")
+async def get_events(
+    hours: int = Query(24, ge=1, le=168),
+    stage: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+    session: Session = Depends(get_session)
+) -> Dict:
+    """
+    Get recent pipeline events with optional filters.
+
+    Args:
+        hours: Look back period in hours (1-168)
+        stage: Filter by stage (generation, validation, backtest, etc.)
+        status: Filter by status (started, passed, failed, completed)
+        limit: Max events to return (1-1000)
+        session: Database session
+
+    Returns:
+        Dict with events array
+    """
+    since = datetime.now(UTC) - timedelta(hours=hours)
+
+    query = select(StrategyEvent).where(
+        StrategyEvent.timestamp >= since
+    )
+
+    if stage:
+        query = query.where(StrategyEvent.stage == stage)
+    if status:
+        query = query.where(StrategyEvent.status == status)
+
+    query = query.order_by(StrategyEvent.timestamp.desc()).limit(limit)
+
+    result = session.execute(query)
+    events = result.scalars().all()
+
+    return {
+        'period_hours': hours,
+        'filters': {'stage': stage, 'status': status},
+        'count': len(events),
+        'events': [
+            {
+                'id': str(e.id),
+                'timestamp': e.timestamp.isoformat(),
+                'strategy_name': e.strategy_name,
+                'stage': e.stage,
+                'event_type': e.event_type,
+                'status': e.status,
+                'duration_ms': e.duration_ms,
+                'metadata': e.event_data,
+            }
+            for e in events
+        ]
+    }
+
+
+@router.get("/funnel")
+async def get_pipeline_funnel(
+    hours: int = Query(24, ge=1, le=168),
+    session: Session = Depends(get_session)
+) -> Dict:
+    """
+    Get pipeline conversion funnel metrics.
+
+    Shows how many strategies pass through each stage and conversion rates.
+
+    Args:
+        hours: Look back period in hours (1-168)
+        session: Database session
+
+    Returns:
+        Dict with funnel stages and conversion rates
+    """
+    since = datetime.now(UTC) - timedelta(hours=hours)
+
+    # Count events at each stage
+    generated = session.execute(
+        select(func.count(StrategyEvent.id))
+        .where(
+            and_(
+                StrategyEvent.stage == 'generation',
+                StrategyEvent.event_type == 'created',
+                StrategyEvent.timestamp >= since
+            )
+        )
+    ).scalar() or 0
+
+    validated = session.execute(
+        select(func.count(StrategyEvent.id))
+        .where(
+            and_(
+                StrategyEvent.stage == 'validation',
+                StrategyEvent.event_type == 'completed',
+                StrategyEvent.timestamp >= since
+            )
+        )
+    ).scalar() or 0
+
+    validation_failed = session.execute(
+        select(func.count(StrategyEvent.id))
+        .where(
+            and_(
+                StrategyEvent.stage == 'validation',
+                StrategyEvent.status == 'failed',
+                StrategyEvent.timestamp >= since
+            )
+        )
+    ).scalar() or 0
+
+    pool_entered = session.execute(
+        select(func.count(StrategyEvent.id))
+        .where(
+            and_(
+                StrategyEvent.stage == 'pool',
+                StrategyEvent.event_type == 'entered',
+                StrategyEvent.timestamp >= since
+            )
+        )
+    ).scalar() or 0
+
+    backtest_failed = session.execute(
+        select(func.count(StrategyEvent.id))
+        .where(
+            and_(
+                StrategyEvent.stage.in_(['backtest', 'shuffle_test', 'multi_window', 'pool']),
+                StrategyEvent.status == 'failed',
+                StrategyEvent.timestamp >= since
+            )
+        )
+    ).scalar() or 0
+
+    deployed = session.execute(
+        select(func.count(StrategyEvent.id))
+        .where(
+            and_(
+                StrategyEvent.stage == 'deployment',
+                StrategyEvent.event_type == 'succeeded',
+                StrategyEvent.timestamp >= since
+            )
+        )
+    ).scalar() or 0
+
+    retired = session.execute(
+        select(func.count(StrategyEvent.id))
+        .where(
+            and_(
+                StrategyEvent.stage == 'live',
+                StrategyEvent.event_type == 'retired',
+                StrategyEvent.timestamp >= since
+            )
+        )
+    ).scalar() or 0
+
+    return {
+        'period_hours': hours,
+        'funnel': [
+            {
+                'stage': 'Generated',
+                'count': generated,
+                'conversion_rate': 1.0,
+            },
+            {
+                'stage': 'Validated',
+                'count': validated,
+                'failed': validation_failed,
+                'conversion_rate': validated / generated if generated > 0 else 0,
+            },
+            {
+                'stage': 'Active Pool',
+                'count': pool_entered,
+                'failed': backtest_failed,
+                'conversion_rate': pool_entered / validated if validated > 0 else 0,
+            },
+            {
+                'stage': 'Deployed (LIVE)',
+                'count': deployed,
+                'conversion_rate': deployed / pool_entered if pool_entered > 0 else 0,
+            },
+        ],
+        'overall_conversion': generated > 0 and deployed / generated or 0,
+        'retired_count': retired,
+    }
+
+
+@router.get("/failures")
+async def get_failure_breakdown(
+    hours: int = Query(24, ge=1, le=168),
+    session: Session = Depends(get_session)
+) -> Dict:
+    """
+    Get detailed failure breakdown by stage and reason.
+
+    Shows WHY strategies failed, not just counts.
+
+    Args:
+        hours: Look back period in hours (1-168)
+        session: Database session
+
+    Returns:
+        Dict with failure breakdown by stage
+    """
+    since = datetime.now(UTC) - timedelta(hours=hours)
+
+    # Get all failure events
+    failures = session.execute(
+        select(
+            StrategyEvent.stage,
+            StrategyEvent.event_type,
+            StrategyEvent.event_data
+        )
+        .where(
+            and_(
+                StrategyEvent.status == 'failed',
+                StrategyEvent.timestamp >= since
+            )
+        )
+    ).all()
+
+    # Aggregate by stage
+    by_stage: Dict[str, Dict[str, int]] = {}
+    for stage, event_type, event_data in failures:
+        if stage not in by_stage:
+            by_stage[stage] = {}
+
+        # Get reason from event_data if available
+        reason = event_type
+        if event_data and isinstance(event_data, dict) and 'reason' in event_data:
+            reason = event_data['reason']
+
+        by_stage[stage][reason] = by_stage[stage].get(reason, 0) + 1
+
+    # Format response
+    breakdown = []
+    for stage, reasons in by_stage.items():
+        stage_total = sum(reasons.values())
+        breakdown.append({
+            'stage': stage,
+            'total': stage_total,
+            'reasons': [
+                {'reason': r, 'count': c, 'percentage': c / stage_total if stage_total > 0 else 0}
+                for r, c in sorted(reasons.items(), key=lambda x: x[1], reverse=True)
+            ]
+        })
+
+    # Sort by total failures
+    breakdown.sort(key=lambda x: x['total'], reverse=True)
+
+    return {
+        'period_hours': hours,
+        'total_failures': len(failures),
+        'by_stage': breakdown,
+    }
+
+
+@router.get("/timing")
+async def get_timing_metrics(
+    hours: int = Query(24, ge=1, le=168),
+    session: Session = Depends(get_session)
+) -> Dict:
+    """
+    Get timing metrics per pipeline stage.
+
+    Shows average, min, max duration for each phase.
+
+    Args:
+        hours: Look back period in hours (1-168)
+        session: Database session
+
+    Returns:
+        Dict with timing breakdown by stage
+    """
+    since = datetime.now(UTC) - timedelta(hours=hours)
+
+    stages = ['validation', 'shuffle_test', 'multi_window']
+    timing = {}
+
+    for stage in stages:
+        result = session.execute(
+            select(
+                func.avg(StrategyEvent.duration_ms).label('avg'),
+                func.min(StrategyEvent.duration_ms).label('min'),
+                func.max(StrategyEvent.duration_ms).label('max'),
+                func.count(StrategyEvent.id).label('count'),
+            )
+            .where(
+                and_(
+                    StrategyEvent.stage == stage,
+                    StrategyEvent.duration_ms.isnot(None),
+                    StrategyEvent.timestamp >= since
+                )
+            )
+        ).first()
+
+        if result and result.count > 0:
+            timing[stage] = {
+                'avg_ms': round(result.avg, 1) if result.avg else None,
+                'min_ms': result.min,
+                'max_ms': result.max,
+                'sample_count': result.count,
+            }
+
+    return {
+        'period_hours': hours,
+        'timing': timing,
     }

@@ -15,6 +15,7 @@ from uuid import UUID
 
 from src.database import get_session
 from src.database.models import Strategy, Subaccount
+from src.database.event_tracker import EventTracker
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -153,8 +154,23 @@ class RetirementPolicy:
                     logger.warning(f"Strategy {strategy_id} not found")
                     return False
 
+                # Calculate live duration if available
+                live_duration_hours = None
+                if strategy.live_since:
+                    delta = datetime.now(UTC) - strategy.live_since
+                    live_duration_hours = delta.total_seconds() / 3600
+
                 strategy.status = 'RETIRED'
                 strategy.retired_at = datetime.now(UTC)
+
+                # Emit retirement event
+                EventTracker.strategy_retired(
+                    strategy_id=strategy_id,
+                    strategy_name=strategy.name,
+                    reason=reason,
+                    live_duration_hours=live_duration_hours,
+                    final_pnl=strategy.total_pnl_live
+                )
 
                 # Free subaccount
                 subaccount = (
