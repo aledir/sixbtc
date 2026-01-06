@@ -21,8 +21,6 @@ from src.api.schemas import (
     StrategyDetail,
     StrategyListItem,
 )
-from src.classifier.dual_ranker import DualRanker
-from src.config import load_config
 from src.database import Strategy, BacktestResult, Trade, get_session
 from src.utils import get_logger
 
@@ -111,27 +109,56 @@ async def get_backtest_ranking(
     """
     Get backtest ranking for ACTIVE strategies.
 
-    Returns strategies ordered by backtest score (combination of Sharpe,
-    Expectancy, Consistency, and Walk-Forward Stability).
+    Returns strategies ordered by backtest score (combination of Edge,
+    Sharpe, Consistency, and Drawdown penalty).
     """
     try:
-        config = load_config()._raw_config
-        ranker = DualRanker(config)
+        with get_session() as session:
+            # Query ACTIVE strategies ordered by score_backtest
+            strategies = (
+                session.query(Strategy)
+                .filter(
+                    Strategy.status == 'ACTIVE',
+                    Strategy.score_backtest.isnot(None),
+                )
+                .order_by(desc(Strategy.score_backtest))
+                .limit(limit)
+                .all()
+            )
 
-        # Get ranking from DualRanker
-        ranking = ranker.get_backtest_ranking(limit=limit)
+            # Build ranking list
+            ranking = []
+            for s in strategies:
+                # Get backtest result for additional metrics
+                backtest = session.query(BacktestResult).filter(
+                    BacktestResult.strategy_id == s.id,
+                    BacktestResult.period_type == 'full',
+                ).first()
 
-        # Calculate averages
-        avg_score = sum(s['score'] or 0 for s in ranking) / max(len(ranking), 1)
-        avg_sharpe = sum(s['sharpe'] or 0 for s in ranking) / max(len(ranking), 1)
+                ranking.append({
+                    'id': str(s.id),
+                    'name': s.name,
+                    'strategy_type': s.strategy_type,
+                    'timeframe': s.timeframe,
+                    'score': s.score_backtest,
+                    'sharpe': backtest.sharpe_ratio if backtest else None,
+                    'win_rate': backtest.win_rate if backtest else None,
+                    'expectancy': backtest.expectancy if backtest else None,
+                    'max_drawdown': backtest.max_drawdown if backtest else None,
+                    'total_trades': backtest.total_trades if backtest else None,
+                })
 
-        return RankingResponse(
-            ranking_type="backtest",
-            count=len(ranking),
-            strategies=ranking,
-            avg_score=avg_score,
-            avg_sharpe=avg_sharpe,
-        )
+            # Calculate averages
+            avg_score = sum(s['score'] or 0 for s in ranking) / max(len(ranking), 1)
+            avg_sharpe = sum(s['sharpe'] or 0 for s in ranking) / max(len(ranking), 1)
+
+            return RankingResponse(
+                ranking_type="backtest",
+                count=len(ranking),
+                strategies=ranking,
+                avg_score=avg_score,
+                avg_sharpe=avg_sharpe,
+            )
 
     except Exception as e:
         logger.error(f"Error getting backtest ranking: {e}")
@@ -149,25 +176,48 @@ async def get_live_ranking(
     Only includes strategies with minimum number of trades.
     """
     try:
-        config = load_config()._raw_config
-        ranker = DualRanker(config)
+        with get_session() as session:
+            # Query LIVE strategies ordered by score_live
+            strategies = (
+                session.query(Strategy)
+                .filter(
+                    Strategy.status == 'LIVE',
+                    Strategy.score_live.isnot(None),
+                )
+                .order_by(desc(Strategy.score_live))
+                .limit(limit)
+                .all()
+            )
 
-        # Get ranking from DualRanker
-        ranking = ranker.get_live_ranking(limit=limit)
+            # Build ranking list
+            ranking = []
+            for s in strategies:
+                ranking.append({
+                    'id': str(s.id),
+                    'name': s.name,
+                    'strategy_type': s.strategy_type,
+                    'timeframe': s.timeframe,
+                    'score': s.score_live,
+                    'sharpe': s.sharpe_live,
+                    'win_rate': s.win_rate_live,
+                    'total_pnl': s.total_pnl_live,
+                    'total_trades': s.total_trades_live,
+                    'live_since': s.live_since.isoformat() if s.live_since else None,
+                })
 
-        # Calculate averages
-        avg_score = sum(s['score'] or 0 for s in ranking) / max(len(ranking), 1)
-        avg_sharpe = sum(s['sharpe'] or 0 for s in ranking) / max(len(ranking), 1)
-        avg_pnl = sum(s.get('total_pnl') or 0 for s in ranking) / max(len(ranking), 1)
+            # Calculate averages
+            avg_score = sum(s['score'] or 0 for s in ranking) / max(len(ranking), 1)
+            avg_sharpe = sum(s['sharpe'] or 0 for s in ranking) / max(len(ranking), 1)
+            avg_pnl = sum(s['total_pnl'] or 0 for s in ranking) / max(len(ranking), 1)
 
-        return RankingResponse(
-            ranking_type="live",
-            count=len(ranking),
-            strategies=ranking,
-            avg_score=avg_score,
-            avg_sharpe=avg_sharpe,
-            avg_pnl=avg_pnl,
-        )
+            return RankingResponse(
+                ranking_type="live",
+                count=len(ranking),
+                strategies=ranking,
+                avg_score=avg_score,
+                avg_sharpe=avg_sharpe,
+                avg_pnl=avg_pnl,
+            )
 
     except Exception as e:
         logger.error(f"Error getting live ranking: {e}")

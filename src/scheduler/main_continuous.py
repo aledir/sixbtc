@@ -184,7 +184,7 @@ class ContinuousSchedulerProcess:
         with get_session() as session:
             # Count strategies by status
             status_counts = {}
-            for status in ["GENERATED", "VALIDATED", "TESTED", "SELECTED", "LIVE", "RETIRED", "FAILED"]:
+            for status in ["GENERATED", "VALIDATED", "ACTIVE", "LIVE", "RETIRED", "FAILED"]:
                 count = session.query(Strategy).filter(Strategy.status == status).count()
                 if count > 0:
                     status_counts[status] = count

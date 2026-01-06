@@ -172,7 +172,7 @@ There is ONLY: **STRATEGY**.
 **CODE IMPLICATIONS**:
 - Variable names: `strategies` not `variations`, `generated_strategies` not `template_instances`
 - No "template_id" field in Strategy model (it's just metadata, not identity)
-- Each strategy goes through FULL pipeline: GENERATED → VALIDATED → TESTED → SELECTED → LIVE
+- Each strategy goes through FULL pipeline: GENERATED → VALIDATED → ACTIVE → LIVE → RETIRED
 - Pattern-based strategies = AI-based strategies = Parametric strategies (all are STRATEGIES)
 
 **WHY THIS MATTERS**:
@@ -333,10 +333,14 @@ sixbtc/
 │   │   ├── optimizer.py        # Walk-forward parameter tuning
 │   │   └── validator.py        # Lookahead + shuffle test
 │   │
-│   ├── classifier/             # Strategy ranking
-│   │   ├── scorer.py           # Multi-factor scoring
-│   │   ├── regime_filter.py    # Market condition filters
-│   │   └── portfolio_builder.py # Select top 10
+│   ├── scorer/                 # Strategy scoring
+│   │   ├── backtest_scorer.py  # Unified score formula
+│   │   ├── live_scorer.py      # Live performance scoring
+│   │   └── pool_manager.py     # ACTIVE pool management
+│   │
+│   ├── rotator/                # ACTIVE → LIVE rotation
+│   │   ├── selector.py         # Strategy selection
+│   │   └── deployer.py         # Subaccount deployment
 │   │
 │   ├── executor/               # Live trading
 │   │   ├── hyperliquid_client.py # From sevenbtc
@@ -357,11 +361,8 @@ sixbtc/
 ├── config/
 │   └── config.yaml             # Master configuration
 │
-├── strategies/                 # Generated strategy files
-│   ├── pending/                # New strategies
-│   ├── tested/                 # Backtested strategies
-│   ├── selected/               # Top 10 selected
-│   └── live/                   # Currently deployed
+├── strategies/                 # (LEGACY - database is source of truth)
+│   └── cache/                  # Temporary file cache only
 │
 ├── data/                       # Market data cache
 │   └── binance/                # OHLCV data
@@ -373,52 +374,42 @@ sixbtc/
 
 ### Workflow Overview
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ PHASE 1: GENERATION (every 4 hours)                         │
-├──────────────────────────────────────────────────────────────┤
-│ 1. Query pattern-discovery API (Tier 1 patterns)            │
-│ 2. AI combines patterns OR generates custom logic           │
-│ 3. Generate 20-50 StrategyCore classes                      │
-│ 4. Save to database (status: PENDING)                       │
-└──────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│ PHASE 1: GENERATION                                            │
+├────────────────────────────────────────────────────────────────┤
+│ Generator: AI/Pattern → base code → parametric expansion       │
+│ Output: strategies (status: GENERATED)                         │
+└────────────────────────────────────────────────────────────────┘
                           ↓
-┌──────────────────────────────────────────────────────────────┐
-│ PHASE 2: BACKTESTING (parallel, 10 workers)                 │
-├──────────────────────────────────────────────────────────────┤
-│ 1. Load Binance data (HL-Binance intersection)              │
-│ 2. Run backtest (6 months, all timeframes)                  │
-│ 3. Calculate metrics: Sharpe, Win%, DD, Edge, Consistency   │
-│ 4. Lookahead validation (AST + shuffle test)                │
-│ 5. Walk-forward optimization (limited parameters)           │
-│ 6. Save results (status: TESTED)                            │
-└──────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│ PHASE 2: VALIDATION (3 phases)                                 │
+├────────────────────────────────────────────────────────────────┤
+│ Validator: syntax → AST lookahead → execution                  │
+│ Output: strategies (status: VALIDATED or DELETE)               │
+└────────────────────────────────────────────────────────────────┘
                           ↓
-┌──────────────────────────────────────────────────────────────┐
-│ PHASE 3: CLASSIFICATION (every 1 hour)                      │
-├──────────────────────────────────────────────────────────────┤
-│ 1. Score: (0.4×Edge + 0.3×Sharpe + 0.3×Stability)           │
-│ 2. Filter by market regime (sevenbtc detector)              │
-│ 3. Diversify: max 3 strategies per type                     │
-│ 4. Select top 10 (status: SELECTED)                         │
-└──────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│ PHASE 3: BACKTESTING                                           │
+├────────────────────────────────────────────────────────────────┤
+│ Backtester: training (365d) + holdout (30d)                    │
+│ Score calculation (unified formula)                            │
+│ Post-scoring: shuffle test + multi-window (if score >= 40)     │
+│ Output: strategies (status: ACTIVE pool or DELETE)             │
+└────────────────────────────────────────────────────────────────┘
                           ↓
-┌──────────────────────────────────────────────────────────────┐
-│ PHASE 4: DEPLOYMENT (every 24 hours)                        │
-├──────────────────────────────────────────────────────────────┤
-│ 1. Stop underperforming subaccounts                         │
-│ 2. Deploy top 10 to subaccounts 1-10                        │
-│ 3. Allocate capital equally (10% each)                      │
-│ 4. Start live trading (status: LIVE)                        │
-└──────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│ PHASE 4: ROTATION                                              │
+├────────────────────────────────────────────────────────────────┤
+│ Rotator: selects top from ACTIVE → deploys to subaccounts      │
+│ Output: strategies (status: LIVE)                              │
+└────────────────────────────────────────────────────────────────┘
                           ↓
-┌──────────────────────────────────────────────────────────────┐
-│ PHASE 5: MONITORING (continuous, every 15min)               │
-├──────────────────────────────────────────────────────────────┤
-│ 1. Track live performance                                   │
-│ 2. Emergency stop if DD > 30% or daily loss > 10%           │
-│ 3. Auto-retire if performance < backtest -50%               │
-│ 4. Feed performance data → next generation cycle            │
-└──────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│ PHASE 5: MONITORING                                            │
+├────────────────────────────────────────────────────────────────┤
+│ Monitor: tracks live performance, retires underperformers      │
+│ Output: strategies (status: RETIRED if degraded)               │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 ---
