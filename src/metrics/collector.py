@@ -489,58 +489,138 @@ class MetricsCollector:
         failures: Dict[str, List[Dict]],
         timing: Dict[str, Optional[float]]
     ) -> None:
-        """Log metrics in readable format."""
+        """Log metrics in detailed format."""
         now = datetime.now(UTC)
         should_log_detail = (now - self._last_detail_log).total_seconds() >= self.log_detail_interval
 
-        # Always log compact summary
+        # Get current counts
         g = queue_depths.get('GENERATED', 0)
         v = queue_depths.get('VALIDATED', 0)
         a = queue_depths.get('ACTIVE', 0)
         l = queue_depths.get('LIVE', 0)
+        r = queue_depths.get('RETIRED', 0)
+        f = queue_depths.get('FAILED', 0)
 
+        # Get throughput (per hour)
+        gen_tp = throughput.get('generation') or 0
+        val_tp = throughput.get('validation') or 0
+        bt_tp = throughput.get('backtesting') or 0
+
+        # Convert hourly to interval (5min = 1/12 of hour)
+        interval_hours = self.interval_seconds / 3600
+        gen_interval = int(gen_tp * interval_hours)
+        val_interval = int(val_tp * interval_hours)
+        bt_interval = int(bt_tp * interval_hours)
+
+        # Get success rates
         val_rate = success_rates.get('validation')
         bt_rate = success_rates.get('backtesting')
-        val_str = f"{val_rate:.0%}" if val_rate is not None else "N/A"
-        bt_str = f"{bt_rate:.0%}" if bt_rate is not None else "N/A"
 
-        gen_tp = throughput.get('generation')
-        gen_str = f"{gen_tp:.1f}/h" if gen_tp else "0"
+        # Get timing
+        gen_time = timing.get('generation')
+        val_time = timing.get('validation')
+        bt_time = timing.get('backtesting')
 
+        # Overall status
         status = self._get_overall_status(queue_depths, success_rates).upper()
 
-        logger.info(
-            f"Pipeline: {status} | "
-            f"GEN:{g} VAL:{v} ACT:{a}/{self.limit_active} LIVE:{l}/{self.limit_live} | "
-            f"rates: val={val_str} bt={bt_str} | gen={gen_str}"
-        )
+        # Format timing strings
+        def fmt_time(ms: Optional[float]) -> str:
+            if ms is None:
+                return "N/A"
+            if ms >= 1000:
+                return f"{ms/1000:.1f}s"
+            return f"{ms:.0f}ms"
+
+        # Build failure breakdown strings
+        val_fails = failures.get('validation', [])
+        bt_fails = failures.get('backtesting', [])
+
+        val_fail_str = ""
+        if val_fails:
+            parts = [f"{f['type']}={f['count']}" for f in val_fails[:3]]
+            val_fail_str = f" | fail: {' '.join(parts)}"
+
+        bt_fail_str = ""
+        if bt_fails:
+            parts = [f"{f['type']}={f['count']}" for f in bt_fails[:3]]
+            bt_fail_str = f" | fail: {' '.join(parts)}"
+
+        # Count passed/failed in interval
+        val_ok = int(val_interval * (val_rate or 0)) if val_rate else 0
+        val_ko = val_interval - val_ok
+        bt_ok = int(bt_interval * (bt_rate or 0)) if bt_rate else 0
+        bt_ko = bt_interval - bt_ok
+
+        # Log compact format (always)
+        interval_min = self.interval_seconds // 60
+        logger.info(f"Pipeline: {status} | {interval_min}min")
+        logger.info(f"  GEN:  +{gen_interval} ({fmt_time(gen_time)}) | queue={g}/{self.limit_generated}")
+
+        if val_rate is not None:
+            logger.info(f"  VAL:  +{val_ok} OK +{val_ko} FAIL ({fmt_time(val_time)}){val_fail_str} | queue={v}/{self.limit_validated}")
+        else:
+            logger.info(f"  VAL:  +{val_interval} ({fmt_time(val_time)}) | queue={v}/{self.limit_validated}")
+
+        if bt_rate is not None:
+            logger.info(f"  BT:   +{bt_ok} OK +{bt_ko} FAIL ({fmt_time(bt_time)}){bt_fail_str} | queue={v}")
+        else:
+            logger.info(f"  BT:   +{bt_interval} ({fmt_time(bt_time)}) | queue={v}")
+
+        logger.info(f"  POOL: {a}/{self.limit_active}")
+        logger.info(f"  LIVE: {l}/{self.limit_live} | retired={r} failed={f}")
 
         # Log detailed breakdown periodically
         if should_log_detail:
             self._last_detail_log = now
+            self._log_detailed_metrics(failures, timing, success_rates)
 
-            # Failure breakdown
-            val_fails = failures.get('validation', [])
-            bt_fails = failures.get('backtesting', [])
+    def _log_detailed_metrics(
+        self,
+        failures: Dict[str, List[Dict]],
+        timing: Dict[str, Optional[float]],
+        success_rates: Dict[str, Optional[float]]
+    ) -> None:
+        """Log detailed breakdown every N minutes."""
+        logger.info("=" * 70)
+        logger.info("DETAILED METRICS BREAKDOWN")
+        logger.info("=" * 70)
 
-            if val_fails or bt_fails:
-                fail_parts = []
-                for f in val_fails:
-                    fail_parts.append(f"{f['type']}={f['count']}")
-                for f in bt_fails:
-                    fail_parts.append(f"{f['type']}={f['count']}")
+        # Validation failure breakdown
+        val_fails = failures.get('validation', [])
+        if val_fails:
+            logger.info("VALIDATION FAILURES:")
+            for f in val_fails:
+                pct = f.get('percentage', 0)
+                logger.info(f"  - {f['type']}: {f['count']} ({pct:.1f}%)")
 
-                if fail_parts:
-                    logger.info(f"Failures: {' '.join(fail_parts)}")
+        # Backtest failure breakdown
+        bt_fails = failures.get('backtesting', [])
+        if bt_fails:
+            logger.info("BACKTEST FAILURES:")
+            for f in bt_fails:
+                pct = f.get('percentage', 0)
+                logger.info(f"  - {f['type']}: {f['count']} ({pct:.1f}%)")
 
-            # Timing breakdown
-            timing_parts = []
+        # Timing breakdown
+        if any(v is not None for v in timing.values()):
+            logger.info("TIMING (avg per operation):")
             for stage, ms in timing.items():
                 if ms is not None:
-                    timing_parts.append(f"{stage}={ms:.0f}ms")
+                    if ms >= 1000:
+                        logger.info(f"  - {stage}: {ms/1000:.1f}s")
+                    else:
+                        logger.info(f"  - {stage}: {ms:.0f}ms")
 
-            if timing_parts:
-                logger.info(f"Timing (avg): {' '.join(timing_parts)}")
+        # Success rates
+        logger.info("SUCCESS RATES:")
+        for stage, rate in success_rates.items():
+            if rate is not None:
+                logger.info(f"  - {stage}: {rate:.1%}")
+            else:
+                logger.info(f"  - {stage}: N/A (no data)")
+
+        logger.info("=" * 70)
 
     def get_funnel_metrics(self, hours: int = 24) -> Dict[str, Any]:
         """
