@@ -421,11 +421,19 @@ class StrategyBuilder:
             if not base_result:
                 return []
 
+            # CRITICAL: Use pattern's timeframe, not the random one passed in
+            # Pattern was validated on its specific timeframe - using different TF will fail
+            pattern_tf = pattern.timeframe
+            if pattern_tf != timeframe:
+                logger.info(
+                    f"Using pattern timeframe {pattern_tf} (ignoring requested {timeframe})"
+                )
+
             # Expand to N strategies using parametric generator
             parametric_results = self.parametric_generator.generate_from_base_code(
                 base_code=base_result.code,
                 strategy_type=base_result.strategy_type,
-                timeframe=timeframe,
+                timeframe=pattern_tf,  # Use pattern's TF, not random
                 source_id=str(pattern.id),
                 source_type="pattern",
                 pattern_coins=base_result.pattern_coins,
@@ -476,6 +484,9 @@ class StrategyBuilder:
         Returns:
             GeneratedStrategy with all fields populated
         """
+        # Extract UUID part from pattern.id (may contain __target_name suffix)
+        pattern_uuid = str(pattern.id).split('__')[0] if '__' in str(pattern.id) else str(pattern.id)
+
         return GeneratedStrategy(
             code=parametric_result.code,
             strategy_id=parametric_result.strategy_id,
@@ -486,9 +497,9 @@ class StrategyBuilder:
             validation_passed=parametric_result.validation_passed,
             validation_errors=parametric_result.validation_errors,
             leverage=parametric_result.parameters.get('leverage', 1),
-            pattern_id=str(pattern.id),
+            pattern_id=pattern_uuid,
             generation_mode="pattern",
-            template_id=parametric_result.template_id,
+            template_id=None,  # No template for pattern-based strategies
             parameters=parametric_result.parameters,
             parameter_hash=parametric_result.parameter_hash,
             pattern_coins=parametric_result.pattern_coins,

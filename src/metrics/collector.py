@@ -78,11 +78,11 @@ class MetricsCollector:
                 # Calculate utilization
                 utilization = self._calculate_utilization(queue_depths)
 
-                # Detect bottleneck
-                bottleneck = self._detect_bottleneck(queue_depths, utilization)
+                # Calculate success rates (pass rate through pipeline stages)
+                success_rates = self._calculate_success_rates(session)
 
-                # Get overall status
-                overall_status = self._get_overall_status(utilization, queue_depths)
+                # Get overall status (based on ACTIVE pool, not queue utilization)
+                overall_status = self._get_overall_status(queue_depths, success_rates)
 
                 # Get quality metrics
                 quality = self._get_quality_metrics(session)
@@ -112,8 +112,12 @@ class MetricsCollector:
                     utilization_validated=utilization.get('validated'),
                     utilization_active=utilization.get('active'),
 
-                    # Bottleneck
-                    bottleneck_stage=bottleneck,
+                    # Success rates (strategies that passed each stage)
+                    success_rate_validation=success_rates.get('validation'),
+                    success_rate_backtesting=success_rates.get('backtesting'),
+
+                    # Bottleneck - not used (misleading), kept for schema compatibility
+                    bottleneck_stage=None,
 
                     # Overall status
                     overall_status=overall_status,
@@ -131,28 +135,22 @@ class MetricsCollector:
                 session.add(snapshot)
                 session.commit()
 
-                # Build readable log message with percentages
-                g_util = utilization.get('generated', 0) * 100
-                v_util = utilization.get('validated', 0) * 100
-                a_util = utilization.get('active', 0) * 100
-
+                # Build readable log message
                 g_count = queue_depths.get('GENERATED', 0)
                 v_count = queue_depths.get('VALIDATED', 0)
                 a_count = queue_depths.get('ACTIVE', 0)
                 l_count = queue_depths.get('LIVE', 0)
 
-                # Calculate LIVE utilization
-                l_util = (l_count / self.limit_live * 100) if self.limit_live > 0 else 0
-
-                bottleneck_str = f" | Bottleneck: {bottleneck}" if bottleneck else ""
+                # Success rates as percentages
+                val_rate = success_rates.get('validation')
+                bt_rate = success_rates.get('backtesting')
+                val_str = f"{val_rate:.0%}" if val_rate is not None else "N/A"
+                bt_str = f"{bt_rate:.0%}" if bt_rate is not None else "N/A"
 
                 logger.info(
                     f"Snapshot: {overall_status.upper()} | "
-                    f"G:{g_count}/{self.limit_generated} ({g_util:.0f}%) "
-                    f"V:{v_count}/{self.limit_validated} ({v_util:.0f}%) "
-                    f"A:{a_count}/{self.limit_active} ({a_util:.0f}%) "
-                    f"L:{l_count}/{self.limit_live} ({l_util:.0f}%)"
-                    f"{bottleneck_str}"
+                    f"G:{g_count} V:{v_count} A:{a_count}/{self.limit_active} L:{l_count}/{self.limit_live} | "
+                    f"Pass rates: val={val_str} bt={bt_str}"
                 )
 
         except Exception as e:
@@ -209,56 +207,95 @@ class MetricsCollector:
             'active': queue_depths.get('ACTIVE', 0) / self.limit_active if self.limit_active > 0 else 0.0,
         }
 
-    def _detect_bottleneck(
-        self,
-        queue_depths: Dict[str, int],
-        utilization: Dict[str, float]
-    ) -> Optional[str]:
+    def _calculate_success_rates(self, session) -> Dict[str, Optional[float]]:
         """
-        Detect pipeline bottleneck.
+        Calculate success rates for each pipeline stage.
 
-        Bottleneck = stage with highest queue utilization > 0.7
+        Success rate = strategies that passed / strategies that were processed
+
+        Returns dict with 'validation' and 'backtesting' rates (0.0-1.0)
         """
-        # Find stage with highest utilization
-        if not utilization:
-            return None
+        from sqlalchemy import or_
 
-        max_stage = max(utilization.items(), key=lambda x: x[1])
-        stage_name, util_value = max_stage
+        # Validation success rate:
+        # Passed = currently VALIDATED or beyond (ACTIVE, LIVE)
+        # Failed = deleted by validator (we can't count these directly)
+        # Approximate: use ratio of VALIDATED+ACTIVE+LIVE vs total ever generated
+        validated_or_beyond = session.execute(
+            select(func.count(Strategy.id))
+            .where(Strategy.status.in_(['VALIDATED', 'ACTIVE', 'LIVE']))
+        ).scalar() or 0
 
-        # Only report if > 70% utilized
-        if util_value > 0.7:
-            # Map internal names to user-friendly names
-            stage_map = {
-                'generated': 'validation',
-                'validated': 'backtesting',
-                'active': 'rotation',
-            }
-            return stage_map.get(stage_name)
+        total_strategies = session.execute(
+            select(func.count(Strategy.id))
+        ).scalar() or 0
 
-        return None
+        # Validation rate: strategies that passed validation / total
+        # Note: GENERATED strategies haven't been validated yet
+        generated_count = session.execute(
+            select(func.count(Strategy.id))
+            .where(Strategy.status == 'GENERATED')
+        ).scalar() or 0
+
+        processed_by_validator = total_strategies - generated_count
+        val_rate = validated_or_beyond / processed_by_validator if processed_by_validator > 0 else None
+
+        # Backtesting success rate:
+        # Passed = ACTIVE or LIVE (made it through backtest)
+        # Failed = deleted by backtester
+        active_or_live = session.execute(
+            select(func.count(Strategy.id))
+            .where(Strategy.status.in_(['ACTIVE', 'LIVE']))
+        ).scalar() or 0
+
+        # Processed by backtester = strategies that left VALIDATED status
+        # We can approximate by: ACTIVE + LIVE (passed) vs what was VALIDATED
+        # For better tracking, we'd need historical data
+        # Approximate: ACTIVE+LIVE / (ACTIVE+LIVE+VALIDATED was processed)
+        # Since we delete failed strategies, we can't get exact count
+
+        # Use last_backtested_at to count strategies that were backtested
+        backtested_count = session.execute(
+            select(func.count(Strategy.id))
+            .where(Strategy.last_backtested_at.isnot(None))
+        ).scalar() or 0
+
+        bt_rate = active_or_live / backtested_count if backtested_count > 0 else None
+
+        return {
+            'validation': val_rate,
+            'backtesting': bt_rate,
+        }
 
     def _get_overall_status(
         self,
-        utilization: Dict[str, float],
-        queue_depths: Dict[str, int]
+        queue_depths: Dict[str, int],
+        success_rates: Dict[str, Optional[float]]
     ) -> str:
         """
         Determine overall system health status.
 
+        Based on:
+        - ACTIVE pool size (primary indicator of system health)
+        - Success rates (if too low, something is wrong)
+
         Returns: 'healthy', 'degraded', or 'critical'
         """
-        max_util = max(utilization.values()) if utilization else 0.0
+        active_count = queue_depths.get('ACTIVE', 0)
+        live_count = queue_depths.get('LIVE', 0)
+        bt_rate = success_rates.get('backtesting')
 
-        # Critical: any queue > 95% full
-        if max_util > 0.95:
-            return 'critical'
+        # Critical: no ACTIVE strategies and backtest rate is very low
+        if active_count == 0 and live_count == 0:
+            if bt_rate is not None and bt_rate < 0.01:
+                return 'critical'  # Pipeline producing nothing
+            return 'degraded'  # No strategies yet, but might be starting up
 
-        # Degraded: any queue > 80% full
-        if max_util > 0.80:
+        # Degraded: ACTIVE pool very low or backtest rate very low
+        if active_count < 10:
             return 'degraded'
 
-        # Healthy: all queues < 80%
+        # Healthy: ACTIVE pool has strategies
         return 'healthy'
 
     def _get_quality_metrics(self, session) -> Dict[str, Optional[float]]:

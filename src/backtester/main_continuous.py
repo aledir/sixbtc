@@ -588,33 +588,11 @@ class ContinuousBacktesterProcess:
             tf_all_parametric_results = {}  # Track ALL valid parametric results per TF
             tf_holdout_data = {}  # Track holdout data per TF (for additional parametric validation)
 
-            # Determine timeframes to test and whether to use parametric optimization
-            # Pre-parametrized strategies (base_code_hash present) skip parametric and use assigned TF
-            is_pre_parametrized = base_code_hash is not None
-            use_parametric = self.parametric_enabled and not is_pre_parametrized
+            # All strategies test ONLY their assigned timeframe
+            # Parameters are embedded in code, no multi-TF optimization needed
+            use_parametric = False  # Parametric disabled - params already in code
 
-            if is_pre_parametrized or pattern_coins:
-                # Pre-parametrized OR Pattern-based: test ONLY original_tf
-                # Parameters are already embedded in code, no optimization needed
-                timeframes_to_test = [original_tf]
-                if is_pre_parametrized:
-                    logger.info(
-                        f"[{strategy_name}] Pre-parametrized: testing only {original_tf}, "
-                        f"skip parametric (hash: {base_code_hash[:8]})"
-                    )
-                else:
-                    logger.info(
-                        f"[{strategy_name}] Pattern-based: testing only {original_tf} "
-                        f"(pattern validated on this timeframe)"
-                    )
-            else:
-                # Legacy AI-based (no base_code_hash): test ALL timeframes to find optimal
-                timeframes_to_test = self.timeframes
-                logger.info(
-                    f"[{strategy_name}] AI-based: testing all {len(self.timeframes)} timeframes"
-                )
-
-            for tf in timeframes_to_test:
+            for tf in [original_tf]:
                 # Validate pattern coins for this timeframe (3-level validation)
                 if pattern_coins:
                     validated_coins, validation_reason = self._validate_pattern_coins(

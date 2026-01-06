@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 @router.get("/timeseries")
 async def get_metrics_timeseries(
     period: str = Query("24h", pattern="^(1h|6h|24h|7d|30d)$"),
-    metric: str = Query("queue_depths", pattern="^(queue_depths|throughput|quality|utilization)$"),
+    metric: str = Query("queue_depths", pattern="^(queue_depths|throughput|quality|utilization|success_rates)$"),
     session: Session = Depends(get_session)
 ) -> Dict:
     """
@@ -55,8 +55,7 @@ async def get_metrics_timeseries(
                 'timestamp': s.timestamp.isoformat(),
                 'generated': s.queue_generated,
                 'validated': s.queue_validated,
-                'tested': s.queue_tested,
-                'selected': s.queue_selected,
+                'active': s.queue_active,
                 'live': s.queue_live,
                 'retired': s.queue_retired,
                 'failed': s.queue_failed,
@@ -70,7 +69,6 @@ async def get_metrics_timeseries(
                 'generation': s.throughput_generation,
                 'validation': s.throughput_validation,
                 'backtesting': s.throughput_backtesting,
-                'classification': s.throughput_classification,
             }
             for s in snapshots
         ]
@@ -91,6 +89,15 @@ async def get_metrics_timeseries(
                 'generated': s.utilization_generated,
                 'validated': s.utilization_validated,
                 'active': s.utilization_active,
+            }
+            for s in snapshots
+        ]
+    elif metric == "success_rates":
+        data = [
+            {
+                'timestamp': s.timestamp.isoformat(),
+                'validation': s.success_rate_validation,
+                'backtesting': s.success_rate_backtesting,
             }
             for s in snapshots
         ]
@@ -138,6 +145,8 @@ async def get_aggregated_metrics(
             func.max(PipelineMetricsSnapshot.utilization_active).label('max_util_active'),
             func.avg(PipelineMetricsSnapshot.avg_sharpe).label('avg_sharpe'),
             func.avg(PipelineMetricsSnapshot.avg_win_rate).label('avg_win_rate'),
+            func.avg(PipelineMetricsSnapshot.success_rate_validation).label('avg_success_val'),
+            func.avg(PipelineMetricsSnapshot.success_rate_backtesting).label('avg_success_bt'),
             func.count(PipelineMetricsSnapshot.id).label('snapshots_count'),
         )
         .where(PipelineMetricsSnapshot.timestamp >= since)
@@ -162,6 +171,10 @@ async def get_aggregated_metrics(
         'quality': {
             'avg_sharpe': round(result.avg_sharpe, 2) if result.avg_sharpe else None,
             'avg_win_rate': round(result.avg_win_rate, 3) if result.avg_win_rate else None,
+        },
+        'success_rates': {
+            'avg_validation': round(result.avg_success_val, 3) if result.avg_success_val else None,
+            'avg_backtesting': round(result.avg_success_bt, 3) if result.avg_success_bt else None,
         }
     }
 
@@ -249,13 +262,15 @@ async def get_metric_alerts(
 
     # Check system status
     if recent_snapshots[0].overall_status == 'critical':
-        alerts.append({
+        alert = {
             'severity': 'critical',
             'type': 'system_critical',
             'message': 'System status: CRITICAL',
             'duration_minutes': 0,
-            'bottleneck': recent_snapshots[0].bottleneck_stage,
-        })
+        }
+        if recent_snapshots[0].bottleneck_stage:
+            alert['bottleneck'] = recent_snapshots[0].bottleneck_stage
+        alerts.append(alert)
 
     return {
         'timestamp': datetime.now(UTC).isoformat(),
@@ -310,6 +325,10 @@ async def get_current_metrics(
             'avg_sharpe': latest.avg_sharpe,
             'avg_win_rate': latest.avg_win_rate,
             'avg_expectancy': latest.avg_expectancy,
+        },
+        'success_rates': {
+            'validation': latest.success_rate_validation,
+            'backtesting': latest.success_rate_backtesting,
         },
         'breakdown': {
             'pattern_strategies': latest.pattern_count,

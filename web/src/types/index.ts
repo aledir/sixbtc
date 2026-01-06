@@ -386,7 +386,7 @@ export interface PairsUpdateHistoryResponse {
 // =============================================================================
 
 export type MetricsPeriod = '1h' | '6h' | '24h' | '7d' | '30d';
-export type MetricsType = 'queue_depths' | 'throughput' | 'quality' | 'utilization';
+export type MetricsType = 'queue_depths' | 'throughput' | 'quality' | 'utilization' | 'success_rates';
 
 // GET /api/metrics/timeseries - Queue Depths data point
 export interface QueueDepthsDataPoint {
@@ -423,12 +423,19 @@ export interface UtilizationDataPoint {
   active: number | null;
 }
 
+// GET /api/metrics/timeseries - Success Rates data point
+export interface SuccessRatesDataPoint {
+  timestamp: string;
+  validation: number | null;
+  backtesting: number | null;
+}
+
 // GET /api/metrics/timeseries response
 export interface MetricsTimeseriesResponse {
   period: MetricsPeriod;
   metric: MetricsType;
   data_points: number;
-  data: QueueDepthsDataPoint[] | ThroughputDataPoint[] | QualityDataPoint[] | UtilizationDataPoint[];
+  data: QueueDepthsDataPoint[] | ThroughputDataPoint[] | QualityDataPoint[] | UtilizationDataPoint[] | SuccessRatesDataPoint[];
 }
 
 // GET /api/metrics/aggregated response
@@ -448,6 +455,10 @@ export interface MetricsAggregatedResponse {
   quality: {
     avg_sharpe: number | null;
     avg_win_rate: number | null;
+  };
+  success_rates: {
+    avg_validation: number | null;
+    avg_backtesting: number | null;
   };
 }
 
@@ -497,6 +508,10 @@ export interface MetricsCurrentResponse {
     avg_sharpe: number | null;
     avg_win_rate: number | null;
     avg_expectancy: number | null;
+  };
+  success_rates: {
+    validation: number | null;
+    backtesting: number | null;
   };
   breakdown: {
     pattern_strategies: number;

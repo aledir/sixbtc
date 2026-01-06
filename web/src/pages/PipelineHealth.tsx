@@ -20,9 +20,10 @@ import type {
   QueueDepthsDataPoint,
   ThroughputDataPoint,
   QualityDataPoint,
-  UtilizationDataPoint
+  UtilizationDataPoint,
+  SuccessRatesDataPoint
 } from '../types';
-import { Activity, AlertTriangle, ArrowRight, Bell, Clock, TrendingUp, Gauge, BarChart3, Zap } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowRight, Bell, Clock, TrendingUp, Gauge, BarChart3, Zap, CheckCircle } from 'lucide-react';
 import {
   BarChart, Bar, LineChart, Line, AreaChart, Area,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend, ReferenceLine
@@ -161,6 +162,7 @@ function MetricTypeSelector({
     { key: 'throughput', label: 'Throughput', icon: <TrendingUp className="w-4 h-4" /> },
     { key: 'quality', label: 'Quality', icon: <Zap className="w-4 h-4" /> },
     { key: 'utilization', label: 'Utilization', icon: <Gauge className="w-4 h-4" /> },
+    { key: 'success_rates', label: 'Success Rates', icon: <CheckCircle className="w-4 h-4" /> },
   ];
 
   return (
@@ -189,14 +191,14 @@ function AggregatedKPICards({ data }: { data: MetricsAggregatedResponse }) {
   const kpis = [
     {
       label: 'Avg Queue Depth',
-      value: Math.round(data.queue_depths.avg_generated + data.queue_depths.avg_validated + data.queue_depths.avg_tested),
-      detail: `G:${data.queue_depths.avg_generated.toFixed(0)} V:${data.queue_depths.avg_validated.toFixed(0)} T:${data.queue_depths.avg_tested.toFixed(0)}`,
+      value: Math.round(data.queue_depths.avg_generated + data.queue_depths.avg_validated + data.queue_depths.avg_active),
+      detail: `G:${data.queue_depths.avg_generated.toFixed(0)} V:${data.queue_depths.avg_validated.toFixed(0)} A:${data.queue_depths.avg_active.toFixed(0)}`,
     },
     {
       label: 'Max Utilization',
-      value: `${(Math.max(data.utilization.max_generated, data.utilization.max_validated, data.utilization.max_tested) * 100).toFixed(0)}%`,
-      detail: `G:${(data.utilization.max_generated * 100).toFixed(0)}% V:${(data.utilization.max_validated * 100).toFixed(0)}% T:${(data.utilization.max_tested * 100).toFixed(0)}%`,
-      warning: Math.max(data.utilization.max_generated, data.utilization.max_validated, data.utilization.max_tested) > 0.9,
+      value: `${(Math.max(data.utilization.max_generated, data.utilization.max_validated, data.utilization.max_active) * 100).toFixed(0)}%`,
+      detail: `G:${(data.utilization.max_generated * 100).toFixed(0)}% V:${(data.utilization.max_validated * 100).toFixed(0)}% A:${(data.utilization.max_active * 100).toFixed(0)}%`,
+      warning: Math.max(data.utilization.max_generated, data.utilization.max_validated, data.utilization.max_active) > 0.9,
     },
     {
       label: 'Avg Sharpe',
@@ -236,8 +238,7 @@ function QueueDepthsChart({ data }: { data: QueueDepthsDataPoint[] }) {
     timestamp: formatTimestamp(d.timestamp),
     Generated: d.generated,
     Validated: d.validated,
-    Tested: d.tested,
-    Selected: d.selected,
+    Active: d.active,
     Live: d.live,
   }));
 
@@ -254,8 +255,7 @@ function QueueDepthsChart({ data }: { data: QueueDepthsDataPoint[] }) {
         <Legend />
         <Line type="monotone" dataKey="Generated" stroke="#6b7280" strokeWidth={2} dot={false} />
         <Line type="monotone" dataKey="Validated" stroke="#3b82f6" strokeWidth={2} dot={false} />
-        <Line type="monotone" dataKey="Tested" stroke="#a855f7" strokeWidth={2} dot={false} />
-        <Line type="monotone" dataKey="Selected" stroke="#eab308" strokeWidth={2} dot={false} />
+        <Line type="monotone" dataKey="Active" stroke="#a855f7" strokeWidth={2} dot={false} />
         <Line type="monotone" dataKey="Live" stroke="#10b981" strokeWidth={2} dot={false} />
       </LineChart>
     </ResponsiveContainer>
@@ -270,7 +270,6 @@ function ThroughputMetricsChart({ data }: { data: ThroughputDataPoint[] }) {
     Generation: d.generation ?? 0,
     Validation: d.validation ?? 0,
     Backtesting: d.backtesting ?? 0,
-    Classification: d.classification ?? 0,
   }));
 
   return (
@@ -286,8 +285,7 @@ function ThroughputMetricsChart({ data }: { data: ThroughputDataPoint[] }) {
         <Legend />
         <Line type="monotone" dataKey="Generation" stroke="#6b7280" strokeWidth={2} dot={false} />
         <Line type="monotone" dataKey="Validation" stroke="#3b82f6" strokeWidth={2} dot={false} />
-        <Line type="monotone" dataKey="Backtesting" stroke="#a855f7" strokeWidth={2} dot={false} />
-        <Line type="monotone" dataKey="Classification" stroke="#10b981" strokeWidth={2} dot={false} />
+        <Line type="monotone" dataKey="Backtesting" stroke="#10b981" strokeWidth={2} dot={false} />
         <ReferenceLine y={5} stroke="#f59e0b" strokeDasharray="5 5" label={{ value: 'Min Threshold', fill: '#f59e0b', fontSize: 10 }} />
       </LineChart>
     </ResponsiveContainer>
@@ -333,7 +331,7 @@ function UtilizationChart({ data }: { data: UtilizationDataPoint[] }) {
     timestamp: formatTimestamp(d.timestamp),
     Generated: (d.generated ?? 0) * 100,
     Validated: (d.validated ?? 0) * 100,
-    Tested: (d.tested ?? 0) * 100,
+    Active: (d.active ?? 0) * 100,
   }));
 
   return (
@@ -352,8 +350,37 @@ function UtilizationChart({ data }: { data: UtilizationDataPoint[] }) {
         <ReferenceLine y={80} stroke="#f59e0b" strokeDasharray="5 5" label={{ value: 'Warning', fill: '#f59e0b', fontSize: 10 }} />
         <Area type="monotone" dataKey="Generated" stackId="1" stroke="#6b7280" fill="#6b7280" fillOpacity={0.3} />
         <Area type="monotone" dataKey="Validated" stackId="2" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.3} />
-        <Area type="monotone" dataKey="Tested" stackId="3" stroke="#a855f7" fill="#a855f7" fillOpacity={0.3} />
+        <Area type="monotone" dataKey="Active" stackId="3" stroke="#a855f7" fill="#a855f7" fillOpacity={0.3} />
       </AreaChart>
+    </ResponsiveContainer>
+  );
+}
+
+// === NEW: Success Rates Chart ===
+
+function SuccessRatesChart({ data }: { data: SuccessRatesDataPoint[] }) {
+  const chartData = data.map(d => ({
+    timestamp: formatTimestamp(d.timestamp),
+    Validation: d.validation ? d.validation * 100 : 0,
+    Backtesting: d.backtesting ? d.backtesting * 100 : 0,
+  }));
+
+  return (
+    <ResponsiveContainer width="100%" height={300}>
+      <LineChart data={chartData}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#1f1f1f" />
+        <XAxis dataKey="timestamp" stroke="#888" fontSize={12} />
+        <YAxis stroke="#888" fontSize={12} unit="%" domain={[0, 100]} />
+        <Tooltip
+          contentStyle={{ backgroundColor: '#111', border: '1px solid #1f1f1f', borderRadius: '4px' }}
+          labelStyle={{ color: '#888' }}
+          formatter={(value) => typeof value === 'number' ? `${value.toFixed(1)}%` : value}
+        />
+        <Legend />
+        <Line type="monotone" dataKey="Validation" stroke="#3b82f6" strokeWidth={2} dot={false} />
+        <Line type="monotone" dataKey="Backtesting" stroke="#10b981" strokeWidth={2} dot={false} />
+        <ReferenceLine y={50} stroke="#f59e0b" strokeDasharray="5 5" label={{ value: '50%', fill: '#f59e0b', fontSize: 10 }} />
+      </LineChart>
     </ResponsiveContainer>
   );
 }
@@ -384,8 +411,7 @@ function CurrentMetricsSnapshot({ data }: { data: MetricsCurrentResponse }) {
           <div className="space-y-1 font-mono text-xs">
             <div className="flex justify-between"><span>Generated:</span><span>{data.queue_depths.generated}</span></div>
             <div className="flex justify-between"><span>Validated:</span><span>{data.queue_depths.validated}</span></div>
-            <div className="flex justify-between"><span>Tested:</span><span>{data.queue_depths.tested}</span></div>
-            <div className="flex justify-between"><span>Selected:</span><span>{data.queue_depths.selected}</span></div>
+            <div className="flex justify-between"><span>Active:</span><span>{data.queue_depths.active}</span></div>
             <div className="flex justify-between text-profit"><span>Live:</span><span>{data.queue_depths.live}</span></div>
           </div>
         </div>
@@ -397,7 +423,6 @@ function CurrentMetricsSnapshot({ data }: { data: MetricsCurrentResponse }) {
             <div className="flex justify-between"><span>Generation:</span><span>{data.throughput.generation?.toFixed(1) ?? '-'}</span></div>
             <div className="flex justify-between"><span>Validation:</span><span>{data.throughput.validation?.toFixed(1) ?? '-'}</span></div>
             <div className="flex justify-between"><span>Backtesting:</span><span>{data.throughput.backtesting?.toFixed(1) ?? '-'}</span></div>
-            <div className="flex justify-between"><span>Classification:</span><span>{data.throughput.classification?.toFixed(1) ?? '-'}</span></div>
           </div>
         </div>
 
@@ -411,13 +436,22 @@ function CurrentMetricsSnapshot({ data }: { data: MetricsCurrentResponse }) {
           </div>
         </div>
 
-        {/* Breakdown */}
+        {/* Success Rates */}
         <div>
-          <div className="text-xs text-muted mb-2">Strategy Breakdown</div>
+          <div className="text-xs text-muted mb-2">Success Rates</div>
           <div className="space-y-1 font-mono text-xs">
-            <div className="flex justify-between"><span>Pattern-based:</span><span>{data.breakdown.pattern_strategies}</span></div>
-            <div className="flex justify-between"><span>AI-generated:</span><span>{data.breakdown.ai_strategies}</span></div>
-            <div className="flex justify-between text-muted"><span>Total:</span><span>{data.breakdown.pattern_strategies + data.breakdown.ai_strategies}</span></div>
+            <div className="flex justify-between">
+              <span>Validation:</span>
+              <span className={data.success_rates?.validation && data.success_rates.validation >= 0.5 ? 'text-profit' : ''}>
+                {data.success_rates?.validation != null ? `${(data.success_rates.validation * 100).toFixed(1)}%` : '-'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span>Backtesting:</span>
+              <span className={data.success_rates?.backtesting && data.success_rates.backtesting >= 0.5 ? 'text-profit' : ''}>
+                {data.success_rates?.backtesting != null ? `${(data.success_rates.backtesting * 100).toFixed(1)}%` : '-'}
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -710,6 +744,9 @@ export default function PipelineHealth() {
             )}
             {activeMetric === 'utilization' && (
               <UtilizationChart data={timeseries.data as UtilizationDataPoint[]} />
+            )}
+            {activeMetric === 'success_rates' && (
+              <SuccessRatesChart data={timeseries.data as SuccessRatesDataPoint[]} />
             )}
           </>
         ) : (

@@ -397,7 +397,7 @@ class ContinuousGeneratorProcess:
                 self._save_to_database(
                     name=strategy_name,
                     strategy_type=strategy_type,
-                    timeframe=timeframe,
+                    timeframe=result.timeframe,  # Use result's TF (from pattern), not random
                     code=result.code,
                     ai_provider=result.ai_provider,
                     pattern_based=use_patterns,
