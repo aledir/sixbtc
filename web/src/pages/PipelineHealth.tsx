@@ -560,40 +560,6 @@ function StageDetailCard({ stage }: { stage: PipelineStageHealth }) {
   );
 }
 
-function ThroughputChart({ data }: { data: PipelineStatsResponse }) {
-  const chartData = data.data_points.reduce((acc, point) => {
-    const existing = acc.find(d => d.timestamp === point.timestamp);
-    if (existing) {
-      existing[point.stage] = point.throughput;
-    } else {
-      acc.push({
-        timestamp: new Date(point.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-        [point.stage]: point.throughput
-      });
-    }
-    return acc;
-  }, [] as any[]);
-
-  return (
-    <ResponsiveContainer width="100%" height={300}>
-      <LineChart data={chartData}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#1f1f1f" />
-        <XAxis dataKey="timestamp" stroke="#888" fontSize={12} />
-        <YAxis stroke="#888" fontSize={12} label={{ value: 'Strategies/Hour', angle: -90, position: 'insideLeft', style: { fill: '#888', fontSize: 12 } }} />
-        <Tooltip
-          contentStyle={{ backgroundColor: '#111', border: '1px solid #1f1f1f', borderRadius: '4px' }}
-          labelStyle={{ color: '#888' }}
-        />
-        <Legend />
-        <Line type="monotone" dataKey="generation" stroke="#6b7280" strokeWidth={2} dot={false} />
-        <Line type="monotone" dataKey="validation" stroke="#3b82f6" strokeWidth={2} dot={false} />
-        <Line type="monotone" dataKey="backtesting" stroke="#a855f7" strokeWidth={2} dot={false} />
-        <Line type="monotone" dataKey="classification" stroke="#10b981" strokeWidth={2} dot={false} />
-      </LineChart>
-    </ResponsiveContainer>
-  );
-}
-
 function QualityDistributionChart({ data }: { data: QualityDistributionResponse }) {
   const chartData = data.distributions.map(dist => {
     const bucketData: any = { stage: dist.stage };
@@ -756,16 +722,8 @@ export default function PipelineHealth() {
         )}
       </div>
 
-      {/* Throughput Trend Chart (existing) */}
-      {stats && (
-        <div className="bg-card border border-border rounded-lg p-6">
-          <h2 className="text-lg font-semibold mb-4">Pipeline Throughput Trend</h2>
-          <ThroughputChart data={stats} />
-        </div>
-      )}
-
-      {/* Quality Distribution */}
-      {quality && quality.distributions.length > 0 && (
+      {/* Quality Distribution - only show if there's actual data in buckets */}
+      {quality && quality.distributions.some(d => d.buckets.length > 0) && (
         <div className="bg-card border border-border rounded-lg p-6">
           <h2 className="text-lg font-semibold mb-4">Strategy Quality Distribution</h2>
           <QualityDistributionChart data={quality} />
