@@ -1,15 +1,17 @@
 """
-Backtest Scorer - Multi-Factor Scoring System
+Backtest Scorer - Unified Score Formula
 
 Calculates composite score for strategy ranking based on:
 - Edge (expectancy)
 - Sharpe ratio
 - Consistency (win rate)
-- Stability (walk-forward performance)
+- Drawdown penalty
 
 Score Formula:
-    Score = (0.50 x Edge) + (0.25 x Sharpe) + (0.15 x Consistency) + (0.10 x Stability)
+    Score = (0.45 x Edge) + (0.25 x Sharpe) + (0.15 x Consistency) + (0.15 x Drawdown)
     Normalized to 0-100 scale
+
+Note: Stability (walk-forward) was removed as it doesn't apply to live trading.
 """
 
 from typing import Dict, Optional
@@ -55,7 +57,7 @@ class BacktestScorer:
                 - expectancy: Edge per trade (as decimal, e.g., 0.05 = 5%)
                 - sharpe_ratio: Sharpe ratio
                 - consistency: Win rate (0-1)
-                - wf_stability: Walk-forward stability (0-1, lower=better)
+                - max_drawdown: Maximum drawdown (0-1, lower=better)
 
         Returns:
             Composite score (0-100 scale)
@@ -64,22 +66,20 @@ class BacktestScorer:
         edge = metrics.get('expectancy', 0) or 0.0
         sharpe = metrics.get('sharpe_ratio', 0) or 0.0
         consistency = metrics.get('consistency', 0) or 0.0
-        wf_stability = metrics.get('wf_stability')
-        if wf_stability is None:
-            wf_stability = 1.0  # Worst stability = no walk-forward data
+        max_drawdown = metrics.get('max_drawdown', 0) or 0.0
 
         # Normalize each metric to 0-1 scale
         edge_score = self._normalize_edge(edge)
         sharpe_score = self._normalize_sharpe(sharpe)
         consistency_score = consistency  # Already 0-1
-        stability_score = 1 - wf_stability  # Lower is better
+        drawdown_score = self._normalize_drawdown(max_drawdown)
 
-        # Weighted sum
+        # Weighted sum (unified formula)
         score = (
             self.weights['edge'] * edge_score +
             self.weights['sharpe'] * sharpe_score +
             self.weights['consistency'] * consistency_score +
-            self.weights['stability'] * stability_score
+            self.weights['drawdown'] * drawdown_score
         )
 
         # Scale to 0-100
@@ -110,7 +110,7 @@ class BacktestScorer:
             'expectancy': backtest_result.weighted_expectancy or 0.0,
             'sharpe_ratio': backtest_result.weighted_sharpe_pure or 0.0,
             'consistency': backtest_result.weighted_win_rate or 0.0,
-            'wf_stability': backtest_result.weighted_walk_forward_stability or 1.0,
+            'max_drawdown': backtest_result.weighted_max_drawdown or 0.0,
         }
 
         return self.score(metrics)
@@ -130,6 +130,21 @@ class BacktestScorer:
         Typical range: 0 to 3.0
         """
         return self._normalize(sharpe, min_val, max_val)
+
+    def _normalize_drawdown(self, dd: float, max_allowed: float = 0.30) -> float:
+        """
+        Normalize drawdown to 0-1 scale (lower DD = higher score).
+
+        Args:
+            dd: Maximum drawdown as decimal (e.g., 0.15 = 15%)
+            max_allowed: Maximum acceptable drawdown (default 30%)
+
+        Returns:
+            Score 0-1 where 1 = no drawdown, 0 = max_allowed or worse
+        """
+        if dd is None or dd <= 0:
+            return 1.0  # No drawdown = perfect score
+        return max(0.0, 1.0 - (dd / max_allowed))
 
     def _normalize(self, value: float, min_val: float, max_val: float) -> float:
         """

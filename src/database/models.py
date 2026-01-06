@@ -671,7 +671,7 @@ class PairsUpdateLog(Base):
 
 class ValidationCache(Base):
     """
-    Cache for expensive validation tests (shuffle test).
+    Cache for expensive validation tests (shuffle test, multi-window).
 
     Stores results by base_code_hash to skip redundant tests on
     parametric variations of the same base code.
@@ -682,13 +682,20 @@ class ValidationCache(Base):
     code_hash = Column(String(64), primary_key=True)
 
     # Shuffle test result
-    shuffle_passed = Column(Boolean, nullable=False)
+    shuffle_passed = Column(Boolean, nullable=True)
+
+    # Multi-window validation result
+    multi_window_passed = Column(Boolean, nullable=True)
+    multi_window_reason = Column(String(200), nullable=True)
 
     # Timestamp for potential TTL/expiration
     validated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
 
     def __repr__(self):
-        return f"<ValidationCache(hash={self.code_hash[:8]}..., passed={self.shuffle_passed})>"
+        return (
+            f"<ValidationCache(hash={self.code_hash[:8]}..., "
+            f"shuffle={self.shuffle_passed}, multi_window={self.multi_window_passed})>"
+        )
 
 
 # ==============================================================================

@@ -4,8 +4,8 @@ Live Performance Scorer
 Calculates performance metrics from live Trade records.
 Used for monitoring LIVE strategies and retirement decisions.
 
-Score Formula:
-    Score = (0.50 x Edge) + (0.25 x Sharpe) + (0.15 x Consistency) + (0.10 x Stability)
+Score Formula (unified):
+    Score = (0.45 x Edge) + (0.25 x Sharpe) + (0.15 x Consistency) + (0.15 x Drawdown)
     Normalized to 0-100 scale
 """
 
@@ -41,17 +41,17 @@ class LiveScorer:
         monitor_config = config.get('monitor', {}).get('retirement', {})
         self.min_trades = monitor_config.get('min_trades', 10)
 
-        # Scoring weights (same as backtest scorer)
+        # Scoring weights (same as backtest scorer - unified formula)
         if 'scorer' in config:
             self.weights = config['scorer']['weights']
         else:
             # Legacy fallback
             weights_config = config.get('classification', {}).get('score_weights', {})
             self.weights = {
-                'edge': weights_config.get('edge', 0.50),
+                'edge': weights_config.get('edge', 0.45),
                 'sharpe': weights_config.get('sharpe', 0.25),
                 'consistency': weights_config.get('consistency', 0.15),
-                'stability': weights_config.get('stability', 0.10)
+                'drawdown': weights_config.get('drawdown', 0.15)
             }
 
         # Trade frequency thresholds
@@ -239,9 +239,9 @@ class LiveScorer:
         max_drawdown: float
     ) -> float:
         """
-        Calculate composite score using same formula as backtest scorer.
+        Calculate composite score using unified formula.
 
-        Score = (0.50 x Edge) + (0.25 x Sharpe) + (0.15 x Consistency) + (0.10 x Stability)
+        Score = (0.45 x Edge) + (0.25 x Sharpe) + (0.15 x Consistency) + (0.15 x Drawdown)
         """
         # Normalize edge (expectancy): typical range 0-10%
         edge_score = self._normalize(expectancy, 0, 0.10)
@@ -252,15 +252,16 @@ class LiveScorer:
         # Consistency: use win_rate directly
         consistency_score = win_rate
 
-        # Stability: inverse of drawdown
-        stability_score = 1 - min(max_drawdown, 1.0)
+        # Drawdown: inverse normalized (lower DD = higher score)
+        # max_allowed = 30%, DD >= 30% = 0 score
+        drawdown_score = max(0.0, 1.0 - (max_drawdown / 0.30)) if max_drawdown else 1.0
 
-        # Weighted sum
+        # Weighted sum (unified formula)
         score = (
             self.weights['edge'] * edge_score +
             self.weights['sharpe'] * sharpe_score +
             self.weights['consistency'] * consistency_score +
-            self.weights['stability'] * stability_score
+            self.weights['drawdown'] * drawdown_score
         )
 
         return min(max(score * 100, 0), 100)

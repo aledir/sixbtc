@@ -1,35 +1,27 @@
 """
 Continuous Validator Process
 
-Validates generated strategies through 4-phase pipeline:
+Validates generated strategies through 3-phase pipeline (pre-backtest):
 1. Syntax validation
 2. Lookahead AST detection
-3. Shuffle test
-4. Execution validation
+3. Execution validation
 
-Strategies that fail any phase are deleted.
+Strategies that pass are promoted to VALIDATED for backtesting.
+Shuffle test is run post-backtest in backtester (only for high-scoring strategies).
 """
 
 import asyncio
 import os
 import signal
 import threading
-import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, Optional, Tuple
-import pandas as pd
-
-# Suppress pandas FutureWarning about fillna downcasting (from AI-generated strategies)
-warnings.filterwarnings('ignore', category=FutureWarning, message='.*Downcasting.*fillna.*')
 
 from src.config import load_config
 from src.database import get_session, Strategy, StrategyProcessor
-from src.database.models import ValidationCache
 from src.validator.syntax_validator import SyntaxValidator
 from src.validator.lookahead_detector import LookaheadDetector
-from src.validator.lookahead_test import LookaheadTester
 from src.validator.execution_validator import ExecutionValidator
 from src.utils import get_logger, setup_logging
 
@@ -56,7 +48,6 @@ class ContinuousValidatorProcess:
         self,
         syntax_validator: Optional[SyntaxValidator] = None,
         lookahead_detector: Optional[LookaheadDetector] = None,
-        lookahead_tester: Optional[LookaheadTester] = None,
         execution_validator: Optional[ExecutionValidator] = None,
         processor: Optional[StrategyProcessor] = None
     ):
@@ -66,7 +57,6 @@ class ContinuousValidatorProcess:
         Args:
             syntax_validator: SyntaxValidator instance (created if not provided)
             lookahead_detector: LookaheadDetector instance (created if not provided)
-            lookahead_tester: LookaheadTester instance (created if not provided)
             execution_validator: ExecutionValidator instance (created if not provided)
             processor: StrategyProcessor instance (created if not provided)
         """
@@ -97,41 +87,15 @@ class ContinuousValidatorProcess:
         # Validators - use injected or create new (Dependency Injection pattern)
         self.syntax_validator = syntax_validator or SyntaxValidator()
         self.lookahead_detector = lookahead_detector or LookaheadDetector()
-        self.lookahead_tester = lookahead_tester or LookaheadTester()
         self.execution_validator = execution_validator or ExecutionValidator()
 
         # Strategy processor for claiming
         self.processor = processor or StrategyProcessor(process_id=f"validator-{os.getpid()}")
 
-        # Test data for shuffle test (loaded once)
-        self._test_data: Optional[pd.DataFrame] = None
-
         logger.info(
             f"ContinuousValidatorProcess initialized: {self.parallel_threads} threads, "
             f"downstream limit {self.validated_limit} VALIDATED"
         )
-
-    @property
-    def test_data(self) -> pd.DataFrame:
-        """Lazy-load test data for shuffle test"""
-        if self._test_data is None:
-            self._test_data = self._load_test_data()
-        return self._test_data
-
-    def _load_test_data(self) -> pd.DataFrame:
-        """Load test data for validation"""
-        try:
-            from src.backtester.data_loader import BacktestDataLoader
-            # BacktestDataLoader expects cache_dir string - use directories.data
-            cache_dir = self.config.get_required('directories.data') + '/binance'
-            loader = BacktestDataLoader(cache_dir=cache_dir)
-            data = loader.load_single_symbol('BTC', '15m', days=30)
-            logger.info(f"Loaded {len(data)} bars of BTC 15m test data")
-            return data
-        except Exception as e:
-            # Use DEBUG for expected fallback to synthetic data
-            logger.debug(f"No cached data available ({e}), using synthetic test data")
-            return self.execution_validator._generate_test_data(500)
 
     def _log_pipeline_status(self):
         """Log pipeline status periodically for monitoring"""
@@ -229,13 +193,20 @@ class ContinuousValidatorProcess:
         base_code_hash: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
-        Run 4-phase validation on a strategy.
+        Run 3-phase pre-backtest validation on a strategy.
+
+        Phases:
+        1. Syntax validation (AST parse, inheritance, methods)
+        2. Lookahead AST detection (forbidden patterns)
+        3. Execution validation (runtime test)
+
+        Note: Shuffle test moved to backtester (post-scoring, only for high scores).
 
         Args:
             strategy_id: Strategy UUID
             strategy_name: Strategy name for logging
             code: Strategy code to validate
-            base_code_hash: Hash of base code (for shuffle test caching)
+            base_code_hash: Hash of base code (unused, kept for API compatibility)
 
         Returns:
             (passed, reason) tuple
@@ -251,7 +222,7 @@ class ContinuousValidatorProcess:
 
             class_name = syntax_result.class_name
 
-            # Phase 2: Lookahead detection
+            # Phase 2: Lookahead detection (AST-based)
             logger.debug(f"[{strategy_name}] Phase 2: Lookahead detection")
             lookahead_result = self.lookahead_detector.validate(code)
 
@@ -259,7 +230,7 @@ class ContinuousValidatorProcess:
                 self._delete_strategy(strategy_id, f"Lookahead: {lookahead_result.violations}")
                 return (False, f"Lookahead: {lookahead_result.violations}")
 
-            # Phase 3: Execution validation (before shuffle - need instance)
+            # Phase 3: Execution validation
             logger.debug(f"[{strategy_name}] Phase 3: Execution validation")
             exec_result = self.execution_validator.validate(code, class_name, None)
 
@@ -267,52 +238,10 @@ class ContinuousValidatorProcess:
                 self._delete_strategy(strategy_id, f"Execution: {exec_result.errors}")
                 return (False, f"Execution: {exec_result.errors}")
 
-            # Phase 4: Lookahead bias test (Future Contamination Test)
-            # shuffle_test_enabled defaults to True if not in config
-            shuffle_enabled = self.config.get('validation.shuffle_test_enabled', True)
-
-            if shuffle_enabled:
-                # Check cache first (skip if same base_code_hash already validated)
-                cached_result = self._get_cached_shuffle_result(base_code_hash)
-
-                if cached_result is not None:
-                    # Cache hit
-                    if not cached_result:
-                        self._delete_strategy(
-                            strategy_id,
-                            "Lookahead: cached_fail (base code failed shuffle test)"
-                        )
-                        return (False, "Lookahead: cached_fail")
-                    logger.debug(
-                        f"[{strategy_name}] Phase 4: Shuffle test SKIPPED "
-                        f"(cache hit for hash {base_code_hash[:8] if base_code_hash else 'N/A'})"
-                    )
-                else:
-                    # Cache miss - run shuffle test
-                    logger.debug(f"[{strategy_name}] Phase 4: Lookahead bias test")
-                    try:
-                        strategy_instance = self._load_strategy_instance(code, class_name)
-
-                        if strategy_instance:
-                            shuffle_result = self.lookahead_tester.validate(
-                                strategy_instance,
-                                self.test_data
-                            )
-
-                            # Cache the result
-                            self._cache_shuffle_result(base_code_hash, shuffle_result.passed)
-
-                            if not shuffle_result.passed:
-                                self._delete_strategy(
-                                    strategy_id,
-                                    f"Lookahead: {shuffle_result.details}"
-                                )
-                                return (False, f"Lookahead: {shuffle_result.details}")
-                    except Exception as e:
-                        logger.warning(f"Shuffle test skipped for {strategy_name}: {e}")
-
-            # All phases passed - promote to VALIDATED
+            # All 3 phases passed - promote to VALIDATED
+            # Note: Shuffle test will run in backtester after scoring
             self.processor.release_strategy(strategy_id, "VALIDATED")
+            logger.debug(f"[{strategy_name}] Passed pre-backtest validation (3 phases)")
             return (True, "All phases passed")
 
         except Exception as e:
@@ -320,106 +249,9 @@ class ContinuousValidatorProcess:
             self.processor.mark_failed(strategy_id, str(e), delete=True)
             return (False, str(e))
 
-    def _load_strategy_instance(self, code: str, class_name: str):
-        """Load strategy instance from code"""
-        import importlib.util
-        import tempfile
-        import sys
-
-        try:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-                f.write(code)
-                temp_path = f.name
-
-            spec = importlib.util.spec_from_file_location(
-                f"temp_{class_name}",
-                temp_path
-            )
-
-            if spec and spec.loader:
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[spec.name] = module
-                spec.loader.exec_module(module)
-
-                if hasattr(module, class_name):
-                    cls = getattr(module, class_name)
-                    return cls()
-
-            return None
-
-        except Exception as e:
-            logger.debug(f"Failed to load strategy instance: {e}")
-            return None
-        finally:
-            Path(temp_path).unlink(missing_ok=True)
-
     def _delete_strategy(self, strategy_id, reason: str):
         """Delete failed strategy"""
         self.processor.mark_failed(strategy_id, reason, delete=True)
-
-    def _get_cached_shuffle_result(self, base_code_hash: Optional[str]) -> Optional[bool]:
-        """
-        Check if shuffle test result is cached for this base_code_hash.
-
-        Args:
-            base_code_hash: Hash of base code (before parameter embedding)
-
-        Returns:
-            True if cached and passed, False if cached and failed, None if not cached
-        """
-        if not base_code_hash:
-            return None
-
-        try:
-            with get_session() as session:
-                cache_entry = session.query(ValidationCache).filter(
-                    ValidationCache.code_hash == base_code_hash
-                ).first()
-
-                if cache_entry:
-                    return cache_entry.shuffle_passed
-                return None
-        except Exception as e:
-            logger.warning(f"Error reading validation cache: {e}")
-            return None
-
-    def _cache_shuffle_result(self, base_code_hash: Optional[str], passed: bool) -> None:
-        """
-        Save shuffle test result to cache.
-
-        Args:
-            base_code_hash: Hash of base code (before parameter embedding)
-            passed: Whether the shuffle test passed
-        """
-        if not base_code_hash:
-            return
-
-        try:
-            from datetime import datetime, UTC
-
-            with get_session() as session:
-                # Upsert pattern: try insert, on conflict update
-                existing = session.query(ValidationCache).filter(
-                    ValidationCache.code_hash == base_code_hash
-                ).first()
-
-                if existing:
-                    existing.shuffle_passed = passed
-                    existing.validated_at = datetime.now(UTC)
-                else:
-                    cache_entry = ValidationCache(
-                        code_hash=base_code_hash,
-                        shuffle_passed=passed,
-                        validated_at=datetime.now(UTC)
-                    )
-                    session.add(cache_entry)
-
-            logger.debug(
-                f"Cached shuffle result for {base_code_hash[:8]}: "
-                f"{'PASSED' if passed else 'FAILED'}"
-            )
-        except Exception as e:
-            logger.warning(f"Error writing validation cache: {e}")
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""

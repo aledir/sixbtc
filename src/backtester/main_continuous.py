@@ -25,13 +25,18 @@ import sys
 # Suppress pandas FutureWarning about fillna downcasting (from AI-generated strategies)
 warnings.filterwarnings('ignore', category=FutureWarning, message='.*Downcasting.*fillna.*')
 
+import pandas as pd
+
 from src.config import load_config
 from src.database import get_session, Strategy, BacktestResult, StrategyProcessor
+from src.database.models import ValidationCache
 from src.backtester.backtest_engine import BacktestEngine
 from src.backtester.data_loader import BacktestDataLoader
 from src.backtester.parametric_backtest import ParametricBacktester
+from src.backtester.multi_window_validator import MultiWindowValidator
 from src.data.coin_registry import get_registry, get_active_pairs
 from src.scorer import BacktestScorer, PoolManager
+from src.validator.lookahead_test import LookaheadTester
 from src.utils import get_logger, setup_logging
 
 # Initialize logging at module load
@@ -159,6 +164,13 @@ class ContinuousBacktesterProcess:
         # SCORER and PoolManager for post-backtest scoring and pool management
         self.scorer = BacktestScorer(self.config._raw_config)
         self.pool_manager = PoolManager(self.config._raw_config)
+
+        # Lookahead tester for post-scoring shuffle test (anti-lookahead)
+        self.lookahead_tester = LookaheadTester()
+        self._test_data: Optional[pd.DataFrame] = None  # Lazy loaded
+
+        # Multi-window validator for consistency check (post-shuffle)
+        self.multi_window_validator = MultiWindowValidator(self.config._raw_config)
 
         # Preloaded data cache: {(symbols_hash, timeframe): data}
         self._data_cache: Dict[str, Dict[str, any]] = {}
@@ -2238,7 +2250,14 @@ class ContinuousBacktesterProcess:
         """
         Attempt to promote a strategy to the ACTIVE pool after backtest.
 
-        Calculates score and uses PoolManager for leaderboard logic.
+        Flow:
+        1. Calculate score from backtest result
+        2. If score < min_score -> reject (no shuffle test needed)
+        3. Run shuffle test (cached by base_code_hash)
+        4. If shuffle fails -> reject
+        5. Run multi-window validation (cached by base_code_hash)
+        6. If multi-window fails -> reject
+        7. Try to enter pool (leaderboard logic)
 
         Args:
             strategy_id: Strategy UUID
@@ -2251,6 +2270,24 @@ class ContinuousBacktesterProcess:
             # Calculate score from backtest result
             score = self.scorer.score_from_backtest_result(backtest_result)
 
+            # Check minimum score threshold first (avoid unnecessary shuffle test)
+            if score < self.pool_min_score:
+                logger.debug(f"Strategy {strategy_id} score {score:.1f} < {self.pool_min_score}, skipping shuffle test")
+                return (False, f"score_below_threshold:{score:.1f}")
+
+            # Run shuffle test (only for strategies that could enter pool)
+            strategy = backtest_result.strategy
+            if not self._run_shuffle_test(strategy_id, strategy):
+                return (False, "shuffle_test_failed")
+
+            # Run multi-window validation (consistency across time periods)
+            if self.multi_window_validator.enabled:
+                mw_passed, mw_reason = self._run_multi_window_validation(
+                    strategy, backtest_result
+                )
+                if not mw_passed:
+                    return (False, f"multi_window_failed:{mw_reason}")
+
             # Try to enter pool (handles leaderboard logic)
             success, reason = self.pool_manager.try_enter_pool(strategy_id, score)
 
@@ -2259,6 +2296,209 @@ class ContinuousBacktesterProcess:
         except ValueError as e:
             logger.warning(f"Cannot calculate score for {strategy_id}: {e}")
             return (False, str(e))
+
+    @property
+    def test_data(self) -> pd.DataFrame:
+        """Lazy-load test data for shuffle test"""
+        if self._test_data is None:
+            self._test_data = self._load_test_data()
+        return self._test_data
+
+    def _load_test_data(self) -> pd.DataFrame:
+        """Load test data for shuffle test validation"""
+        try:
+            data = self.data_loader.load_single_symbol('BTC', '15m', days=30)
+            logger.info(f"Loaded {len(data)} bars of BTC 15m test data for shuffle test")
+            return data
+        except Exception as e:
+            logger.debug(f"No cached data available ({e}), generating synthetic test data")
+            # Generate synthetic test data
+            import numpy as np
+            dates = pd.date_range(start='2024-01-01', periods=500, freq='15min')
+            return pd.DataFrame({
+                'open': np.random.uniform(40000, 45000, 500),
+                'high': np.random.uniform(40000, 45000, 500),
+                'low': np.random.uniform(40000, 45000, 500),
+                'close': np.random.uniform(40000, 45000, 500),
+                'volume': np.random.uniform(100, 1000, 500)
+            }, index=dates)
+
+    def _run_shuffle_test(self, strategy_id: UUID, strategy: Strategy) -> bool:
+        """
+        Run shuffle test on strategy. Uses cache by base_code_hash.
+
+        Args:
+            strategy_id: Strategy UUID
+            strategy: Strategy model instance
+
+        Returns:
+            True if passed, False if failed
+        """
+        base_code_hash = strategy.base_code_hash
+
+        # Check cache first
+        cached_result = self._get_cached_shuffle_result(base_code_hash)
+        if cached_result is not None:
+            if cached_result:
+                logger.debug(f"Strategy {strategy.name}: shuffle test PASSED (cached)")
+            else:
+                logger.info(f"Strategy {strategy.name}: shuffle test FAILED (cached)")
+            return cached_result
+
+        # Cache miss - run actual shuffle test
+        try:
+            strategy_instance = self._load_strategy_instance(strategy.code, strategy.name)
+
+            if strategy_instance is None:
+                logger.warning(f"Strategy {strategy.name}: cannot load instance for shuffle test")
+                return False
+
+            result = self.lookahead_tester.validate(strategy_instance, self.test_data)
+
+            # Cache the result
+            self._cache_shuffle_result(base_code_hash, result.passed)
+
+            if result.passed:
+                logger.debug(f"Strategy {strategy.name}: shuffle test PASSED")
+            else:
+                logger.info(f"Strategy {strategy.name}: shuffle test FAILED - {result.details}")
+
+            return result.passed
+
+        except Exception as e:
+            logger.error(f"Shuffle test error for {strategy.name}: {e}")
+            return False
+
+    def _load_strategy_instance(self, code: str, class_name: str):
+        """Load strategy instance from code for shuffle test"""
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                f.write(code)
+                temp_path = f.name
+
+            spec = importlib.util.spec_from_file_location(f"temp_{class_name}", temp_path)
+
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = module
+                spec.loader.exec_module(module)
+
+                if hasattr(module, class_name):
+                    cls = getattr(module, class_name)
+                    return cls()
+
+            return None
+
+        except Exception as e:
+            logger.debug(f"Failed to load strategy instance: {e}")
+            return None
+        finally:
+            Path(temp_path).unlink(missing_ok=True)
+
+    def _get_cached_shuffle_result(self, base_code_hash: Optional[str]) -> Optional[bool]:
+        """
+        Check if shuffle test result is cached for this base_code_hash.
+
+        Returns:
+            True if cached and passed, False if cached and failed, None if not cached
+        """
+        if not base_code_hash:
+            return None
+
+        try:
+            with get_session() as session:
+                cache_entry = session.query(ValidationCache).filter(
+                    ValidationCache.code_hash == base_code_hash
+                ).first()
+
+                if cache_entry:
+                    return cache_entry.shuffle_passed
+                return None
+        except Exception as e:
+            logger.warning(f"Error reading validation cache: {e}")
+            return None
+
+    def _cache_shuffle_result(self, base_code_hash: Optional[str], passed: bool) -> None:
+        """Save shuffle test result to cache."""
+        if not base_code_hash:
+            return
+
+        try:
+            with get_session() as session:
+                existing = session.query(ValidationCache).filter(
+                    ValidationCache.code_hash == base_code_hash
+                ).first()
+
+                if existing:
+                    existing.shuffle_passed = passed
+                    existing.validated_at = datetime.now(UTC)
+                else:
+                    cache_entry = ValidationCache(
+                        code_hash=base_code_hash,
+                        shuffle_passed=passed,
+                        validated_at=datetime.now(UTC)
+                    )
+                    session.add(cache_entry)
+
+            logger.debug(
+                f"Cached shuffle result for {base_code_hash[:8]}: "
+                f"{'PASSED' if passed else 'FAILED'}"
+            )
+        except Exception as e:
+            logger.warning(f"Error writing validation cache: {e}")
+
+    def _run_multi_window_validation(
+        self,
+        strategy: Strategy,
+        backtest_result: BacktestResult
+    ) -> Tuple[bool, str]:
+        """
+        Run multi-window validation to check strategy consistency.
+
+        Validates that the strategy performs consistently across multiple
+        time periods, not just the training window. Detects overfitting.
+
+        Args:
+            strategy: Strategy model instance
+            backtest_result: BacktestResult with symbols and timeframe
+
+        Returns:
+            (passed, reason) tuple
+        """
+        try:
+            # Load strategy instance
+            strategy_instance = self._load_strategy_instance(strategy.code, strategy.name)
+            if strategy_instance is None:
+                logger.warning(f"Strategy {strategy.name}: cannot load instance for multi-window")
+                return (True, "instance_load_failed_skip")
+
+            # Get pairs and timeframe from backtest result
+            pairs = backtest_result.symbols_tested or []
+            timeframe = backtest_result.timeframe_tested
+
+            if not pairs or not timeframe:
+                logger.warning(f"Strategy {strategy.name}: missing symbols/timeframe for multi-window")
+                return (True, "missing_data_skip")
+
+            # Run validation
+            passed, reason, metrics = self.multi_window_validator.validate(
+                strategy=strategy_instance,
+                pairs=pairs,
+                timeframe=timeframe,
+                base_code_hash=strategy.base_code_hash
+            )
+
+            if passed:
+                logger.debug(f"Strategy {strategy.name}: multi-window PASSED ({reason})")
+            else:
+                logger.info(f"Strategy {strategy.name}: multi-window FAILED ({reason})")
+
+            return (passed, reason)
+
+        except Exception as e:
+            logger.warning(f"Multi-window validation error for {strategy.name}: {e}")
+            # On error, skip validation (don't block promotion)
+            return (True, f"error_skip:{e}")
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""

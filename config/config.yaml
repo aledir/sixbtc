@@ -231,6 +231,14 @@ backtesting:
     recency_weight: 0.60     # Weight for holdout score in final ranking
     min_trades: 3            # Minimum trades required in holdout period
 
+  # Multi-window validation (post-scoring, only for score >= min_score)
+  # Tests strategy on N non-overlapping time windows for consistency
+  multi_window:
+    enabled: true              # Enable multi-window validation
+    windows: 3                 # Number of validation windows
+    min_avg_sharpe: 0.2        # Avg Sharpe across windows must be >= 0.2
+    max_cv: 0.5                # Max coefficient of variation (std/avg) = 0.5
+
   # Minimum thresholds (gate check - classifier does the real ranking)
   thresholds:
     min_sharpe: 0.3          # Minimum Sharpe ratio
@@ -256,12 +264,13 @@ trading:
 # SCORER (Score Calculation)
 # ==============================================================================
 scorer:
-  # Backtest scoring weights (expectancy is dominant)
+  # Unified scoring weights (used for both backtest and live)
+  # Score = (0.45 x Edge) + (0.25 x Sharpe) + (0.15 x Consistency) + (0.15 x Drawdown)
   weights:
-    edge: 0.50        # Expectancy - most important metric
+    edge: 0.45        # Expectancy - most important metric
     sharpe: 0.25      # Risk-adjusted return
-    consistency: 0.15 # Win rate / time-in-profit
-    stability: 0.10   # Walk-forward stability
+    consistency: 0.15 # Win rate
+    drawdown: 0.15    # Penalizes high drawdown (lower DD = higher score)
 
 # ==============================================================================
 # ROTATOR (ACTIVE -> LIVE Deployment)
@@ -295,18 +304,18 @@ monitor:
     min_days_for_frequency: 7    # Min days active for reliable frequency
 
 # ==============================================================================
-# CLASSIFICATION (LEGACY - Will be removed in Phase 6)
+# CLASSIFICATION (LEGACY - Uses scorer.weights now)
 # ==============================================================================
 classification:
   frequency_hours: 0.25  # Every 15 minutes
 
-  # Backtest scoring weights (moved to scorer section)
+  # DEPRECATED: Use scorer.weights instead (unified formula)
+  # Kept for backwards compatibility during transition
   score_weights:
-    edge: 0.40
-    sharpe: 0.20
+    edge: 0.45
+    sharpe: 0.25
     consistency: 0.15
-    stability: 0.10
-    drawdown: 0.15  # Penalizes high drawdown (lower DD = higher score)
+    drawdown: 0.15
 
   filter_thresholds:
     min_sharpe: 0.5
