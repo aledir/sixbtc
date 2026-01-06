@@ -160,22 +160,22 @@ async def get_aggregated_metrics(
         'period': period,
         'snapshots_analyzed': result.snapshots_count,
         'queue_depths': {
-            'avg_generated': round(result.avg_generated, 1) if result.avg_generated else 0,
-            'avg_validated': round(result.avg_validated, 1) if result.avg_validated else 0,
-            'avg_active': round(result.avg_active, 1) if result.avg_active else 0,
+            'avg_generated': float(round(result.avg_generated, 1)) if result.avg_generated else 0.0,
+            'avg_validated': float(round(result.avg_validated, 1)) if result.avg_validated else 0.0,
+            'avg_active': float(round(result.avg_active, 1)) if result.avg_active else 0.0,
         },
         'utilization': {
-            'max_generated': round(result.max_util_gen, 2) if result.max_util_gen else 0,
-            'max_validated': round(result.max_util_val, 2) if result.max_util_val else 0,
-            'max_active': round(result.max_util_active, 2) if result.max_util_active else 0,
+            'max_generated': float(round(result.max_util_gen, 2)) if result.max_util_gen else 0.0,
+            'max_validated': float(round(result.max_util_val, 2)) if result.max_util_val else 0.0,
+            'max_active': float(round(result.max_util_active, 2)) if result.max_util_active else 0.0,
         },
         'quality': {
-            'avg_sharpe': round(result.avg_sharpe, 2) if result.avg_sharpe else None,
-            'avg_win_rate': round(result.avg_win_rate, 3) if result.avg_win_rate else None,
+            'avg_sharpe': float(round(result.avg_sharpe, 2)) if result.avg_sharpe else None,
+            'avg_win_rate': float(round(result.avg_win_rate, 3)) if result.avg_win_rate else None,
         },
         'success_rates': {
-            'avg_validation': round(result.avg_success_val, 3) if result.avg_success_val else None,
-            'avg_backtesting': round(result.avg_success_bt, 3) if result.avg_success_bt else None,
+            'avg_validation': float(round(result.avg_success_val, 3)) if result.avg_success_val else None,
+            'avg_backtesting': float(round(result.avg_success_bt, 3)) if result.avg_success_bt else None,
         }
     }
 
