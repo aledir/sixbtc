@@ -141,6 +141,27 @@ class APIProvider:
             logger.warning("GEMINI_API_KEY not set")
             return False
 
+        elif "deepseek" in model_lower:
+            key = os.environ.get("DEEPSEEK_API_KEY")
+            if key:
+                return True
+            logger.warning("DEEPSEEK_API_KEY not set")
+            return False
+
+        elif "mistral" in model_lower:
+            key = os.environ.get("MISTRAL_API_KEY")
+            if key:
+                return True
+            logger.warning("MISTRAL_API_KEY not set")
+            return False
+
+        elif "groq" in model_lower:
+            key = os.environ.get("GROQ_API_KEY")
+            if key:
+                return True
+            logger.warning("GROQ_API_KEY not set")
+            return False
+
         # For other models, assume available (litellm will handle auth)
         logger.info(f"Unknown model provider for {self.model}, assuming available")
         return True
