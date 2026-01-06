@@ -381,7 +381,7 @@ monitoring:
 # ==============================================================================
 metrics:
   # Collection interval for pipeline snapshots
-  collection_interval: 300        # 5 minutes (300 seconds)
+  collection_interval: 60         # 1 minute (60 seconds)
 
   # Data retention policies
   retention:

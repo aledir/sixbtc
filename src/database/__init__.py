@@ -13,7 +13,7 @@ from .models import (
     Trade, PerformanceSnapshot, Subaccount, Coin, ScheduledTaskExecution,
     PairsUpdateLog, StrategyEvent
 )
-from .connection import get_engine, get_session, init_db
+from .connection import get_engine, get_session, get_db, init_db
 from .strategy_processor import StrategyProcessor
 from .event_tracker import EventTracker
 
@@ -33,6 +33,7 @@ __all__ = [
     "EventTracker",
     "get_engine",
     "get_session",
+    "get_db",
     "init_db",
     "StrategyProcessor",
 ]

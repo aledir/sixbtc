@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import select, func, and_
 from sqlalchemy.orm import Session
 
-from src.database import get_session, PipelineMetricsSnapshot
+from src.database import get_db, PipelineMetricsSnapshot
 from src.database.models import StrategyEvent
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 async def get_metrics_timeseries(
     period: str = Query("24h", pattern="^(1h|6h|24h|7d|30d)$"),
     metric: str = Query("queue_depths", pattern="^(queue_depths|throughput|quality|utilization|success_rates)$"),
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_db)
 ) -> Dict:
     """
     Get time-series data for specified metric over period.
@@ -116,7 +116,7 @@ async def get_metrics_timeseries(
 @router.get("/aggregated")
 async def get_aggregated_metrics(
     period: str = Query("24h", pattern="^(1h|6h|24h|7d|30d)$"),
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_db)
 ) -> Dict:
     """
     Get aggregated metrics (avg, min, max) over period.
@@ -182,7 +182,7 @@ async def get_aggregated_metrics(
 
 @router.get("/alerts")
 async def get_metric_alerts(
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_db)
 ) -> Dict:
     """
     Get current metric-based alerts.
@@ -282,7 +282,7 @@ async def get_metric_alerts(
 
 @router.get("/current")
 async def get_current_metrics(
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_db)
 ) -> Dict:
     """
     Get most recent metrics snapshot.
@@ -348,7 +348,7 @@ async def get_events(
     stage: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=1000),
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_db)
 ) -> Dict:
     """
     Get recent pipeline events with optional filters.
@@ -402,7 +402,7 @@ async def get_events(
 @router.get("/funnel")
 async def get_pipeline_funnel(
     hours: int = Query(24, ge=1, le=168),
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_db)
 ) -> Dict:
     """
     Get pipeline conversion funnel metrics.
@@ -530,7 +530,7 @@ async def get_pipeline_funnel(
 @router.get("/failures")
 async def get_failure_breakdown(
     hours: int = Query(24, ge=1, le=168),
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_db)
 ) -> Dict:
     """
     Get detailed failure breakdown by stage and reason.
@@ -600,7 +600,7 @@ async def get_failure_breakdown(
 @router.get("/timing")
 async def get_timing_metrics(
     hours: int = Query(24, ge=1, le=168),
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_db)
 ) -> Dict:
     """
     Get timing metrics per pipeline stage.

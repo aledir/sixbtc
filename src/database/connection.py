@@ -109,6 +109,35 @@ def get_session() -> Generator[Session, None, None]:
         session.close()
 
 
+def get_db() -> Generator[Session, None, None]:
+    """
+    FastAPI dependency for database sessions.
+
+    Usage with FastAPI:
+        @app.get("/items")
+        def get_items(db: Session = Depends(get_db)):
+            return db.query(Item).all()
+
+    Note: This is NOT decorated with @contextmanager because
+    FastAPI's Depends() handles the generator lifecycle directly.
+
+    Yields:
+        SQLAlchemy Session
+    """
+    SessionFactory = get_session_factory()
+    session = SessionFactory()
+
+    try:
+        yield session
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Session rollback due to error: {e}", exc_info=True)
+        raise
+    finally:
+        session.close()
+
+
 def init_db():
     """
     Initialize database
