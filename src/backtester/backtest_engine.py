@@ -1142,8 +1142,11 @@ class BacktestEngine:
         indices = [set(df.index) for df in indexed_data.values()]
         common_idx = sorted(set.intersection(*indices))
 
-        if len(common_idx) < 100:
-            logger.warning(f"Insufficient common data points: {len(common_idx)}")
+        # Minimum common data points - adaptive for holdout periods
+        # 20 bars minimum allows for warmup + some signal generation
+        min_common_bars = 20
+        if len(common_idx) < min_common_bars:
+            logger.warning(f"Insufficient common data points: {len(common_idx)} < {min_common_bars}")
             return None
 
         # Create aligned dict
@@ -1219,32 +1222,53 @@ class BacktestEngine:
         # Clamp to [0, 1] range
         max_drawdown = min(max(max_drawdown, 0.0), 1.0)
 
-        # Sharpe ratio with correct annualization based on timeframe
-        # Equity curve has one value per bar, so returns are per-bar returns
-        with np.errstate(divide='ignore', invalid='ignore'):
-            returns = np.where(equity_arr[:-1] > 0,
-                               np.diff(equity_arr) / equity_arr[:-1],
-                               0.0)
-        returns = np.nan_to_num(returns, nan=0.0, posinf=0.0, neginf=0.0)
+        # Sharpe ratio - TRADE-BASED calculation (more robust than bar-by-bar)
+        # Bar-by-bar Sharpe is inflated when few trades spread across many bars
+        # (most bars have return=0, artificially lowering std)
+        # Trade-based Sharpe uses actual trade returns and annualizes by trade frequency
+        n_bars = len(equity_curve) - 1
+        if total_trades >= 3:  # Need at least 3 trades for meaningful Sharpe
+            # Calculate trade returns (PnL / margin for leveraged return)
+            trade_returns = [t.get('return_on_margin', t['pnl'] / t['margin'])
+                            for t in trades if t.get('margin', 0) > 0]
 
-        # Calculate annualization factor based on timeframe
-        # sqrt(365 * bars_per_day) converts per-bar volatility to annual
-        # Crypto markets are open 365 days/year (24/7), not 252 like traditional markets
-        if timeframe:
-            bars_per_day = {
-                '1d': 1,
-                '4h': 6,
-                '1h': 24,
-                '30m': 48,
-                '15m': 96,
-                '5m': 288
-            }.get(timeframe, 1)  # Default to daily if unknown
+            if len(trade_returns) >= 3:
+                trade_returns = np.array(trade_returns)
+                mean_trade_return = np.mean(trade_returns)
+                std_trade_return = np.std(trade_returns)
+
+                if std_trade_return > 1e-10:
+                    # Annualize: estimate trades per year from backtest frequency
+                    # trades_per_year = total_trades / (n_bars / bars_per_year)
+                    if timeframe:
+                        bars_per_year = {
+                            '1d': 365, '4h': 2190, '1h': 8760,
+                            '30m': 17520, '15m': 35040, '5m': 105120
+                        }.get(timeframe, 365)
+                    else:
+                        bars_per_year = 365
+
+                    backtest_years = n_bars / bars_per_year if bars_per_year > 0 else 1.0
+                    trades_per_year = total_trades / backtest_years if backtest_years > 0 else total_trades
+
+                    # Sharpe = mean / std * sqrt(trades_per_year)
+                    # Cap annualization factor to avoid inflation
+                    # Max sqrt(250) ~= 15.8 (reasonable for daily trading)
+                    annualization = np.sqrt(min(trades_per_year, 250))
+                    sharpe = mean_trade_return / std_trade_return * annualization
+                else:
+                    sharpe = 0.0
+            else:
+                sharpe = 0.0
         else:
-            # Fallback: assume daily if timeframe not provided
-            bars_per_day = 1
+            sharpe = 0.0
 
-        annualization_factor = np.sqrt(365 * bars_per_day)
-        sharpe = np.mean(returns) / np.std(returns) * annualization_factor if np.std(returns) > 0 else 0.0
+        # SANITY CHECK: Sharpe must be consistent with total_return
+        # Even with trade-based calculation, extreme losses should have negative Sharpe
+        if total_return < -0.5:  # Lost more than 50%
+            sharpe = min(sharpe, -abs(total_return) * 2)  # At -100% loss, Sharpe <= -2
+        elif total_return < 0 and sharpe > 0:
+            sharpe = 0.0
 
         # Profit factor
         gross_profit = sum(p for p in pnls if p > 0)
@@ -1327,9 +1351,13 @@ class BacktestEngine:
         # Read entry signals as boolean array
         entry_signal = df[signal_column].values.astype(bool)
 
-        # Apply warmup (first 100 bars = no signal)
-        warmup_bars = 100
-        entry_signal[:warmup_bars] = False
+        # Apply warmup - adaptive to ensure signals are possible
+        # For short data (holdout ~30 bars), reduce warmup to leave room for signals
+        # Minimum 10 bars after warmup for signal generation
+        min_signal_bars = 10
+        warmup_bars = min(100, max(20, len(entry_signal) - min_signal_bars))
+        if warmup_bars > 0 and warmup_bars < len(entry_signal):
+            entry_signal[:warmup_bars] = False
 
         # Set entries array
         entries_arr = entry_signal

@@ -353,31 +353,47 @@ def _calc_metrics(
     if max_dd < 0.0:
         max_dd = 0.0
 
-    # Sharpe (simplified - bar-by-bar returns)
-    n_points = n_bars - 1
-    if n_points < 2:
-        sharpe = 0.0
-    else:
-        returns = np.zeros(n_points)
-        for i in range(n_points):
-            if equity_curve[i] > 0:
-                returns[i] = (equity_curve[i + 1] - equity_curve[i]) / equity_curve[i]
+    # Sharpe ratio - TRADE-BASED calculation (more robust than bar-by-bar)
+    # Bar-by-bar Sharpe is inflated when few trades spread across many bars
+    # trade_pnls already contains PnL as percentage of trade notional
+    n_bars = len(equity_curve)
+    if n_trades >= 3:
+        # Calculate mean and std of trade returns
+        mean_trade_ret = 0.0
+        for i in range(n_trades):
+            mean_trade_ret += trade_pnls[i]
+        mean_trade_ret /= n_trades
 
-        mean_ret = 0.0
-        for i in range(n_points):
-            mean_ret += returns[i]
-        mean_ret /= n_points
+        var_trade_ret = 0.0
+        for i in range(n_trades):
+            var_trade_ret += (trade_pnls[i] - mean_trade_ret) ** 2
+        var_trade_ret /= n_trades
+        std_trade_ret = var_trade_ret ** 0.5
 
-        var_ret = 0.0
-        for i in range(n_points):
-            var_ret += (returns[i] - mean_ret) ** 2
-        var_ret /= n_points
-        std_ret = var_ret ** 0.5
+        if std_trade_ret > 1e-10:
+            # Annualize based on trade frequency
+            # trades_per_year = n_trades / (n_bars / bars_per_year)
+            backtest_years = n_bars / bars_per_year if bars_per_year > 0 else 1.0
+            trades_per_year = n_trades / backtest_years if backtest_years > 0 else n_trades
 
-        if std_ret > 1e-10:
-            sharpe = mean_ret / std_ret * (bars_per_year ** 0.5)  # Annualize
+            # Cap annualization factor to avoid inflation
+            # Max sqrt(250) ~= 15.8 (reasonable for daily trading)
+            if trades_per_year > 250.0:
+                trades_per_year = 250.0
+
+            sharpe = mean_trade_ret / std_trade_ret * (trades_per_year ** 0.5)
         else:
             sharpe = 0.0
+    else:
+        sharpe = 0.0
+
+    # SANITY CHECK: Sharpe must be consistent with total_return
+    if total_return < -0.5:  # Lost more than 50%
+        max_sharpe = -abs(total_return) * 2.0
+        if sharpe > max_sharpe:
+            sharpe = max_sharpe
+    elif total_return < 0.0 and sharpe > 0.0:
+        sharpe = 0.0
 
     return sharpe, max_dd, win_rate, expectancy, n_trades, total_return
 

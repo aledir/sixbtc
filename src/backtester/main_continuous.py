@@ -676,11 +676,13 @@ class ContinuousBacktesterProcess:
                     continue
 
                 # Run HOLDOUT period backtest (validation)
+                # Use min_bars=20 for holdout (30 days on 1d = only 30 bars)
                 holdout_result = None
                 try:
                     if holdout_data and len(holdout_data) >= 5:
                         holdout_result = self._run_multi_symbol_backtest(
-                            strategy_instance, holdout_data, tf
+                            strategy_instance, holdout_data, tf,
+                            min_bars=20  # Lower threshold for holdout period
                         )
                 except Exception as e:
                     logger.warning(f"Holdout backtest failed for {tf}: {e}")
@@ -834,9 +836,10 @@ class ContinuousBacktesterProcess:
                             strategy_instance_for_holdout.leverage = params.get('leverage', 1)
                             strategy_instance_for_holdout.exit_after_bars = params.get('exit_bars', 0)
 
-                            # Run holdout backtest with these params
+                            # Run holdout backtest with these params (min_bars=20 for 1d support)
                             holdout_result_for_params = self._run_multi_symbol_backtest(
-                                strategy_instance_for_holdout, holdout_data_for_tf, optimal_tf
+                                strategy_instance_for_holdout, holdout_data_for_tf, optimal_tf,
+                                min_bars=20  # Lower threshold for holdout period
                             )
 
                             # Validate holdout performance
@@ -2179,11 +2182,12 @@ class ContinuousBacktesterProcess:
                 logger.warning(f"[RETEST] {strategy_name}: no trades in training")
                 return (False, "No trades in training period")
 
-            # Run holdout backtest
+            # Run holdout backtest (min_bars=20 for 1d timeframe support)
             holdout_result = None
             if holdout_data and len(holdout_data) >= 5:
                 holdout_result = self._run_multi_symbol_backtest(
-                    strategy_instance, holdout_data, optimal_tf
+                    strategy_instance, holdout_data, optimal_tf,
+                    min_bars=20  # Lower threshold for holdout period
                 )
 
             # Validate holdout

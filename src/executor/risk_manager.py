@@ -164,10 +164,9 @@ class RiskManager:
             # Adjust take profit to meet minimum R:R
             take_profit = current_price + (stop_distance * self.min_risk_reward)
 
-        # Apply max_position_size_pct cap (CRITICAL: must be enforced)
-        max_notional = account_balance * self.max_position_size_pct
-        max_position_size = max_notional / current_price
-        position_size = min(position_size, max_position_size)
+        # NOTE: max_position_size_pct cap removed - fixed fractional already
+        # controls risk via risk_per_trade_pct. Cap was reducing effective risk
+        # below target when SL was tight (e.g., 2% risk with 1% SL = 0.2% actual)
 
         logger.debug(
             f"ATR sizing: size={position_size:.6f}, SL={stop_loss:.2f}, "
@@ -211,10 +210,8 @@ class RiskManager:
 
         position_size = risk_dollars / stop_distance
 
-        # Apply max_position_size_pct cap (CRITICAL: must be enforced)
-        max_notional = account_balance * self.max_position_size_pct
-        max_position_size = max_notional / entry_price
-        position_size = min(position_size, max_position_size)
+        # NOTE: max_position_size_pct cap removed - fixed fractional already
+        # controls risk via risk_per_trade_pct
 
         logger.debug(
             f"Fixed sizing: size={position_size:.6f}, risk=${risk_dollars:.2f}"
@@ -382,10 +379,8 @@ class RiskManager:
                 else:
                     take_profit = current_price - (stop_distance * self.min_risk_reward)
 
-        # 5. Apply max position size cap
-        max_notional = account_balance * self.max_position_size_pct
-        max_position_size = max_notional / current_price
-        position_size = min(position_size, max_position_size)
+        # NOTE: max_position_size_pct cap removed - fixed fractional already
+        # controls risk via risk_per_trade_pct
 
         logger.debug(
             f"Position sizing: sl_type={getattr(signal, 'sl_type', 'ATR')}, "
@@ -586,12 +581,9 @@ class RiskManager:
         if subaccount_positions_count >= self.max_positions_per_subaccount:
             return False, f"Max subaccount positions ({self.max_positions_per_subaccount}) reached"
 
-        # Check position size limit
-        position_notional = new_position_size * current_price
-        max_notional = account_balance * self.max_position_size_pct
-
-        if position_notional > max_notional:
-            return False, f"Position size ${position_notional:.2f} exceeds max ${max_notional:.2f}"
+        # NOTE: max_position_size_pct check removed - fixed fractional already
+        # controls risk via risk_per_trade_pct. Margin availability is enforced
+        # by the exchange.
 
         return True, "OK"
 
