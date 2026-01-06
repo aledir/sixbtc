@@ -111,6 +111,11 @@ ai:
   api:
     model: claude-sonnet-4-20250514
     timeout: 120
+  # Daily AI call limit (prevents runaway costs)
+  daily_limit:
+    enabled: true
+    max_calls: 500       # Max AI calls per day
+    reset_hour: 0        # Reset at midnight (local time)
 
 # ==============================================================================
 # GENERATION (AI Templates + Parametric Variations)
@@ -196,6 +201,7 @@ validation:
 # ==============================================================================
 backtesting:
   initial_capital: 10000
+  batch_size: 500        # Strategies per batch for same base_code_hash
 
   # Thread allocation (3+1 elastic model for LIVE mode)
   threads:

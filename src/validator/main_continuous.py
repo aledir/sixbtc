@@ -26,6 +26,7 @@ warnings.filterwarnings('ignore', category=FutureWarning, message='.*Downcasting
 
 from src.config import load_config
 from src.database import get_session, Strategy, StrategyProcessor
+from src.database.models import ValidationCache
 from src.validator.syntax_validator import SyntaxValidator
 from src.validator.lookahead_detector import LookaheadDetector
 from src.validator.lookahead_test import LookaheadTester
@@ -211,7 +212,8 @@ class ContinuousValidatorProcess:
                 self._validate_strategy,
                 strategy.id,
                 strategy.name,
-                strategy.code
+                strategy.code,
+                strategy.base_code_hash
             )
             self.active_futures[future] = str(strategy.id)
 
@@ -223,10 +225,17 @@ class ContinuousValidatorProcess:
         self,
         strategy_id,
         strategy_name: str,
-        code: str
+        code: str,
+        base_code_hash: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
         Run 4-phase validation on a strategy.
+
+        Args:
+            strategy_id: Strategy UUID
+            strategy_name: Strategy name for logging
+            code: Strategy code to validate
+            base_code_hash: Hash of base code (for shuffle test caching)
 
         Returns:
             (passed, reason) tuple
@@ -263,25 +272,44 @@ class ContinuousValidatorProcess:
             shuffle_enabled = self.config.get('validation.shuffle_test_enabled', True)
 
             if shuffle_enabled:
-                logger.debug(f"[{strategy_name}] Phase 4: Lookahead bias test")
-                try:
-                    # Load strategy instance for shuffle test
-                    strategy_instance = self._load_strategy_instance(code, class_name)
+                # Check cache first (skip if same base_code_hash already validated)
+                cached_result = self._get_cached_shuffle_result(base_code_hash)
 
-                    if strategy_instance:
-                        shuffle_result = self.lookahead_tester.validate(
-                            strategy_instance,
-                            self.test_data
+                if cached_result is not None:
+                    # Cache hit
+                    if not cached_result:
+                        self._delete_strategy(
+                            strategy_id,
+                            "Lookahead: cached_fail (base code failed shuffle test)"
                         )
+                        return (False, "Lookahead: cached_fail")
+                    logger.debug(
+                        f"[{strategy_name}] Phase 4: Shuffle test SKIPPED "
+                        f"(cache hit for hash {base_code_hash[:8] if base_code_hash else 'N/A'})"
+                    )
+                else:
+                    # Cache miss - run shuffle test
+                    logger.debug(f"[{strategy_name}] Phase 4: Lookahead bias test")
+                    try:
+                        strategy_instance = self._load_strategy_instance(code, class_name)
 
-                        if not shuffle_result.passed:
-                            self._delete_strategy(
-                                strategy_id,
-                                f"Lookahead: {shuffle_result.details}"
+                        if strategy_instance:
+                            shuffle_result = self.lookahead_tester.validate(
+                                strategy_instance,
+                                self.test_data
                             )
-                            return (False, f"Lookahead: {shuffle_result.details}")
-                except Exception as e:
-                    logger.warning(f"Shuffle test skipped for {strategy_name}: {e}")
+
+                            # Cache the result
+                            self._cache_shuffle_result(base_code_hash, shuffle_result.passed)
+
+                            if not shuffle_result.passed:
+                                self._delete_strategy(
+                                    strategy_id,
+                                    f"Lookahead: {shuffle_result.details}"
+                                )
+                                return (False, f"Lookahead: {shuffle_result.details}")
+                    except Exception as e:
+                        logger.warning(f"Shuffle test skipped for {strategy_name}: {e}")
 
             # All phases passed - promote to VALIDATED
             self.processor.release_strategy(strategy_id, "VALIDATED")
@@ -328,6 +356,70 @@ class ContinuousValidatorProcess:
     def _delete_strategy(self, strategy_id, reason: str):
         """Delete failed strategy"""
         self.processor.mark_failed(strategy_id, reason, delete=True)
+
+    def _get_cached_shuffle_result(self, base_code_hash: Optional[str]) -> Optional[bool]:
+        """
+        Check if shuffle test result is cached for this base_code_hash.
+
+        Args:
+            base_code_hash: Hash of base code (before parameter embedding)
+
+        Returns:
+            True if cached and passed, False if cached and failed, None if not cached
+        """
+        if not base_code_hash:
+            return None
+
+        try:
+            with get_session() as session:
+                cache_entry = session.query(ValidationCache).filter(
+                    ValidationCache.code_hash == base_code_hash
+                ).first()
+
+                if cache_entry:
+                    return cache_entry.shuffle_passed
+                return None
+        except Exception as e:
+            logger.warning(f"Error reading validation cache: {e}")
+            return None
+
+    def _cache_shuffle_result(self, base_code_hash: Optional[str], passed: bool) -> None:
+        """
+        Save shuffle test result to cache.
+
+        Args:
+            base_code_hash: Hash of base code (before parameter embedding)
+            passed: Whether the shuffle test passed
+        """
+        if not base_code_hash:
+            return
+
+        try:
+            from datetime import datetime, UTC
+
+            with get_session() as session:
+                # Upsert pattern: try insert, on conflict update
+                existing = session.query(ValidationCache).filter(
+                    ValidationCache.code_hash == base_code_hash
+                ).first()
+
+                if existing:
+                    existing.shuffle_passed = passed
+                    existing.validated_at = datetime.now(UTC)
+                else:
+                    cache_entry = ValidationCache(
+                        code_hash=base_code_hash,
+                        shuffle_passed=passed,
+                        validated_at=datetime.now(UTC)
+                    )
+                    session.add(cache_entry)
+
+            logger.debug(
+                f"Cached shuffle result for {base_code_hash[:8]}: "
+                f"{'PASSED' if passed else 'FAILED'}"
+            )
+        except Exception as e:
+            logger.warning(f"Error writing validation cache: {e}")
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""

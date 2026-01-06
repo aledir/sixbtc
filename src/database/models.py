@@ -9,7 +9,7 @@ Database schema for:
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Optional
 
 from sqlalchemy import (
@@ -176,6 +176,10 @@ class Strategy(Base):
     # Pattern-specific coin selection (from pattern's coin_performance)
     pattern_coins = Column(JSON)  # High-edge coins: ["ME", "RENDER", ...]
 
+    # Base code hash for batch processing and shuffle test caching
+    # SHA256 of base code BEFORE parameter embedding (same for all variations)
+    base_code_hash = Column(String(64), nullable=True, index=True)
+
     # Backtest score (from BacktestResult, cached for ranking)
     score_backtest = Column(Float)  # Composite score 0-100
 
@@ -203,6 +207,7 @@ class Strategy(Base):
         Index('idx_status_timeframe', 'status', 'timeframe'),
         Index('idx_strategy_type_status', 'strategy_type', 'status'),
         Index('idx_status_processing', 'status', 'processing_by'),  # For claim queries
+        Index('idx_status_base_code_hash', 'status', 'base_code_hash'),  # For batch claim by hash
     )
 
     def __repr__(self):
@@ -658,6 +663,32 @@ class PairsUpdateLog(Base):
 
     def __repr__(self):
         return f"<PairsUpdateLog(id={self.id}, total_pairs={self.total_pairs})>"
+
+
+# ==============================================================================
+# VALIDATION CACHE
+# ==============================================================================
+
+class ValidationCache(Base):
+    """
+    Cache for expensive validation tests (shuffle test).
+
+    Stores results by base_code_hash to skip redundant tests on
+    parametric variations of the same base code.
+    """
+    __tablename__ = "validation_caches"
+
+    # Primary key - hash of base code (BEFORE parameter embedding)
+    code_hash = Column(String(64), primary_key=True)
+
+    # Shuffle test result
+    shuffle_passed = Column(Boolean, nullable=False)
+
+    # Timestamp for potential TTL/expiration
+    validated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
+
+    def __repr__(self):
+        return f"<ValidationCache(hash={self.code_hash[:8]}..., passed={self.shuffle_passed})>"
 
 
 # ==============================================================================

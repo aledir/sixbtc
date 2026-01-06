@@ -529,7 +529,8 @@ class ContinuousBacktesterProcess:
                         strategy.name,
                         strategy.code,
                         strategy.timeframe,
-                        strategy.pattern_coins
+                        strategy.pattern_coins,
+                        strategy.base_code_hash  # Pass hash to detect pre-parametrized strategies
                     )
                     validated_futures[future] = (str(strategy.id), strategy.name)
                     await asyncio.sleep(0.1)
@@ -546,10 +547,14 @@ class ContinuousBacktesterProcess:
         strategy_name: str,
         code: str,
         original_tf: str,
-        pattern_coins: Optional[List[str]] = None
+        pattern_coins: Optional[List[str]] = None,
+        base_code_hash: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
-        Run training/holdout backtest on all timeframes and select optimal TF.
+        Run training/holdout backtest on strategy.
+
+        If base_code_hash is present, the strategy was pre-parametrized by the Generator.
+        In this case, we skip parametric optimization and test only the assigned timeframe.
 
         Training/Holdout backtesting (unified approach):
         1. Backtest on TRAINING period (365 days) - for edge detection
@@ -583,18 +588,27 @@ class ContinuousBacktesterProcess:
             tf_all_parametric_results = {}  # Track ALL valid parametric results per TF
             tf_holdout_data = {}  # Track holdout data per TF (for additional parametric validation)
 
-            # Determine timeframes to test based on strategy type
-            if pattern_coins:
-                # Pattern-based: test ONLY original_tf (from pattern.timeframe)
-                # Pattern Discovery validated this pattern on this specific timeframe
-                # Testing on other timeframes invalidates that validation
+            # Determine timeframes to test and whether to use parametric optimization
+            # Pre-parametrized strategies (base_code_hash present) skip parametric and use assigned TF
+            is_pre_parametrized = base_code_hash is not None
+            use_parametric = self.parametric_enabled and not is_pre_parametrized
+
+            if is_pre_parametrized or pattern_coins:
+                # Pre-parametrized OR Pattern-based: test ONLY original_tf
+                # Parameters are already embedded in code, no optimization needed
                 timeframes_to_test = [original_tf]
-                logger.info(
-                    f"[{strategy_name}] Pattern-based: testing only {original_tf} "
-                    f"(pattern validated on this timeframe)"
-                )
+                if is_pre_parametrized:
+                    logger.info(
+                        f"[{strategy_name}] Pre-parametrized: testing only {original_tf}, "
+                        f"skip parametric (hash: {base_code_hash[:8]})"
+                    )
+                else:
+                    logger.info(
+                        f"[{strategy_name}] Pattern-based: testing only {original_tf} "
+                        f"(pattern validated on this timeframe)"
+                    )
             else:
-                # AI-based: test ALL timeframes to find optimal
+                # Legacy AI-based (no base_code_hash): test ALL timeframes to find optimal
                 timeframes_to_test = self.timeframes
                 logger.info(
                     f"[{strategy_name}] AI-based: testing all {len(self.timeframes)} timeframes"
@@ -639,7 +653,7 @@ class ContinuousBacktesterProcess:
 
                 # Run TRAINING period backtest
                 try:
-                    if self.parametric_enabled:
+                    if use_parametric:
                         # Parametric: generate strategies with different SL/TP/leverage parameters
                         # Pass is_pattern_based to select appropriate parameter space
                         is_pattern_based = pattern_coins is not None and len(pattern_coins) > 0

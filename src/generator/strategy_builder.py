@@ -62,6 +62,7 @@ class GeneratedStrategy:
     parameters: Optional[dict] = None  # Parameters used if template-based
     parameter_hash: Optional[str] = None  # Hash for deduplication
     pattern_coins: Optional[list[str]] = None  # High-edge coins from pattern
+    base_code_hash: Optional[str] = None  # SHA256 of base code BEFORE parameter embedding
 
 
 class StrategyBuilder:
@@ -390,10 +391,10 @@ class StrategyBuilder:
         max_strategies: Optional[int] = None
     ) -> list[GeneratedStrategy]:
         """
-        Generate multiple strategies from a template
+        Generate multiple strategies from a template or pattern
 
-        Unlike generate_strategy() which returns a single strategy,
-        this method returns parametric strategies up to max_strategies.
+        Both pattern-based and template-based strategies are expanded
+        to N parametric variations using generate_from_base_code().
 
         Args:
             strategy_type: Type of strategy (MOM, REV, TRN, etc.)
@@ -405,17 +406,40 @@ class StrategyBuilder:
         Returns:
             List of GeneratedStrategy objects
         """
-        # If patterns provided, use first one (one pattern = one strategy)
+        # Pattern-based generation
+        pattern = None
         if patterns and len(patterns) > 0:
-            result = self.generate_from_pattern(patterns[0])
-            return [result] if result else []
-
-        # If use_patterns, try to fetch one
-        if use_patterns:
+            pattern = patterns[0]
+        elif use_patterns:
             fetched_patterns = self._fetch_patterns(timeframe)
             if fetched_patterns:
-                result = self.generate_from_pattern(fetched_patterns[0])
-                return [result] if result else []
+                pattern = fetched_patterns[0]
+
+        if pattern:
+            # Generate base code from pattern (1 strategy, no params yet)
+            base_result = self.generate_from_pattern(pattern)
+            if not base_result:
+                return []
+
+            # Expand to N strategies using parametric generator
+            parametric_results = self.parametric_generator.generate_from_base_code(
+                base_code=base_result.code,
+                strategy_type=base_result.strategy_type,
+                timeframe=timeframe,
+                source_id=str(pattern.id),
+                source_type="pattern",
+                pattern_coins=base_result.pattern_coins,
+                max_strategies=max_strategies
+            )
+
+            # Convert parametric results to GeneratedStrategy
+            return [
+                self._convert_parametric_to_generated(
+                    pr, base_result, pattern
+                )
+                for pr in parametric_results
+                if pr.validation_passed
+            ]
 
         # Template-based generation: return strategies up to limit
         logger.info(f"No patterns available, using template-based generation")
@@ -434,6 +458,42 @@ class StrategyBuilder:
 
         logger.error("No generation method available (no patterns, no template generator)")
         return []
+
+    def _convert_parametric_to_generated(
+        self,
+        parametric_result,
+        base_result: GeneratedStrategy,
+        pattern
+    ) -> GeneratedStrategy:
+        """
+        Convert parametric generator result to GeneratedStrategy.
+
+        Args:
+            parametric_result: Result from generate_from_base_code()
+            base_result: Original base strategy (before parametric expansion)
+            pattern: Source pattern
+
+        Returns:
+            GeneratedStrategy with all fields populated
+        """
+        return GeneratedStrategy(
+            code=parametric_result.code,
+            strategy_id=parametric_result.strategy_id,
+            strategy_type=parametric_result.strategy_type,
+            timeframe=parametric_result.timeframe,
+            patterns_used=[str(pattern.id)],
+            ai_provider=base_result.ai_provider,
+            validation_passed=parametric_result.validation_passed,
+            validation_errors=parametric_result.validation_errors,
+            leverage=parametric_result.parameters.get('leverage', 1),
+            pattern_id=str(pattern.id),
+            generation_mode="pattern",
+            template_id=parametric_result.template_id,
+            parameters=parametric_result.parameters,
+            parameter_hash=parametric_result.parameter_hash,
+            pattern_coins=parametric_result.pattern_coins,
+            base_code_hash=parametric_result.base_code_hash
+        )
 
     def _derive_strategy_type(self, pattern: Pattern) -> StrategyType:
         """Derive strategy type from pattern characteristics"""

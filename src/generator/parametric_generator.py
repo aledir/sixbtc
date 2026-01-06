@@ -57,25 +57,29 @@ class GeneratedStrategy:
     strategy_id: str
     strategy_type: str
     timeframe: str
-    template_id: str  # UUID of parent template
+    template_id: str  # UUID of parent template/source
     template_name: str
     parameters: dict  # Specific parameters used
     parameter_hash: str  # Hash for deduplication
     generation_mode: str = "template"
     validation_passed: bool = True
     validation_errors: list = None
+    base_code_hash: str = ""  # SHA256 of base code BEFORE parameter embedding
+    pattern_coins: list = None  # Coins for pattern-based strategies
 
     def __post_init__(self):
         if self.validation_errors is None:
             self.validation_errors = []
+        if self.pattern_coins is None:
+            self.pattern_coins = []
 
 
 class ParametricGenerator:
     """
-    Generates concrete strategies from parameterized templates
+    Generates concrete strategies from parameterized templates or base code
 
-    No AI calls - just Jinja2 template rendering with
-    different parameter sets to create multiple strategies.
+    No AI calls - just Jinja2 template rendering or regex parameter embedding
+    with different parameter sets to create multiple strategies.
 
     Leverage is assigned randomly based on database coins table:
     - min = MIN(coins.max_leverage) from active coins
@@ -83,11 +87,12 @@ class ParametricGenerator:
     At execution: actual_leverage = min(strategy.leverage, coin.max_leverage)
     """
 
-    def __init__(self, config: dict = None):
+    def __init__(self, config: dict):
         """
         Initialize Parametric Generator
 
-        Reads leverage range from database (coins.max_leverage)
+        Args:
+            config: Full config dict with generation.parametric.parameter_space
         """
         # Jinja2 environment for rendering templates
         self.jinja_env = Environment(
@@ -96,6 +101,10 @@ class ParametricGenerator:
             block_start_string='{%',
             block_end_string='%}'
         )
+
+        # Store config for parameter space
+        self.config = config
+        self.parameter_space = config['generation']['parametric']['parameter_space']
 
         # Load leverage range from database
         self.leverage_min, self.leverage_max = get_leverage_range_from_db()
@@ -152,6 +161,146 @@ class ParametricGenerator:
         )
 
         return strategies
+
+    def generate_from_base_code(
+        self,
+        base_code: str,
+        strategy_type: str,
+        timeframe: str,
+        source_id: str,
+        source_type: str,
+        pattern_coins: Optional[list] = None,
+        max_strategies: Optional[int] = None
+    ) -> list[GeneratedStrategy]:
+        """
+        Generate N strategies from base code with parametric variations.
+
+        This is the unified method for both AI-based and Pattern-based strategies.
+        Parameters are embedded directly into the code using regex substitution.
+
+        Args:
+            base_code: Strategy code (no Jinja2 placeholders, just Python)
+            strategy_type: Type like "MOM", "REV", etc.
+            timeframe: Timeframe like "15m", "1h"
+            source_id: UUID of source (pattern ID or template ID)
+            source_type: "pattern" or "template"
+            pattern_coins: Optional list of coins for pattern-based strategies
+            max_strategies: Optional limit on strategies to generate
+
+        Returns:
+            List of GeneratedStrategy objects with parameters embedded
+        """
+        import re
+
+        # Calculate base_code_hash BEFORE any parameter modification
+        base_code_hash = hashlib.sha256(base_code.encode()).hexdigest()
+
+        # Generate parameter combinations from config space
+        param_combos = self._generate_param_combinations()
+
+        if max_strategies and len(param_combos) > max_strategies:
+            logger.info(
+                f"Limiting to {max_strategies} combinations (from {len(param_combos)})"
+            )
+            param_combos = param_combos[:max_strategies]
+
+        logger.info(
+            f"Generating {len(param_combos)} strategies from {source_type} "
+            f"{source_id[:8]}... (hash: {base_code_hash[:8]})"
+        )
+
+        strategies = []
+        for i, params in enumerate(param_combos):
+            try:
+                # Embed parameters into code
+                code = self._embed_parameters(base_code, params)
+
+                # Generate unique ID from source + params
+                strategy_id = self._generate_id(
+                    f"{source_type}_{source_id}", params
+                )
+
+                # Update class name to match new ID
+                code = self._update_class_name(code, strategy_type, strategy_id)
+
+                # Validate generated code
+                validation_passed, errors = self._validate_code(code)
+
+                strategy = GeneratedStrategy(
+                    code=code,
+                    strategy_id=strategy_id,
+                    strategy_type=strategy_type,
+                    timeframe=timeframe,
+                    template_id=source_id,
+                    template_name=f"{source_type}_{source_id[:8]}",
+                    parameters=params,
+                    parameter_hash=self._hash_parameters(params),
+                    generation_mode=source_type,
+                    validation_passed=validation_passed,
+                    validation_errors=errors,
+                    base_code_hash=base_code_hash,
+                    pattern_coins=pattern_coins or []
+                )
+                strategies.append(strategy)
+
+            except Exception as e:
+                logger.error(
+                    f"Error generating strategy {i + 1} from {source_type}: {e}"
+                )
+
+        valid_count = sum(1 for s in strategies if s.validation_passed)
+        logger.info(
+            f"Generated {len(strategies)} strategies, {valid_count} passed validation"
+        )
+
+        return strategies
+
+    def _generate_param_combinations(self) -> list[dict]:
+        """
+        Generate all parameter combinations from config space.
+
+        Uses config['generation']['parametric']['parameter_space']
+
+        Returns:
+            List of parameter dicts
+        """
+        param_names = list(self.parameter_space.keys())
+        param_values = [self.parameter_space[p] for p in param_names]
+
+        combos = []
+        for combo in itertools.product(*param_values):
+            combos.append(dict(zip(param_names, combo)))
+
+        return combos
+
+    def _embed_parameters(self, code: str, params: dict) -> str:
+        """
+        Embed parameters directly into strategy code using regex.
+
+        Handles multiple formats:
+        - sl_pct = 0.02   -> sl_pct = {new_value}
+        - self.sl_pct = 0.02
+        - "sl_pct": 0.02
+
+        Args:
+            code: Base strategy code
+            params: Parameter dict {sl_pct: 0.03, tp_pct: 0.05, ...}
+
+        Returns:
+            Code with parameters embedded
+        """
+        import re
+
+        for param_name, value in params.items():
+            # Pattern 1: attribute assignment (sl_pct = 0.02 or self.sl_pct = 0.02)
+            pattern1 = rf'(\b(?:self\.)?{param_name}\s*=\s*)[\d.]+(\b)'
+            code = re.sub(pattern1, rf'\g<1>{value}\2', code)
+
+            # Pattern 2: dict key ("sl_pct": 0.02)
+            pattern2 = rf'(["\']){param_name}\1\s*:\s*[\d.]+'
+            code = re.sub(pattern2, rf'"\g<1>": {value}', code)
+
+        return code
 
     def _fix_template_syntax(self, code_template: str) -> str:
         """

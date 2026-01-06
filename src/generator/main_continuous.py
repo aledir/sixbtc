@@ -19,6 +19,7 @@ from src.config import load_config
 from src.database import get_session, Strategy, StrategyProcessor
 from src.generator.strategy_builder import StrategyBuilder
 from src.generator.pattern_fetcher import PatternFetcher
+from src.generator.ai_call_tracker import AICallTracker, seconds_until_midnight
 from src.utils import get_logger, setup_logging
 
 # Initialize logging at module load
@@ -91,6 +92,19 @@ class ContinuousGeneratorProcess:
         self._unused_patterns_cache: list = []
         self._cache_refresh_interval = 300  # 5 minutes
         self._last_cache_refresh = datetime.min
+
+        # AI Call Tracker (daily limit)
+        ai_limit_config = self.config['ai']['daily_limit']
+        if ai_limit_config['enabled']:
+            self.ai_tracker = AICallTracker(
+                max_calls=ai_limit_config['max_calls']
+            )
+            logger.info(
+                f"AI daily limit enabled: {ai_limit_config['max_calls']} calls/day"
+            )
+        else:
+            self.ai_tracker = None
+            logger.info("AI daily limit disabled")
 
         logger.info(
             f"ContinuousGeneratorProcess initialized: "
@@ -327,13 +341,23 @@ class ContinuousGeneratorProcess:
 
             # Select random strategy type and timeframe
             strategy_types = ['MOM', 'REV', 'TRN', 'BRE', 'VOL', 'SCA']
-            timeframes = self.config.get('timeframes', ['15m', '30m', '1h', '4h', '1d'])
+            timeframes = self.config['timeframes']
 
             strategy_type = random.choice(strategy_types)
             timeframe = random.choice(timeframes)
 
             # Smart pattern selection
             use_patterns, selected_patterns = self._should_use_patterns()
+
+            # Check AI daily limit (only for AI-based, not pattern-based)
+            if not use_patterns and self.ai_tracker:
+                if not self.ai_tracker.can_call():
+                    wait_seconds = seconds_until_midnight()
+                    logger.info(
+                        f"AI daily limit reached ({self.ai_tracker.count}/{self.ai_tracker.max_calls}). "
+                        f"Waiting {wait_seconds/3600:.1f}h until reset."
+                    )
+                    return (False, 0, "daily_limit")
 
             # Generate strategies with capacity limit
             results = self.strategy_builder.generate_strategies(
@@ -349,9 +373,18 @@ class ContinuousGeneratorProcess:
                 logger.debug("No valid strategies generated")
                 return (False, 0, "")
 
+            # Record AI call if successful (only for AI-based)
+            if not use_patterns and self.ai_tracker:
+                self.ai_tracker.record_call()
+                logger.debug(
+                    f"AI calls today: {self.ai_tracker.count}/{self.ai_tracker.max_calls}"
+                )
+
             # Save all strategies
             saved_count = 0
             template_id = results[0].template_id or results[0].strategy_id[:8]
+            # Get base_code_hash from first result (all should have same hash)
+            base_code_hash = getattr(results[0], 'base_code_hash', None)
 
             for result in results:
                 if not result.validation_passed:
@@ -371,13 +404,14 @@ class ContinuousGeneratorProcess:
                     pattern_ids=result.patterns_used,
                     template_id=result.template_id,
                     parameters=result.parameters,
-                    pattern_coins=getattr(result, 'pattern_coins', None)
+                    pattern_coins=getattr(result, 'pattern_coins', None),
+                    base_code_hash=getattr(result, 'base_code_hash', base_code_hash)
                 )
                 saved_count += 1
 
             logger.info(
                 f"Saved {saved_count}/{len(results)} strategies "
-                f"from template {template_id}"
+                f"from template {template_id} (hash: {base_code_hash[:8] if base_code_hash else 'N/A'})"
             )
 
             return (True, saved_count, template_id)
@@ -397,7 +431,8 @@ class ContinuousGeneratorProcess:
         pattern_ids: list,
         template_id: Optional[str] = None,
         parameters: Optional[dict] = None,
-        pattern_coins: Optional[list] = None
+        pattern_coins: Optional[list] = None,
+        base_code_hash: Optional[str] = None
     ):
         """Save generated strategy to database"""
         try:
@@ -417,7 +452,8 @@ class ContinuousGeneratorProcess:
                     pattern_ids=pattern_ids,
                     template_id=template_id,
                     parameters=parameters,
-                    pattern_coins=pattern_coins
+                    pattern_coins=pattern_coins,
+                    base_code_hash=base_code_hash
                 )
                 session.add(strategy)
             logger.debug(f"Saved strategy {name} to database")
