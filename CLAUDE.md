@@ -1,6 +1,6 @@
 # SixBTC - AI-Powered Trading System Development Guide
 
-**Last Updated**: 2026-01-04 | **Python**: 3.11+ | **Core**: Numba-JIT Backtester + Hyperliquid SDK
+**Last Updated**: 2026-01-07 | **Python**: 3.11+ | **Core**: Numba-JIT Backtester + Hyperliquid SDK
 
 ---
 
@@ -411,6 +411,45 @@ sixbtc/
 │ Output: strategies (status: RETIRED if degraded)               │
 └────────────────────────────────────────────────────────────────┘
 ```
+
+### Strategy Sources and generation_mode
+
+Strategy sources are configured in `config.yaml` under `generation.strategy_sources`.
+The `generation_mode` field in the database tracks where each strategy came from.
+
+**Config sources map 1:1 to generation_mode values:**
+
+| Config (strategy_sources) | generation_mode | Class Name | Description |
+|---------------------------|-----------------|------------|-------------|
+| `pattern` | `pattern` | `PatStrat_*` | From pattern-discovery API |
+| `ai_free` | `ai_free` | `Strategy_*` | AI freely chooses indicators |
+| `ai_assigned` | `ai_assigned` | `Strategy_*` | AI uses IndicatorCombinator-assigned indicators |
+| — | `optimized` | `Strategy_*` | Backtester parametric optimization output |
+
+**Config example:**
+```yaml
+generation:
+  strategy_sources:
+    pattern:
+      enabled: true            # PatStrat_* from pattern-discovery API
+    ai_free:
+      enabled: true            # Strategy_* - AI chooses indicators freely
+    ai_assigned:
+      enabled: true            # Strategy_* - AI uses IndicatorCombinator
+
+  # When both AI sources enabled, ratio controls the mix
+  ai_free_ratio: 0.7           # 70% ai_free, 30% ai_assigned
+```
+
+**Flow by source:**
+
+1. **pattern**: Generator fetches from pattern-discovery API → Validator → Backtester (parametric optimization) → creates `optimized` strategies → Pool
+
+2. **ai_free**: Generator calls AI with template (AI chooses indicators) → Validator → Backtester (parametric optimization) → creates `optimized` strategies → Pool
+
+3. **ai_assigned**: Generator gets indicator combo from IndicatorCombinator → calls AI with assigned indicators → Validator → Backtester (parametric optimization) → creates `optimized` strategies → Pool
+
+4. **optimized**: Created by Backtester during parametric optimization. Already has optimized params, goes directly to Pool (shuffle test → multi-window → ACTIVE).
 
 ---
 
