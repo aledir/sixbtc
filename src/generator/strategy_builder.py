@@ -138,8 +138,12 @@ class StrategyBuilder:
         self._strategy_sources = self.config.get('generation', {}).get('strategy_sources', {
             'pattern_based': {'enabled': True},
             'ai_fixed_indicators': {'enabled': True},
-            'ai_parametric_indicators': {'enabled': False}
+            'ai_parametric_indicators': {'enabled': True}
         })
+
+        # AI source ratio: probability of using ai_fixed_indicators when both enabled
+        # 0.7 = 70% ai_fixed, 30% ai_parametric
+        self._ai_fixed_ratio = self.config.get('generation', {}).get('ai_fixed_ratio', 0.7)
 
     def _default_config(self) -> dict:
         """Default configuration (for tests only - production must provide full config)"""
@@ -505,12 +509,21 @@ class StrategyBuilder:
             return []
 
         # Decide which AI mode to use
-        if ai_parametric_enabled:
-            # SOURCE 3: AI with IndicatorCombinator (unique combinations)
-            return self._generate_with_indicator_combinator(strategy_type, timeframe)
-        else:
-            # SOURCE 2: AI with fixed indicators (legacy behavior)
+        if ai_fixed_enabled and ai_parametric_enabled:
+            # Both enabled: use ratio to decide (e.g., 70% fixed, 30% parametric)
+            use_fixed = random.random() < self._ai_fixed_ratio
+            if use_fixed:
+                logger.debug(f"AI mode: fixed_indicators (ratio={self._ai_fixed_ratio:.0%})")
+                return self._generate_with_fixed_indicators(strategy_type, timeframe)
+            else:
+                logger.debug(f"AI mode: parametric_indicators (ratio={1-self._ai_fixed_ratio:.0%})")
+                return self._generate_with_indicator_combinator(strategy_type, timeframe)
+        elif ai_fixed_enabled:
+            # Only fixed enabled
             return self._generate_with_fixed_indicators(strategy_type, timeframe)
+        else:
+            # Only parametric enabled
+            return self._generate_with_indicator_combinator(strategy_type, timeframe)
 
     def _generate_with_fixed_indicators(
         self,

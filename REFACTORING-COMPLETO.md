@@ -5966,9 +5966,526 @@ concordi?
 
   Poi monitoro i log per verificare il fix.
 
-  Todos
-  ☒ Remove use_parametric = base_code_hash is None workaround
-  ☒ Remove base_code_hash assignment in _create_parametric_strategy
-  ☒ Change status from GENERATED to VALIDATED in _create_parametric_strategy
-  ☒ Add direct _promote_to_active_pool call after creating parametric strategy
-  ☐ Test the fix - reset and monitor
+> fatto, monitora i log
+
+● Bash(sleep 30 && grep -E "(WARNING|ERROR|Parametric strategy.*entered|Parametric strategy.*rejected|ACTIVE pool)" /home/bitwolf/sixbtc/logs/backtester.log
+      2>/dev/nul…)
+  ⎿  (No content)
+
+● Bash(tail -40 /home/bitwolf/sixbtc/logs/backtester.log 2>/dev/null)
+  ⎿  2026-01-07 08:38:32 INFO     src.backtester.main_continuous: [PatStrat_MOM_24c1c887] 15m: Training: 748 trades, Sharpe 1.12 | Holdout: 197 trades, Sharpe 2.09
+     | Final Score: 1.15
+     2026-01-07 08:38:32 INFO     src.backtester.main_continuous: Optimal TF: 15m with final score 1.15
+     … +51 lines (ctrl+o to expand)
+
+● Bash(tail -15 /home/bitwolf/sixbtc/logs/metrics.log 2>/dev/null)
+  ⎿  2026-01-07 08:37:46,468 - __main__ - INFO - pool_stats size=0/300 score_min=-- score_max=-- score_avg=--
+     2026-01-07 08:37:46,468 - __main__ - INFO - pool_quality edge_avg=-- sharpe_avg=-- winrate_avg=-- dd_avg=--
+     2026-01-07 08:37:46,468 - __main__ - INFO - retest_24h tested=0 passed=0 retired=0
+     … +13 lines (ctrl+o to expand)
+
+● Bash(grep -E "(Created parametric strategy|Parametric strategy.*entered|Parametric strategy.*rejected|Parametric strategy.*PASSED holdout)"
+      /home/bitwolf/sixbtc/logs…)
+  ⎿  2026-01-07 08:38:49 INFO     src.backtester.main_continuous: Created parametric strategy Strategy_MOM_5b4e90ea with params: SL=3.0%, TP=0.0%, lev=1
+     2026-01-07 08:38:49 INFO     src.backtester.main_continuous: Parametric strategy 2 PASSED holdout validation: Final score 0.65
+     2026-01-07 08:38:49 INFO     src.backtester.main_continuous: Parametric strategy 2 rejected from pool: score_below_threshold:15.6
+     … +3 lines (ctrl+o to expand)
+
+● ✅ FIX FUNZIONA!
+
+  Created parametric strategy Strategy_MOM_5b4e90ea with params: SL=3.0%, TP=0.0%, lev=1
+  Parametric strategy 2 PASSED holdout validation: Final score 0.65
+  Parametric strategy 2 rejected from pool: score_below_threshold:15.6
+
+  Le strategie parametriche vengono:
+  1. ✅ Create con status VALIDATED
+  2. ✅ Promosse direttamente (shuffle → multi-window → pool)
+  3. ✅ Accettate o rifiutate in base allo score
+
+  Verifico che non ci sia loop:
+
+● Bash(PGPASSWORD="sixbtc_dev_password_2025" psql -h localhost -p 5435 -U sixbtc -d sixbtc -c "
+      SELECT…)
+  ⎿    status   | generation_mode | count
+     -----------+-----------------+-------
+      VALIDATED | ai              |    80
+     … +2 lines (ctrl+o to expand)
+
+ * ▐▛███▜▌ *   Claude Code v2.0.76
+* ▝▜█████▛▘ *  Opus 4.5 · Claude Max
+ *  ▘▘ ▝▝  *   ~/sixbtc
+══════════════════════════════════════════════════════════════ Conversation compacted · ctrl+o for history ═════════════════════════════════════════════════════════════
+  ⎿  Referenced file logs/backtester.log
+  ⎿  Read logs/metrics.log (37 lines)
+  ⎿  Referenced file src/backtester/main_continuous.py
+  ⎿  Read logs/rotator.log (11 lines)
+  ⎿  Referenced file src/generator/strategy_builder.py
+  ⎿  Todo list read (5 items)
+
+● Continuo a monitorare i log per verificare che il fix sia stabile. Vediamo lo stato attuale:
+
+● Bash(tail -100 /home/bitwolf/sixbtc/logs/backtester.log 2>/dev/null | tail -50)
+  ⎿  2026-01-07 08:40:22 INFO     src.backtester.main_continuous: Walk-forward window 2: 30 symbols, 2190 bars
+     2026-01-07 08:40:22 INFO     src.backtester.backtest_engine: Running realistic portfolio backtest (30 symbols, max_positions=10)
+     2026-01-07 08:40:22 INFO     src.backtester.main_continuous: [VALIDATED] PatStrat_REV_a9f1154f failed: Backtest failed thresholds
+     … +56 lines (ctrl+o to expand)
+
+● Bash(tail -50 /home/bitwolf/sixbtc/logs/metrics.log 2>/dev/null)
+  ⎿  2026-01-07 08:37:46,185 - __main__ - INFO - MetricsCollector initialized (interval: 60s)
+     2026-01-07 08:37:46,185 - __main__ - INFO - Metrics collector started (interval: 60s)
+     2026-01-07 08:37:46,203 - src.database.connection - INFO - Database engine created: localhost:5435/sixbtc (pool: 5-50)
+     … +36 lines (ctrl+o to expand)
+
+● Ottimo! Il fix sta funzionando. Vedo:
+
+  1. Strategie che entrano nel pool ACTIVE: Strategy_TRN_5ee7fd2f entered ACTIVE pool (score=46.6) - Pool not full (5/300)
+  2. Nessun loop infinito: gen_queue=0/500 - la queue è stabile
+  3. Status HEALTHY: dopo 2 minuti il sistema è passato da DEGRADED a HEALTHY
+
+  Verifico lo stato attuale del DB:
+
+● Bash(PGPASSWORD="sixbtc_dev_password_2025" psql -h localhost -p 5435 -U sixbtc -d sixbtc -c "
+      SELECT status, COUNT(*)…)
+  ⎿    status   | count
+     -----------+-------
+      VALIDATED |    85
+     … +2 lines (ctrl+o to expand)
+
+● Bash(tail -5 /home/bitwolf/sixbtc/logs/metrics.log 2>/dev/null)
+  ⎿  2026-01-07 08:39:46,713 - __main__ - INFO - backpressure gen_queue=0/500 val_queue=77/500 bt_waiting=72 bt_processing=5
+     2026-01-07 08:39:46,713 - __main__ - INFO - pool_stats size=2/300 score_min=40.5 score_max=43.8 score_avg=42.1
+     2026-01-07 08:39:46,713 - __main__ - INFO - pool_quality edge_avg=1.2% sharpe_avg=4.6 winrate_avg=61% dd_avg=35%
+     … +2 lines (ctrl+o to expand)
+
+● Il fix funziona correttamente:
+
+  | Metrica   | Prima (bug)         | Ora (fix)       |
+  |-----------|---------------------|-----------------|
+  | gen_queue | 188,682/500 (FULL)  | 0/500 ✅        |
+  | VALIDATED | esplosione infinita | 85 (stabile) ✅ |
+  | ACTIVE    | 0                   | 8 ✅            |
+  | Status    | DEGRADED            | HEALTHY ✅      |
+
+  Attendo il prossimo ciclo di metriche per confermare la stabilità:
+
+● Bash(sleep 30 && tail -20 /home/bitwolf/sixbtc/logs/metrics.log 2>/dev/null | tail -15)
+  ⎿  2026-01-07 08:39:46,713 - __main__ - INFO - pool_stats size=2/300 score_min=40.5 score_max=43.8 score_avg=42.1
+     2026-01-07 08:39:46,713 - __main__ - INFO - pool_quality edge_avg=1.2% sharpe_avg=4.6 winrate_avg=61% dd_avg=35%
+     2026-01-07 08:39:46,713 - __main__ - INFO - retest_24h tested=2 passed=2 retired=0
+     … +13 lines (ctrl+o to expand)
+
+● Fix confermato stabile!
+
+  08:40:46 status=HEALTHY
+           active=10 (crescono!)
+           gen_queue=0/500 (stabile ✅)
+           val_queue=85/500 (normale)
+           pool size=10/300, score_avg=45.6
+
+  Il throughput è bilanciato:
+  - gen=+12 val=+12 bt=+15 score=+12 shuf=+12 mw=+10 pool=+10
+
+  Nessun accumulo, nessun loop infinito. Le strategie parametriche vengono create e promosse direttamente al pool senza re-entrare nella pipeline.
+
+● Riepilogo fix completato:
+
+  | Modifica                                   | File               | Linea      |
+  |--------------------------------------------|--------------------|------------|
+  | use_parametric = True (sempre)             | main_continuous.py | ~592       |
+  | status = "VALIDATED"                       | main_continuous.py | ~1956      |
+  | Rimosso base_code_hash assignment          | main_continuous.py | ~1983-1989 |
+  | Aggiunto _promote_to_active_pool() diretto | main_continuous.py | ~900-916   |
+
+  Il bug del loop infinito (188K strategie in queue) è risolto. Il sistema è HEALTHY e sta popolando il pool ACTIVE correttamente.
+
+> 1) fai git commit e push
+2) prima dell'ultimo fix mi hai detto:
+  FLUSSO PER OGNI TIPO DI STRATEGIA
+
+  A) PATTERN-BASED (generation_mode='ai')
+
+  1. Generator crea strategia
+
+  class PatStrat_MOM_abc123(StrategyCore):
+      # Params di DEFAULT (non ottimizzati!)
+      sl_pct = 0.03      # 3% - valore placeholder
+      tp_pct = 0.0       # 0% - nessun take profit
+      leverage = 1       # 1x - conservativo
+
+      def generate_signal(self, df):
+          # LOGICA DI ENTRY (da pattern-discovery)
+          rsi = ta.RSI(df['close'], 14)
+          if rsi.iloc[-1] < 30:
+              return Signal(direction='LONG', ...)
+  base_code_hash = NULL (non impostato)
+
+  2. Validator
+
+  - Controlla sintassi Python
+  - Verifica che erediti da StrategyCore
+  - status: GENERATED → VALIDATED
+
+  3. Backtester (PARAMETRIC OPTIMIZATION)
+
+  use_parametric = (base_code_hash is None) = TRUE
+
+  Testa 1050 combinazioni:
+  - sl_pct: [1%, 1.5%, 2%, 3%, 5%]
+  - tp_pct: [0%, 2%, 3%, 5%, 7%, 10%]
+  - exit_bars: [0, 10, 20, 50, 100]
+  - leverage: [1, 2, 3, 5, 10, 20, 40]
+
+  Risultati:
+  - Combo #47: sl=2%, tp=5%, lev=3 → Sharpe=1.2, WR=58% ✓ PASSA
+  - Combo #231: sl=3%, tp=7%, lev=5 → Sharpe=0.9, WR=55% ✓ PASSA
+  - Altre 1048 combo → Sharpe < 0.3 ✗ SCARTATE
+
+  4. Backtester crea NUOVE strategie (per ogni combo che passa)
+
+  # NUOVA strategia Strategy_MOM_xyz789 (generation_mode='template')
+  class Strategy_MOM_xyz789(StrategyCore):
+      # Params OTTIMIZZATI (dalla combo #47)
+      sl_pct = 0.02      # 2% - ottimizzato!
+      tp_pct = 0.05      # 5% - ottimizzato!
+      leverage = 3       # 3x - ottimizzato!
+
+      def generate_signal(self, df):
+          # STESSA LOGICA della strategia originale
+          rsi = ta.RSI(df['close'], 14)
+          if rsi.iloc[-1] < 30:
+              return Signal(direction='LONG', ...)
+  base_code_hash = "abc123..." (impostato dal mio fix!)
+  status = GENERATED
+
+  5. Nuova strategia torna in pipeline
+
+  - Validator → VALIDATED
+  - Backtester: use_parametric = (base_code_hash is None) = FALSE
+  - SKIP parametric (già ha params ottimizzati)
+  - Backtest diretto → score → shuffle → multi-window → ACTIVE
+
+  ---
+  B) AI CON INDICATORI FISSI (disabilitato)
+
+  1. Generator crea strategia
+
+  class Strategy_TRN_def456(StrategyCore):
+      # Params già embedded dal parametric_generator
+      sl_pct = 0.025     # 2.5% - già ottimizzato nel generator
+      tp_pct = 0.06      # 6% - già ottimizzato nel generator
+      leverage = 5       # 5x - già ottimizzato nel generator
+
+      def generate_signal(self, df):
+          # LOGICA scelta dall'AI
+          macd = ta.MACD(df['close'])
+          if macd['macd'].iloc[-1] > macd['signal'].iloc[-1]:
+              return Signal(direction='LONG', ...)
+  base_code_hash = "def456..." (impostato dal generator!)
+
+  2. Validator → VALIDATED
+
+  3. Backtester
+
+  use_parametric = (base_code_hash is None) = FALSE
+
+  SKIP parametric optimization!
+  Backtest diretto con i params nel codice
+
+  4. Score → Shuffle → Multi-window → ACTIVE
+
+  ---
+  C) AI CON INDICATORI PARAMETRICI (SOURCE 3, attivo)
+
+  1. Generator (IndicatorCombinator + parametric_generator)
+
+  class Strategy_REV_ghi789(StrategyCore):
+      # Params già embedded dal parametric_generator
+      sl_pct = 0.04      # 4% - già ottimizzato
+      tp_pct = 0.08      # 8% - già ottimizzato
+      leverage = 2       # 2x - già ottimizzato
+      exit_bars = 50     # 50 bars - già ottimizzato
+
+      def generate_signal(self, df):
+          # LOGICA con indicatori assegnati dal combinator
+          # (es: RSI + MACD + Bollinger)
+          rsi = ta.RSI(df['close'], 14)
+          bb = ta.BBANDS(df['close'])
+          if rsi.iloc[-1] < 25 and df['close'].iloc[-1] < bb['lower'].iloc[-1]:
+              return Signal(direction='LONG', ...)
+  base_code_hash = "ghi789..." (impostato dal generator!)
+
+  2-4. Stesso flusso di B)
+
+  - Validator → VALIDATED
+  - Backtester: SKIP parametric (ha già hash)
+  - Score → Shuffle → Multi-window → ACTIVE
+
+  ---
+  RIASSUNTO DIFFERENZE
+
+  | Tipo             | Chi ottimizza params | base_code_hash       | Backtester fa parametric? |
+  |------------------|----------------------|----------------------|---------------------------|
+  | A) Pattern       | Backtester           | NULL → poi impostato | SÌ (1 volta)              |
+  | B) AI fixed      | Generator            | Impostato subito     | NO                        |
+  | C) AI parametric | Generator            | Impostato subito     | NO                        |
+puoi riscrivere aggiornandolo al codice attuale quello che mi hai detto prima?
+
+● Bash(git status)
+  ⎿  On branch main
+     Your branch is up to date with 'origin/main'.
+     … +22 lines (ctrl+o to expand)
+
+● Bash(git diff --stat)
+  ⎿   REFACTORING-COMPLETO.md                      | 6243 ++++++++++++++++++++++++--
+      config/config.yaml                           |   30 +-
+      src/backtester/main_continuous.py            |  276 +-
+     … +9 lines (ctrl+o to expand)
+
+● Bash(git log --oneline -5)
+  ⎿  96013e0 fix: remove duplicate throughput chart, fix quality distribution visibility
+     200546b fix: convert Decimal to float in metrics aggregated endpoint
+     714796b fix: FastAPI dependency injection for database sessions
+     … +2 lines (ctrl+o to expand)
+
+● Bash(git check-ignore data/ && echo "data/ is ignored")
+  ⎿  Error: Exit code 1
+
+● Bash(git diff src/backtester/main_continuous.py | head -100)
+  ⎿  diff --git a/src/backtester/main_continuous.py b/src/backtester/main_continuous.py
+     index bb7c7ad..5f61634 100644
+     --- a/src/backtester/main_continuous.py
+     … +97 lines (ctrl+o to expand)
+
+● Bash(grep -q "^data/" .gitignore && echo "data/ already in .gitignore" || echo "data/" >> .gitignore && echo "Added data/ to .gitignore")
+  ⎿  data/ already in .gitignore
+     Added data/ to .gitignore
+
+● Bash(grep "data" .gitignore)
+  ⎿  # Market data cache
+     data/binance/
+     data/hyperliquid/
+     … +3 lines (ctrl+o to expand)
+
+● Bash(ls -la data/ 2>/dev/null | head -10)
+  ⎿  total 84
+     drwxrwxr-x  3 bitwolf bitwolf  4096 Jan  6 11:44 .
+     drwxrwxr-x 18 bitwolf bitwolf  4096 Jan  6 14:20 ..
+     … +2 lines (ctrl+o to expand)
+
+● Read(.gitignore)
+  ⎿  Read 246 lines
+
+● Update(.gitignore)
+  ⎿  Added 1 line, removed 3 lines
+      162  strategies/retired/
+      163
+      164  # Market data cache
+      165 -data/binance/
+      166 -data/hyperliquid/
+      167 -data/cache/
+      165 +data/
+      166  *.parquet
+      167  *.csv
+      168  *.hdf5
+
+● Bash(git add -A && git status)
+  ⎿  On branch main
+     Your branch is up to date with 'origin/main'.
+     … +16 lines (ctrl+o to expand)
+
+● Bash(git commit -m "fix: parametric strategies direct promotion to pool (no pipeline re-entry)…)
+  ⎿  [main 7cb406c] fix: parametric strategies direct promotion to pool (no pipeline re-entry)
+      14 files changed, 7370 insertions(+), 1058 deletions(-)
+      create mode 100644 alembic/versions/5b467cdc97da_add_used_indicator_combinations_table.py
+      create mode 100644 src/generator/indicator_combinator.py
+
+● Bash(git push)
+  ⎿  To github.com:aledir/sixbtc.git
+        96013e0..7cb406c  main -> main
+
+● Commit e push completati. Ora riscrivo il flusso aggiornato al codice attuale.
+
+● Search(pattern: "generation_mode", path: "src", output_mode: "content")
+  ⎿  Found 14 lines (ctrl+o to expand)
+
+● Read(src/backtester/main_continuous.py)
+  ⎿  Read 50 lines
+
+● Read(src/backtester/main_continuous.py)
+  ⎿  Read 100 lines
+
+● Read(src/backtester/main_continuous.py)
+  ⎿  Read 100 lines
+
+● Read(src/generator/strategy_builder.py)
+  ⎿  Read 80 lines
+
+● Ora riscrivo il flusso aggiornato al codice attuale:
+
+  ---
+  FLUSSO STRATEGIE - VERSIONE CORRETTA (Post-Fix)
+
+  A) PATTERN-BASED (generation_mode='pattern')
+
+  1. Generator (strategy_builder.py)
+  class PatStrat_MOM_abc123(StrategyCore):
+      # Params di DEFAULT (NON ottimizzati!)
+      sl_pct = 0.03      # 3% - placeholder dal pattern
+      tp_pct = 0.0       # 0% - nessun take profit
+      leverage = 1       # 1x - conservativo
+      exit_after_bars = 0
+
+      def generate_signal(self, df):
+          # LOGICA DI ENTRY (da pattern-discovery)
+          rsi = ta.RSI(df['close'], 14)
+          if rsi.iloc[-1] < 30:
+              return Signal(direction='LONG', ...)
+  - generation_mode = "pattern"
+  - status = "GENERATED"
+
+  2. Validator
+  - Controlla sintassi Python
+  - Verifica che erediti da StrategyCore
+  - status: GENERATED → VALIDATED
+
+  3. Backtester (PARAMETRIC OPTIMIZATION)
+  # main_continuous.py:592
+  use_parametric = True  # SEMPRE true ora
+  Testa 1050 combinazioni di parametri (dalla costante PARAM_SPACE):
+  - sl_pct: [1%, 1.5%, 2%, 3%, 5%]
+  - tp_pct: [0%, 2%, 3%, 5%, 7%, 10%]
+  - exit_bars: [0, 10, 20, 50, 100]
+  - leverage: [1, 2, 3, 5, 10, 20, 40]
+
+  4. Per ogni combo che passa le threshold:
+
+  Combo #47: sl=2%, tp=5%, lev=3, exit=20
+  ├── Training backtest (180 giorni): Sharpe=1.2, WR=58%, Trades=150
+  ├── THRESHOLD CHECK: ✓ Sharpe>=0.3, WR>=35%, Trades>=10
+  ├── Holdout backtest (30 giorni): Sharpe=0.9, WR=55%
+  ├── DEGRADATION CHECK: 25% degradation (max 50%) ✓
+  └── PASSA → Crea nuova strategia
+
+  5. Backtester crea NUOVA strategia (_create_parametric_strategy)
+  # main_continuous.py:1974
+  strategy.status = "VALIDATED"  # Pronta per promozione diretta
+
+  # main_continuous.py:1999
+  strategy.generation_mode = 'template'  # Marca come derivata
+
+  # main_continuous.py:2002
+  strategy.tested_at = datetime.now(UTC)  # Già testata
+
+  class Strategy_MOM_xyz789(StrategyCore):
+      # Params OTTIMIZZATI (dalla combo #47)
+      sl_pct = 0.02      # 2% - ottimizzato!
+      tp_pct = 0.05      # 5% - ottimizzato!
+      leverage = 3       # 3x - ottimizzato!
+      exit_after_bars = 20
+
+      def generate_signal(self, df):
+          # STESSA LOGICA della strategia originale
+          ...
+
+  6. Promozione DIRETTA al pool (_promote_to_active_pool)
+  # main_continuous.py:900-916
+  entered, promo_reason = self._promote_to_active_pool(
+      parametric_strategy_id, backtest_for_promo
+  )
+
+  Il pool manager (pool_manager.py) esegue:
+  1. Shuffle test (anti-lookahead empirico)
+  2. Multi-window validation (4 finestre temporali)
+  3. Pool entry (leaderboard, max 300 strategie)
+
+  status: VALIDATED → ACTIVE (se entra nel pool)
+
+  ---
+  B) AI-BASED (generation_mode='ai' o 'ai_pattern')
+
+  Attualmente il tipo AI con indicatori fissi è disabilitato. L'unica fonte AI attiva usa l'IndicatorCombinator:
+
+  1. Generator (strategy_builder.py + indicator_combinator.py)
+  class Strategy_REV_def456(StrategyCore):
+      # Params di DEFAULT (NON ottimizzati!)
+      sl_pct = 0.02      # 2% - default dal parametric_generator
+      tp_pct = 0.04      # 4% - default
+      leverage = 2       # 2x - default
+      exit_after_bars = 0
+
+      def generate_signal(self, df):
+          # LOGICA da AI (indicatori scelti dal combinator)
+          rsi = ta.RSI(df['close'], 14)
+          bb = ta.BBANDS(df['close'])
+          if rsi.iloc[-1] < 25 and df['close'].iloc[-1] < bb['lower'].iloc[-1]:
+              return Signal(direction='LONG', ...)
+  - generation_mode = "ai" oppure "ai_pattern"
+  - status = "GENERATED"
+
+  2-6. STESSO FLUSSO di Pattern-based:
+  - Validator → VALIDATED
+  - Backtester: parametric optimization (1050 combos)
+  - Per ogni combo che passa:
+    - Crea nuova strategia con generation_mode='template', status='VALIDATED'
+    - Promozione diretta → shuffle → multi-window → pool
+
+  ---
+  C) TEMPLATE (generation_mode='template')
+
+  Queste NON vengono generate direttamente. Sono create dal Backtester durante la parametric optimization (step 5 sopra).
+
+  Caratteristiche:
+  - Hanno params GIÀ OTTIMIZZATI nel codice
+  - status = "VALIDATED" dalla creazione
+  - tested_at già impostato
+  - NON rientrano nella pipeline (il bug era qui!)
+
+  Flusso diretto:
+  Creazione → _promote_to_active_pool() → shuffle → multi-window → ACTIVE
+
+  ---
+  RIASSUNTO DIFFERENZE (Aggiornato)
+
+  | Tipo     | Chi genera                       | Params      | Backtester fa parametric? | Promozione   |
+  |----------|----------------------------------|-------------|---------------------------|--------------|
+  | Pattern  | Generator (pattern-discovery)    | DEFAULT     | SÌ (1050 combos)          | Via template |
+  | AI       | Generator (indicator combinator) | DEFAULT     | SÌ (1050 combos)          | Via template |
+  | Template | Backtester                       | OTTIMIZZATI | NO (già testato)          | DIRETTA      |
+
+  ---
+  PIPELINE COMPLETA (Stati)
+
+  GENERATED ─────► VALIDATED ─────────────────────► ACTIVE ─────► LIVE ─────► RETIRED
+      │               │                                │
+      │               │  Parametric optimization       │
+      │               │  (1050 combos)                 │
+      │               │          │                     │
+      │               │          ▼                     │
+      │               │    Template strategy           │
+      │               │    (status=VALIDATED)          │
+      │               │          │                     │
+      │               │          ▼                     │
+      │               │   _promote_to_active_pool()    │
+      │               │          │                     │
+      │               │          ├──► shuffle test     │
+      │               │          ├──► multi-window     │
+      │               │          └──► pool entry ──────┘
+      │               │
+      │               └──► (strategia originale prosegue
+      │                     con il suo backtest diretto)
+      │
+      └──► FAILED (se non passa validation)
+
+  ---
+  IL BUG E IL FIX
+
+  PRIMA (BUG):
+  strategy.status = "GENERATED"  # ❌ Re-entra nella pipeline!
+  Le strategie template tornavano al Validator, poi al Backtester, che faceva di nuovo parametric optimization creando ALTRE strategie template → LOOP INFINITO (188K strategie in coda).
+
+  DOPO (FIX):
+  strategy.status = "VALIDATED"  # ✅ Salta validator/backtester
+  # + chiamata diretta a _promote_to_active_pool()
+  Le strategie template vanno direttamente al pool manager per shuffle/multi-window/pool entry. Nessun loop.
+
+  

@@ -137,9 +137,13 @@ generation:
     pattern_based:
       enabled: true            # Strategies from pattern-discovery API
     ai_fixed_indicators:
-      enabled: false           # AI generates strategy with self-chosen indicators
+      enabled: true            # AI generates strategy with self-chosen indicators
     ai_parametric_indicators:
       enabled: true            # AI generates strategy with assigned indicator combinations
+
+  # When both AI sources are enabled, this ratio controls the mix
+  # ai_fixed_ratio: 0.7 means 70% ai_fixed_indicators, 30% ai_parametric_indicators
+  ai_fixed_ratio: 0.7
 
   # Indicator combinator settings (for ai_parametric_indicators)
   indicator_combinator:
