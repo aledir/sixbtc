@@ -567,6 +567,7 @@ class ParametricBacktester:
         ohlc_data: Dict[str, np.ndarray],
         directions: np.ndarray,
         max_leverages: np.ndarray,
+        strategy_name: str = None,
     ) -> pd.DataFrame:
         """
         Run parametric backtest for a pattern.
@@ -576,10 +577,12 @@ class ParametricBacktester:
             ohlc_data: Dict with 'close', 'high', 'low' arrays (n_bars, n_symbols)
             directions: (n_bars, n_symbols) int8 array: 1=long, -1=short
             max_leverages: (n_symbols,) int32 array - per-coin max leverage from CoinRegistry
+            strategy_name: Optional strategy name for log prefixing
 
         Returns:
             DataFrame with metrics for each parameter combination, sorted by score
         """
+        log_prefix = f"[{strategy_name}] " if strategy_name else ""
         close = ohlc_data['close'].astype(np.float64)
         high = ohlc_data['high'].astype(np.float64)
         low = ohlc_data['low'].astype(np.float64)
@@ -589,9 +592,9 @@ class ParametricBacktester:
 
         n_bars, n_symbols = close.shape
         logger.info(
-            f"Running parametric backtest: {n_bars} bars, {n_symbols} symbols, "
-            f"{self._count_strategies()} candidate strategies, "
-            f"max_leverage range: {max_levs.min()}-{max_levs.max()}x"
+            f"{log_prefix}Running parametric: {n_bars} bars, {n_symbols} symbols, "
+            f"{self._count_strategies()} candidates, "
+            f"max_lev range: {max_levs.min()}-{max_levs.max()}x"
         )
 
         param_sets = self._generate_parameter_sets()
@@ -649,10 +652,10 @@ class ParametricBacktester:
         df = df.sort_values('score', ascending=False).reset_index(drop=True)
 
         logger.info(
-            f"Parametric backtest complete: "
+            f"{log_prefix}Parametric complete: "
             f"Best score={df['score'].iloc[0]:.2f}, "
-            f"Best Sharpe={df['sharpe'].iloc[0]:.2f}, "
-            f"Best params: SL={df['sl_pct'].iloc[0]:.1%}, TP={df['tp_pct'].iloc[0]:.1%}, "
+            f"Sharpe={df['sharpe'].iloc[0]:.2f}, "
+            f"SL={df['sl_pct'].iloc[0]:.1%}, TP={df['tp_pct'].iloc[0]:.1%}, "
             f"Lev={df['leverage'].iloc[0]}, Exit={df['exit_bars'].iloc[0]}"
         )
 

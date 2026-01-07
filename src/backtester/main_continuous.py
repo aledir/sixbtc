@@ -1150,7 +1150,7 @@ class ContinuousBacktesterProcess:
         # Count signals
         total_signals = entries_2d.sum()
         if total_signals == 0:
-            logger.info("No entry signals found for parametric backtest (strategy conditions not met)")
+            logger.info(f"[{strategy_name}] No entry signals found for parametric backtest")
             return []
 
         logger.info(
@@ -1179,6 +1179,7 @@ class ContinuousBacktesterProcess:
                 ohlc_data={'close': close_2d, 'high': high_2d, 'low': low_2d},
                 directions=directions_2d,
                 max_leverages=max_leverages,
+                strategy_name=strategy_name,
             )
         except Exception as e:
             logger.error(f"Parametric backtest failed: {e}")
