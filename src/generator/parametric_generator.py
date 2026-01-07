@@ -103,8 +103,15 @@ class ParametricGenerator:
         )
 
         # Store config for parameter space
+        # Default space used for single base strategy generation
+        # (Backtester does actual 375-combo optimization via parametric_constants.py)
         self.config = config
-        self.parameter_space = config['generation']['parametric']['parameter_space']
+        self.parameter_space = config.get('generation', {}).get('parametric', {}).get('parameter_space', {
+            'sl_pct': [0.02],
+            'tp_pct': [0.04],
+            'leverage': [2],
+            'exit_bars': [0]
+        })
 
         # Load leverage range from database
         self.leverage_min, self.leverage_max = get_leverage_range_from_db()

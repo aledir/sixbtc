@@ -83,9 +83,59 @@ SCALPING Strategy:
 - Tight stops, quick profits
 {% endif %}
 
+{% if main_indicators %}
+=== MANDATORY INDICATORS (IndicatorCombinator) ===
+
+You MUST use these SPECIFIC indicators in your strategy. Do NOT use other indicators.
+
+MAIN INDICATORS (for signal generation):
+{% for ind in main_indicators %}
+- {{ ind }}
+{% endfor %}
+
+{% if filter_indicators %}
+FILTER INDICATORS (for entry confirmation):
+{% for ind in filter_indicators %}
+- {{ ind }}
+{% endfor %}
+
+Your entry_signal logic MUST:
+1. Use ALL main indicators ({{ main_indicators | join(', ') }}) for signal generation
+2. Use filter indicators ({{ filter_indicators | join(', ') }}) as additional entry conditions
+3. Combine them with logical AND/OR operations
+{% else %}
+Use ONLY the main indicators above. Do not add filter conditions.
+{% endif %}
+
+Example for main={{ main_indicators }}:
+```python
+# Calculate assigned indicators
+{% for ind in main_indicators %}
+df['{{ ind }}'] = ta.{{ ind | upper }}(df['close'], timeperiod={{ "{{ indicator_period }}" }})
+{% endfor %}
+{% if filter_indicators %}
+{% for ind in filter_indicators %}
+df['{{ ind }}'] = ta.{{ ind | upper }}(df['high'], df['low'], df['close'], timeperiod=14)
+{% endfor %}
+{% endif %}
+
+# Entry signal using assigned indicators
+entry_condition = (df['{{ main_indicators[0] }}'] > {{ "{{ entry_threshold }}" }})
+{% if main_indicators | length > 1 %}
+entry_condition = entry_condition & (df['{{ main_indicators[1] }}'] > 0)
+{% endif %}
+{% if filter_indicators %}
+# Apply filter
+entry_condition = entry_condition & (df['{{ filter_indicators[0] }}'] > 25)
+{% endif %}
+df['entry_signal'] = entry_condition
+```
+
+{% else %}
 === ENTRY LOGIC CATEGORIES ===
 
 Choose ONE primary category for your entry logic. This creates diversity across templates.
+{% endif %}
 
 **1. INDICATOR-BASED** (Traditional TA)
    Common oscillators: RSI, MACD, Stochastic, CCI, Williams %R, MFI

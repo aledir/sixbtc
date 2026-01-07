@@ -37,7 +37,9 @@ from src.generator.parametric_generator import (
 )
 from src.generator.direct_generator import DirectPatternGenerator
 from src.generator.helper_fetcher import HelperFetcher
-from src.database.models import StrategyTemplate
+from src.generator.indicator_combinator import IndicatorCombinator
+from src.database.models import StrategyTemplate, UsedIndicatorCombination
+from src.database import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +131,16 @@ class StrategyBuilder:
         # Initialize helper fetcher for Mode B (AI wrapping with provided code)
         self.helper_fetcher = HelperFetcher(pattern_api_url)
 
+        # Initialize indicator combinator for AI strategy variety (Phase 3)
+        self.indicator_combinator = IndicatorCombinator()
+
+        # Cache strategy sources config
+        self._strategy_sources = self.config.get('generation', {}).get('strategy_sources', {
+            'pattern_based': {'enabled': True},
+            'ai_fixed_indicators': {'enabled': True},
+            'ai_parametric_indicators': {'enabled': False}
+        })
+
     def _default_config(self) -> dict:
         """Default configuration (for tests only - production must provide full config)"""
         return {
@@ -144,6 +156,61 @@ class StrategyBuilder:
         from src.generator.parametric_generator import get_leverage_range_from_db
         min_lev, max_lev = get_leverage_range_from_db()
         return random.randint(min_lev, max_lev)
+
+    def _is_source_enabled(self, source_name: str) -> bool:
+        """Check if a strategy source is enabled in config."""
+        return self._strategy_sources.get(source_name, {}).get('enabled', False)
+
+    def _get_used_combinations(self, strategy_type: str, timeframe: str) -> set:
+        """
+        Get set of already used indicator combinations for type/timeframe.
+
+        Returns:
+            Set of combo keys: ((main1, main2), (filter1,))
+        """
+        used = set()
+        try:
+            with get_session() as session:
+                combos = session.query(UsedIndicatorCombination).filter(
+                    UsedIndicatorCombination.strategy_type == strategy_type,
+                    UsedIndicatorCombination.timeframe == timeframe
+                ).all()
+                for combo in combos:
+                    key = (
+                        tuple(sorted(combo.main_indicators)),
+                        tuple(sorted(combo.filter_indicators or []))
+                    )
+                    used.add(key)
+        except Exception as e:
+            logger.error(f"Failed to get used combinations: {e}")
+        return used
+
+    def _mark_combination_used(
+        self,
+        strategy_type: str,
+        timeframe: str,
+        main_indicators: list,
+        filter_indicators: list
+    ) -> bool:
+        """
+        Save indicator combination to database as used.
+
+        Returns:
+            True if saved successfully, False otherwise
+        """
+        try:
+            with get_session() as session:
+                combo = UsedIndicatorCombination(
+                    strategy_type=strategy_type,
+                    timeframe=timeframe,
+                    main_indicators=sorted(main_indicators),
+                    filter_indicators=sorted(filter_indicators or [])
+                )
+                session.add(combo)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to mark combination used: {e}")
+            return False
 
     def generate_from_pattern(
         self,
@@ -173,7 +240,6 @@ class StrategyBuilder:
             coin_config = self.config.get('pattern_discovery', {}).get('coin_selection', {})
             min_edge = coin_config.get('min_edge', 0.10)
             min_signals = coin_config.get('min_signals', 50)
-            min_coins = coin_config.get('min_tradable_coins', 1)  # Trust Pattern Discovery Tier 1 validation
             # max_coins from backtesting config (shared with AI strategies)
             max_coins = self.config.get('backtesting', {}).get('max_coins', 30)
 
@@ -183,13 +249,6 @@ class StrategyBuilder:
                 max_coins=max_coins
             )
             if pattern_coins:
-                # Early validation: reject patterns with insufficient tradable coins
-                if len(pattern_coins) < min_coins:
-                    logger.info(
-                        f"Skipping pattern {pattern.name}: only {len(pattern_coins)} tradable coins "
-                        f"(need {min_coins})"
-                    )
-                    return None
                 logger.info(
                     f"Pattern {pattern.name}: {len(pattern_coins)} coins with edge >= {min_edge:.0%} "
                     f"(top: {pattern_coins[:5]})"
@@ -373,10 +432,9 @@ class StrategyBuilder:
         if self.template_generator:
             template = self.template_generator.generate_template(strategy_type, timeframe)
             if template:
-                # Generate ALL strategies (no artificial limit)
-                strategies = self.parametric_generator.generate_strategies(template)
-                if strategies:
-                    # Return first for backward compatibility
+                # Generate single base strategy - Backtester does parametric optimization
+                strategies = self.parametric_generator.generate_strategies(template, max_strategies=1)
+                if strategies and strategies[0].validation_passed:
                     return self._convert_parametric_strategy(strategies[0], template)
 
         logger.error("No generation method available (no patterns, no template generator)")
@@ -391,10 +449,12 @@ class StrategyBuilder:
         max_strategies: Optional[int] = None
     ) -> list[GeneratedStrategy]:
         """
-        Generate multiple strategies from a template or pattern
+        Generate strategies using configured sources.
 
-        Both pattern-based and template-based strategies are expanded
-        to N parametric variations using generate_from_base_code().
+        Sources (configurable via strategy_sources):
+        1. pattern_based: Strategies from pattern-discovery API
+        2. ai_fixed_indicators: AI with self-chosen indicators
+        3. ai_parametric_indicators: AI with assigned indicator combinations
 
         Args:
             strategy_type: Type of strategy (MOM, REV, TRN, etc.)
@@ -406,65 +466,134 @@ class StrategyBuilder:
         Returns:
             List of GeneratedStrategy objects
         """
-        # Pattern-based generation
-        pattern = None
-        if patterns and len(patterns) > 0:
-            pattern = patterns[0]
-        elif use_patterns:
-            fetched_patterns = self._fetch_patterns(timeframe)
-            if fetched_patterns:
-                pattern = fetched_patterns[0]
+        # ==================================================================
+        # SOURCE 1: Pattern-based generation
+        # ==================================================================
+        if self._is_source_enabled('pattern_based'):
+            pattern = None
+            if patterns and len(patterns) > 0:
+                pattern = patterns[0]
+            elif use_patterns:
+                fetched_patterns = self._fetch_patterns(timeframe)
+                if fetched_patterns:
+                    pattern = fetched_patterns[0]
 
-        if pattern:
-            # Generate base code from pattern (1 strategy, no params yet)
-            base_result = self.generate_from_pattern(pattern)
-            if not base_result:
-                return []
+            if pattern:
+                base_result = self.generate_from_pattern(pattern)
+                if not base_result:
+                    return []
 
-            # CRITICAL: Use pattern's timeframe, not the random one passed in
-            # Pattern was validated on its specific timeframe - using different TF will fail
-            pattern_tf = pattern.timeframe
-            if pattern_tf != timeframe:
-                logger.info(
-                    f"Using pattern timeframe {pattern_tf} (ignoring requested {timeframe})"
-                )
+                # Use pattern's timeframe (validated on that TF)
+                pattern_tf = pattern.timeframe
+                if pattern_tf != timeframe:
+                    logger.info(
+                        f"Using pattern timeframe {pattern_tf} (ignoring {timeframe})"
+                    )
+                base_result.timeframe = pattern_tf
+                return [base_result]
+        else:
+            logger.debug("Pattern-based generation disabled")
 
-            # Expand to N strategies using parametric generator
-            parametric_results = self.parametric_generator.generate_from_base_code(
-                base_code=base_result.code,
-                strategy_type=base_result.strategy_type,
-                timeframe=pattern_tf,  # Use pattern's TF, not random
-                source_id=str(pattern.id),
-                source_type="pattern",
-                pattern_coins=base_result.pattern_coins,
-                max_strategies=max_strategies
+        # ==================================================================
+        # SOURCE 2 & 3: AI-based generation (no patterns available)
+        # ==================================================================
+        ai_parametric_enabled = self._is_source_enabled('ai_parametric_indicators')
+        ai_fixed_enabled = self._is_source_enabled('ai_fixed_indicators')
+
+        if not ai_parametric_enabled and not ai_fixed_enabled:
+            logger.warning("All AI generation sources disabled and no patterns")
+            return []
+
+        # Decide which AI mode to use
+        if ai_parametric_enabled:
+            # SOURCE 3: AI with IndicatorCombinator (unique combinations)
+            return self._generate_with_indicator_combinator(strategy_type, timeframe)
+        else:
+            # SOURCE 2: AI with fixed indicators (legacy behavior)
+            return self._generate_with_fixed_indicators(strategy_type, timeframe)
+
+    def _generate_with_fixed_indicators(
+        self,
+        strategy_type: StrategyType,
+        timeframe: str
+    ) -> list[GeneratedStrategy]:
+        """
+        Generate strategy using AI with self-chosen indicators (legacy mode).
+
+        AI decides which indicators to use based on strategy type.
+        """
+        logger.info(f"Using AI with fixed indicators for {strategy_type}/{timeframe}")
+
+        if not self.template_generator:
+            logger.error("Template generator not available")
+            return []
+
+        template = self.template_generator.generate_template(strategy_type, timeframe)
+        if not template:
+            return []
+
+        strategies = self.parametric_generator.generate_strategies(template, max_strategies=1)
+        if strategies and strategies[0].validation_passed:
+            return [self._convert_parametric_strategy(strategies[0], template)]
+        return []
+
+    def _generate_with_indicator_combinator(
+        self,
+        strategy_type: str,
+        timeframe: str
+    ) -> list[GeneratedStrategy]:
+        """
+        Generate strategy using IndicatorCombinator for unique indicator combinations.
+
+        Ensures variety by tracking used combinations in database.
+        Space: ~112 billion unique combinations.
+        """
+        logger.info(f"Using IndicatorCombinator for {strategy_type}/{timeframe}")
+
+        if not self.template_generator:
+            logger.error("Template generator not available")
+            return []
+
+        # Get unused indicator combination
+        used_combos = self._get_used_combinations(strategy_type, timeframe)
+        combination = self.indicator_combinator.get_combination(
+            strategy_type, timeframe, used_combos
+        )
+
+        if not combination:
+            logger.warning(f"All combinations used for {strategy_type}/{timeframe}")
+            return []
+
+        main_indicators = combination['main_indicators']
+        filter_indicators = combination['filter_indicators']
+
+        logger.info(
+            f"Selected indicators: main={main_indicators}, filter={filter_indicators}"
+        )
+
+        # Generate template with assigned indicators
+        template = self.template_generator.generate_template(
+            strategy_type,
+            timeframe,
+            main_indicators=main_indicators,
+            filter_indicators=filter_indicators
+        )
+
+        if not template:
+            # Mark combination as used even if generation failed (avoid retrying)
+            self._mark_combination_used(
+                strategy_type, timeframe, main_indicators, filter_indicators
             )
+            return []
 
-            # Convert parametric results to GeneratedStrategy
-            return [
-                self._convert_parametric_to_generated(
-                    pr, base_result, pattern
-                )
-                for pr in parametric_results
-                if pr.validation_passed
-            ]
+        strategies = self.parametric_generator.generate_strategies(template, max_strategies=1)
+        if strategies and strategies[0].validation_passed:
+            # Mark combination as used on success
+            self._mark_combination_used(
+                strategy_type, timeframe, main_indicators, filter_indicators
+            )
+            return [self._convert_parametric_strategy(strategies[0], template)]
 
-        # Template-based generation: return strategies up to limit
-        logger.info(f"No patterns available, using template-based generation")
-        if self.template_generator:
-            template = self.template_generator.generate_template(strategy_type, timeframe)
-            if template:
-                strategies = self.parametric_generator.generate_strategies(
-                    template,
-                    max_strategies=max_strategies
-                )
-                return [
-                    self._convert_parametric_strategy(s, template)
-                    for s in strategies
-                    if s.validation_passed
-                ]
-
-        logger.error("No generation method available (no patterns, no template generator)")
         return []
 
     def _convert_parametric_to_generated(

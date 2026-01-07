@@ -14,9 +14,9 @@ from typing import Optional
 
 from sqlalchemy import (
     Column, String, Integer, Float, DateTime, Boolean, Text, JSON,
-    ForeignKey, Enum, Index
+    ForeignKey, Enum, Index, UniqueConstraint
 )
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 
@@ -84,6 +84,55 @@ class StrategyTemplate(Base):
 
     def __repr__(self):
         return f"<StrategyTemplate(name={self.name}, type={self.strategy_type})>"
+
+
+# ==============================================================================
+# USED INDICATOR COMBINATIONS (for AI strategy variety)
+# ==============================================================================
+
+class UsedIndicatorCombination(Base):
+    """
+    Tracks used indicator combinations to avoid repetition in AI generation.
+
+    Each unique (strategy_type, timeframe, main_indicators, filter_indicators)
+    combination is stored here to ensure variety across ~112 billion possibilities.
+    """
+    __tablename__ = 'used_indicator_combinations'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # Strategy context
+    strategy_type = Column(String(10), nullable=False, index=True)
+    # Example: "MOM", "REV", "TRN", "BRE", "VOL", "SCA"
+
+    timeframe = Column(String(10), nullable=False, index=True)
+    # Example: "5m", "15m", "1h", "4h", "1d"
+
+    # Indicator combination
+    main_indicators = Column(ARRAY(String), nullable=False)
+    # Example: ['rsi', 'macd'] - sorted alphabetically
+
+    filter_indicators = Column(ARRAY(String), nullable=False, default=[])
+    # Example: ['adx'] or [] for no filter - sorted alphabetically
+
+    # Metadata
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Unique constraint to prevent duplicates
+    __table_args__ = (
+        UniqueConstraint(
+            'strategy_type', 'timeframe', 'main_indicators', 'filter_indicators',
+            name='uq_indicator_combination'
+        ),
+        Index('idx_combo_type_tf', 'strategy_type', 'timeframe'),
+    )
+
+    def __repr__(self):
+        return (
+            f"<UsedIndicatorCombination("
+            f"{self.strategy_type}/{self.timeframe}: "
+            f"main={self.main_indicators}, filter={self.filter_indicators})>"
+        )
 
 
 # ==============================================================================

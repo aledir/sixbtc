@@ -162,9 +162,7 @@ strategies/live/
 strategies/retired/
 
 # Market data cache
-data/binance/
-data/hyperliquid/
-data/cache/
+data/
 *.parquet
 *.csv
 *.hdf5

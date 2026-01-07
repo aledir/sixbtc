@@ -192,7 +192,9 @@ class TemplateGenerator:
         self,
         strategy_type: str,
         timeframe: str,
-        structure: Optional[TemplateStructure] = None
+        structure: Optional[TemplateStructure] = None,
+        main_indicators: Optional[list] = None,
+        filter_indicators: Optional[list] = None
     ) -> Optional[StrategyTemplate]:
         """
         Generate a new parameterized template using AI
@@ -201,6 +203,8 @@ class TemplateGenerator:
             strategy_type: Type of strategy (MOM, REV, TRN, etc.)
             timeframe: Target timeframe ('15m', '1h', etc.)
             structure: Template structure (uses next in rotation if None)
+            main_indicators: Required indicators for signal generation (IndicatorCombinator)
+            filter_indicators: Optional filter indicators for entry confirmation
 
         Returns:
             StrategyTemplate object or None if generation failed
@@ -210,19 +214,28 @@ class TemplateGenerator:
 
         template_id = str(uuid.uuid4())[:8]
 
-        logger.info(
-            f"Generating {strategy_type} template for {timeframe} "
-            f"(ID: {template_id}, structure: {structure.name})"
-        )
+        # Log with indicators if provided
+        if main_indicators:
+            logger.info(
+                f"Generating {strategy_type} template for {timeframe} "
+                f"(ID: {template_id}, indicators: {main_indicators}+{filter_indicators or []})"
+            )
+        else:
+            logger.info(
+                f"Generating {strategy_type} template for {timeframe} "
+                f"(ID: {template_id}, structure: {structure.name})"
+            )
 
-        # Render prompt with structure
+        # Render prompt with structure and indicators
         try:
             prompt_template = self.template_env.get_template('generate_template.j2')
             prompt = prompt_template.render(
                 strategy_type=strategy_type,
                 timeframe=timeframe,
                 template_id=template_id,
-                structure=structure
+                structure=structure,
+                main_indicators=main_indicators,
+                filter_indicators=filter_indicators
             )
         except Exception as e:
             logger.error(f"Failed to render prompt template: {e}")

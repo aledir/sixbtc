@@ -127,16 +127,25 @@ generation:
   # Flow control is handled by pipeline backpressure below
   # Leverage is read from DB (coins.max_leverage), not configured here
 
-  # Parametric optimization (runs after base strategy generation)
+  # Parametric optimization (runs in Backtester, not Generator)
+  # Parameter space defined in src/backtester/parametric_constants.py (per-timeframe)
   parametric:
-    enabled: true              # Enable parametric optimization
-    # No top_k limit: ALL strategies that pass thresholds are saved
-    # This maximizes ROI of computational work (if we generate 400, save all valid ones)
-    parameter_space:
-      sl_pct: [0.01, 0.015, 0.02, 0.025, 0.03]
-      tp_pct: [0.02, 0.03, 0.05, 0.07, 0.10]
-      leverage: [1, 2, 3, 5]
-      exit_bars: [0, 10, 20, 50]
+    enabled: true              # Enable parametric optimization in Backtester
+
+  # Strategy sources - enable/disable each type for debugging
+  strategy_sources:
+    pattern_based:
+      enabled: true            # Strategies from pattern-discovery API
+    ai_fixed_indicators:
+      enabled: false           # AI generates strategy with self-chosen indicators
+    ai_parametric_indicators:
+      enabled: true            # AI generates strategy with assigned indicator combinations
+
+  # Indicator combinator settings (for ai_parametric_indicators)
+  indicator_combinator:
+    max_main_indicators: 3     # 2 or 3 main indicators
+    max_filter_indicators: 2   # 0, 1, or 2 filters
+    prefer_2_indicators: true  # Try 2-indicator combos before 3-indicator
 
 # ==============================================================================
 # ACTIVE POOL (Leaderboard Logic)
@@ -157,7 +166,7 @@ active_pool:
 pipeline:
   queue_limits:
     generated: 500      # Max GENERATED strategies (supports one parametric batch ~400)
-    validated: 50       # Max VALIDATED strategies waiting for backtest
+    validated: 500      # Max VALIDATED strategies waiting for backtest
     # ACTIVE pool uses active_pool.max_size (leaderboard logic)
 
   backpressure:
@@ -181,7 +190,6 @@ pattern_discovery:
   coin_selection:
     min_edge: 0.10             # 10% minimum edge to include coin
     min_signals: 50            # Minimum signals for statistical reliability
-    min_tradable_coins: 1      # Trust Pattern Discovery validation (Tier 1 = already anti-overfitting tested)
     # NOTE: max_coins is in backtesting.max_coins (shared with AI strategies)
 
   # Multi-target expansion: one pattern with N Tier 1 targets -> N strategies

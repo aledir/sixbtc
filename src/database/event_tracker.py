@@ -293,6 +293,32 @@ class EventTracker:
             reason="score_below_threshold"
         )
 
+    @staticmethod
+    def backtest_parametric_failed(
+        strategy_id: UUID,
+        strategy_name: str,
+        timeframe: str,
+        reason: str,
+        best_sharpe: Optional[float] = None,
+        best_win_rate: Optional[float] = None,
+        combinations_tested: Optional[int] = None,
+        duration_ms: Optional[int] = None
+    ) -> bool:
+        """Emit event when parametric backtest finds no valid parameters."""
+        return EventTracker.emit(
+            event_type="parametric_failed",
+            stage="backtest",
+            status="failed",
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            duration_ms=duration_ms,
+            timeframe=timeframe,
+            reason=reason,
+            best_sharpe=best_sharpe,
+            best_win_rate=best_win_rate,
+            combinations_tested=combinations_tested
+        )
+
     # =========================================================================
     # SHUFFLE TEST EVENTS
     # =========================================================================

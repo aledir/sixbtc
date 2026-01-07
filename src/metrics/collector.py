@@ -4,26 +4,30 @@ Pipeline Metrics Collector (Event-Based)
 Collects pipeline metrics from the strategy_events table.
 Events persist even when strategies are deleted, enabling accurate metrics.
 
-Metrics collected:
-- Queue depths (counts by status)
-- Throughput (strategies/hour by stage)
-- Success rates (REAL rates from events, not approximations)
-- Failure breakdowns (WHY strategies failed)
-- Timing metrics (duration per phase)
-- Quality metrics (avg Sharpe, win rate, expectancy)
-- Pattern vs AI breakdown
+Log format (11 lines per snapshot):
+- status: overall health + issue
+- state: current counts by DB status
+- funnel_24h: conversion rates through pipeline
+- timing_avg: average processing times
+- throughput_1min: recent processing rates
+- failures_24h: failure breakdown by type
+- backpressure: queue status and bottlenecks
+- pool_stats: ACTIVE pool statistics
+- pool_quality: quality metrics (edge, sharpe, winrate, dd)
+- retest_24h: re-backtest statistics
+- live_rotation: LIVE deployment statistics
 """
 
 import time
 import logging
 from datetime import datetime, timedelta, UTC
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
-from sqlalchemy import select, func, and_, or_
+from sqlalchemy import select, func, and_, or_, desc
 
 from src.config import load_config
 from src.database import get_session, PipelineMetricsSnapshot, Strategy
-from src.database.models import StrategyEvent
+from src.database.models import StrategyEvent, BacktestResult
 
 logger = logging.getLogger(__name__)
 
@@ -50,25 +54,28 @@ class MetricsCollector:
 
         self.config = config._raw_config if hasattr(config, '_raw_config') else config
 
-        # Collection interval (default: 5 minutes = 300 seconds)
+        # Collection interval (default: 1 minute = 60 seconds)
         metrics_config = self.config.get('metrics', {})
-        self.interval_seconds = metrics_config.get('collection_interval', 300)
-        self.log_detail_interval = metrics_config.get('detail_log_interval', 300)  # 5min
-        self._last_detail_log = datetime.min.replace(tzinfo=UTC)
+        self.interval_seconds = metrics_config.get('collection_interval', 60)
 
         # Queue limits from pipeline config
         pipeline_config = self.config.get('pipeline', {})
         queue_limits = pipeline_config.get('queue_limits', {})
-        self.limit_generated = queue_limits.get('generated', 100)
-        self.limit_validated = queue_limits.get('validated', 50)
+        self.limit_generated = queue_limits.get('generated', 500)
+        self.limit_validated = queue_limits.get('validated', 500)
 
         # ACTIVE pool limit from active_pool config
         active_pool_config = self.config.get('active_pool', {})
         self.limit_active = active_pool_config.get('max_size', 300)
+        self.pool_min_score = active_pool_config.get('min_score', 40)
 
         # LIVE limit from rotator config
         rotator_config = self.config.get('rotator', {})
         self.limit_live = rotator_config.get('max_live_strategies', 10)
+
+        # Backtesting config for retest
+        backtesting_config = self.config.get('backtesting', {})
+        self.retest_interval_days = backtesting_config.get('retest', {}).get('interval_days', 3)
 
         logger.info(f"MetricsCollector initialized (interval: {self.interval_seconds}s)")
 
@@ -76,84 +83,47 @@ class MetricsCollector:
         """Collect current pipeline metrics and save to database."""
         try:
             with get_session() as session:
-                # Time window for event-based metrics (last collection interval)
-                window_start = datetime.now(UTC) - timedelta(seconds=self.interval_seconds)
+                # Time windows
+                now = datetime.now(UTC)
+                window_1min = now - timedelta(seconds=self.interval_seconds)
+                window_24h = now - timedelta(hours=24)
 
-                # Get queue depths (current counts)
+                # Collect all metrics
                 queue_depths = self._get_queue_depths(session)
+                funnel = self._get_funnel_24h(session, window_24h)
+                timing = self._get_timing_avg_24h(session, window_24h)
+                throughput = self._get_throughput_interval(session, window_1min)
+                failures = self._get_failures_24h(session, window_24h)
+                backpressure = self._get_backpressure_status(session, queue_depths)
+                pool_stats = self._get_pool_stats(session)
+                pool_quality = self._get_pool_quality(session)
+                retest_stats = self._get_retest_stats_24h(session, window_24h)
+                live_stats = self._get_live_rotation_stats(session, window_24h)
 
-                # Calculate throughput from events
-                throughput = self._calculate_throughput_from_events(session, window_start)
-
-                # Calculate utilization
-                utilization = self._calculate_utilization(queue_depths)
-
-                # Calculate SUCCESS RATES from events (accurate!)
-                success_rates = self._calculate_success_rates_from_events(session, window_start)
-
-                # Get failure breakdown
-                failures = self._get_failure_breakdown(session, window_start)
-
-                # Get timing metrics
-                timing = self._get_timing_metrics(session, window_start)
-
-                # Get overall status
-                overall_status = self._get_overall_status(queue_depths, success_rates)
-
-                # Get quality metrics
-                quality = self._get_quality_metrics(session)
-
-                # Pattern vs AI breakdown
-                pattern_ai = self._get_pattern_ai_breakdown(session)
-
-                # Create snapshot
-                snapshot = PipelineMetricsSnapshot(
-                    timestamp=datetime.now(UTC),
-
-                    # Queue depths
-                    queue_generated=queue_depths.get('GENERATED', 0),
-                    queue_validated=queue_depths.get('VALIDATED', 0),
-                    queue_active=queue_depths.get('ACTIVE', 0),
-                    queue_live=queue_depths.get('LIVE', 0),
-                    queue_retired=queue_depths.get('RETIRED', 0),
-                    queue_failed=queue_depths.get('FAILED', 0),
-
-                    # Throughput
-                    throughput_generation=throughput.get('generation'),
-                    throughput_validation=throughput.get('validation'),
-                    throughput_backtesting=throughput.get('backtesting'),
-
-                    # Utilization
-                    utilization_generated=utilization.get('generated'),
-                    utilization_validated=utilization.get('validated'),
-                    utilization_active=utilization.get('active'),
-
-                    # Success rates (from events!)
-                    success_rate_validation=success_rates.get('validation'),
-                    success_rate_backtesting=success_rates.get('backtesting'),
-
-                    # Bottleneck - not used
-                    bottleneck_stage=None,
-
-                    # Overall status
-                    overall_status=overall_status,
-
-                    # Quality
-                    avg_sharpe=quality.get('sharpe'),
-                    avg_win_rate=quality.get('win_rate'),
-                    avg_expectancy=quality.get('expectancy'),
-
-                    # Pattern vs AI
-                    pattern_count=pattern_ai.get('pattern', 0),
-                    ai_count=pattern_ai.get('ai', 0),
+                # Determine overall status
+                status, issue = self._get_status_and_issue(
+                    queue_depths, backpressure, throughput
                 )
 
-                session.add(snapshot)
-                session.commit()
+                # Save snapshot to database
+                self._save_snapshot(
+                    session, queue_depths, throughput, funnel, pool_quality, status
+                )
 
-                # Log output
+                # Log metrics in new format
                 self._log_metrics(
-                    queue_depths, throughput, success_rates, failures, timing
+                    status=status,
+                    issue=issue,
+                    queue_depths=queue_depths,
+                    funnel=funnel,
+                    timing=timing,
+                    throughput=throughput,
+                    failures=failures,
+                    backpressure=backpressure,
+                    pool_stats=pool_stats,
+                    pool_quality=pool_quality,
+                    retest_stats=retest_stats,
+                    live_stats=live_stats,
                 )
 
         except Exception as e:
@@ -168,459 +138,677 @@ class MetricsCollector:
 
         return {status: count for status, count in result}
 
-    def _calculate_throughput_from_events(
-        self, session, since: datetime
-    ) -> Dict[str, Optional[float]]:
+    def _get_funnel_24h(self, session, since: datetime) -> Dict[str, Any]:
         """
-        Calculate throughput from events.
+        Get pipeline funnel metrics for last 24h.
 
-        Counts completed events per stage in the time window.
+        Returns counts and pass rates for each stage.
         """
-        # Generation: count generation.created events
-        gen_count = session.execute(
+        # Generated
+        generated = session.execute(
             select(func.count(StrategyEvent.id))
-            .where(
-                and_(
-                    StrategyEvent.stage == 'generation',
-                    StrategyEvent.event_type == 'created',
-                    StrategyEvent.timestamp >= since
-                )
-            )
+            .where(and_(
+                StrategyEvent.stage == 'generation',
+                StrategyEvent.event_type == 'created',
+                StrategyEvent.timestamp >= since
+            ))
         ).scalar() or 0
 
-        # Validation: count validation.completed events
-        val_count = session.execute(
+        # Validated (passed validation)
+        validated = session.execute(
             select(func.count(StrategyEvent.id))
-            .where(
-                and_(
-                    StrategyEvent.stage == 'validation',
-                    StrategyEvent.event_type == 'completed',
-                    StrategyEvent.timestamp >= since
-                )
-            )
+            .where(and_(
+                StrategyEvent.stage == 'validation',
+                StrategyEvent.event_type == 'completed',
+                StrategyEvent.timestamp >= since
+            ))
         ).scalar() or 0
 
-        # Backtesting: count pool.entered events (strategies that made it through)
-        bt_count = session.execute(
+        # Backtested (completed backtest: scored OR parametric_failed)
+        backtested = session.execute(
             select(func.count(StrategyEvent.id))
-            .where(
-                and_(
-                    StrategyEvent.stage == 'pool',
-                    StrategyEvent.event_type == 'entered',
-                    StrategyEvent.timestamp >= since
-                )
-            )
+            .where(and_(
+                StrategyEvent.stage == 'backtest',
+                StrategyEvent.event_type.in_(['scored', 'parametric_failed']),
+                StrategyEvent.timestamp >= since
+            ))
         ).scalar() or 0
 
-        # Convert to per-hour rate
-        window_hours = self.interval_seconds / 3600
-        return {
-            'generation': gen_count / window_hours if gen_count else None,
-            'validation': val_count / window_hours if val_count else None,
-            'backtesting': bt_count / window_hours if bt_count else None,
-        }
-
-    def _calculate_utilization(self, queue_depths: Dict[str, int]) -> Dict[str, float]:
-        """Calculate queue utilization (0.0-1.0)."""
-        return {
-            'generated': queue_depths.get('GENERATED', 0) / self.limit_generated if self.limit_generated > 0 else 0.0,
-            'validated': queue_depths.get('VALIDATED', 0) / self.limit_validated if self.limit_validated > 0 else 0.0,
-            'active': queue_depths.get('ACTIVE', 0) / self.limit_active if self.limit_active > 0 else 0.0,
-        }
-
-    def _calculate_success_rates_from_events(
-        self, session, since: datetime
-    ) -> Dict[str, Optional[float]]:
-        """
-        Calculate REAL success rates from events.
-
-        This is accurate because events persist even when strategies are deleted.
-        """
-        # Validation success rate
-        val_passed = session.execute(
+        # Score OK (passed score threshold)
+        score_ok = session.execute(
             select(func.count(StrategyEvent.id))
-            .where(
-                and_(
-                    StrategyEvent.stage == 'validation',
-                    StrategyEvent.event_type == 'completed',
-                    StrategyEvent.timestamp >= since
-                )
-            )
+            .where(and_(
+                StrategyEvent.stage == 'shuffle_test',
+                StrategyEvent.event_type == 'started',
+                StrategyEvent.timestamp >= since
+            ))
         ).scalar() or 0
 
-        val_failed = session.execute(
+        # Shuffle OK
+        shuffle_ok = session.execute(
             select(func.count(StrategyEvent.id))
-            .where(
-                and_(
-                    StrategyEvent.stage == 'validation',
-                    StrategyEvent.status == 'failed',
-                    StrategyEvent.timestamp >= since
-                )
-            )
+            .where(and_(
+                StrategyEvent.stage == 'shuffle_test',
+                StrategyEvent.status == 'passed',
+                StrategyEvent.timestamp >= since
+            ))
         ).scalar() or 0
 
-        val_total = val_passed + val_failed
-        val_rate = val_passed / val_total if val_total > 0 else None
+        # Multi-window OK
+        mw_ok = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'multi_window',
+                StrategyEvent.status == 'passed',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
 
-        # Backtest success rate (pool entries vs rejections + score failures)
+        # Pool entries
         pool_entered = session.execute(
             select(func.count(StrategyEvent.id))
-            .where(
-                and_(
-                    StrategyEvent.stage == 'pool',
-                    StrategyEvent.event_type == 'entered',
-                    StrategyEvent.timestamp >= since
-                )
-            )
+            .where(and_(
+                StrategyEvent.stage == 'pool',
+                StrategyEvent.event_type == 'entered',
+                StrategyEvent.timestamp >= since
+            ))
         ).scalar() or 0
 
-        pool_rejected = session.execute(
-            select(func.count(StrategyEvent.id))
-            .where(
-                and_(
-                    StrategyEvent.stage == 'pool',
-                    StrategyEvent.event_type == 'rejected',
-                    StrategyEvent.timestamp >= since
-                )
-            )
-        ).scalar() or 0
-
-        score_rejected = session.execute(
-            select(func.count(StrategyEvent.id))
-            .where(
-                and_(
-                    StrategyEvent.stage == 'backtest',
-                    StrategyEvent.event_type == 'score_rejected',
-                    StrategyEvent.timestamp >= since
-                )
-            )
-        ).scalar() or 0
-
-        shuffle_failed = session.execute(
-            select(func.count(StrategyEvent.id))
-            .where(
-                and_(
-                    StrategyEvent.stage == 'shuffle_test',
-                    StrategyEvent.status == 'failed',
-                    StrategyEvent.timestamp >= since
-                )
-            )
-        ).scalar() or 0
-
-        mw_failed = session.execute(
-            select(func.count(StrategyEvent.id))
-            .where(
-                and_(
-                    StrategyEvent.stage == 'multi_window',
-                    StrategyEvent.status == 'failed',
-                    StrategyEvent.timestamp >= since
-                )
-            )
-        ).scalar() or 0
-
-        bt_failed = pool_rejected + score_rejected + shuffle_failed + mw_failed
-        bt_total = pool_entered + bt_failed
-        bt_rate = pool_entered / bt_total if bt_total > 0 else None
+        # Calculate pass rates
+        def pct(num: int, denom: int) -> Optional[int]:
+            if denom == 0:
+                return None
+            return int(round(100 * num / denom))
 
         return {
-            'validation': val_rate,
-            'backtesting': bt_rate,
+            'generated': generated,
+            'validated': validated,
+            'validated_pct': pct(validated, generated),
+            'backtested': backtested,
+            'backtested_pct': pct(backtested, validated),
+            'score_ok': score_ok,
+            'score_ok_pct': pct(score_ok, backtested),
+            'shuffle_ok': shuffle_ok,
+            'shuffle_ok_pct': pct(shuffle_ok, score_ok),
+            'mw_ok': mw_ok,
+            'mw_ok_pct': pct(mw_ok, shuffle_ok),
+            'pool': pool_entered,
+            'pool_pct': pct(pool_entered, mw_ok if mw_ok > 0 else shuffle_ok),
         }
 
-    def _get_failure_breakdown(
-        self, session, since: datetime
-    ) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Get breakdown of failures by stage and reason.
-
-        Returns dict with failures per stage.
-        """
-        failures = {}
-
-        # Validation failures by phase
-        val_failures = session.execute(
-            select(StrategyEvent.event_type, func.count(StrategyEvent.id))
-            .where(
-                and_(
-                    StrategyEvent.stage == 'validation',
-                    StrategyEvent.status == 'failed',
-                    StrategyEvent.timestamp >= since
-                )
-            )
-            .group_by(StrategyEvent.event_type)
-        ).all()
-
-        failures['validation'] = [
-            {'type': event_type, 'count': count}
-            for event_type, count in val_failures
-        ]
-
-        # Backtest failures
-        bt_failure_types = [
-            ('backtest', 'score_rejected', 'score_below_threshold'),
-            ('shuffle_test', 'failed', 'shuffle_fail'),
-            ('multi_window', 'failed', 'multi_window_fail'),
-            ('pool', 'rejected', 'pool_rejected'),
-        ]
-
-        bt_failures = []
-        for stage, event_type, label in bt_failure_types:
-            count = session.execute(
-                select(func.count(StrategyEvent.id))
-                .where(
-                    and_(
-                        StrategyEvent.stage == stage,
-                        or_(
-                            StrategyEvent.event_type == event_type,
-                            StrategyEvent.status == 'failed'
-                        ) if event_type == 'failed' else StrategyEvent.event_type == event_type,
-                        StrategyEvent.timestamp >= since
-                    )
-                )
-            ).scalar() or 0
-
-            if count > 0:
-                bt_failures.append({'type': label, 'count': count})
-
-        failures['backtesting'] = bt_failures
-
-        return failures
-
-    def _get_timing_metrics(
-        self, session, since: datetime
-    ) -> Dict[str, Optional[float]]:
-        """
-        Get average timing metrics per phase.
-
-        Returns avg duration in milliseconds.
-        """
+    def _get_timing_avg_24h(self, session, since: datetime) -> Dict[str, Optional[float]]:
+        """Get average timing metrics per phase for last 24h."""
         timing = {}
 
-        stages = ['validation', 'shuffle_test', 'multi_window']
-        for stage in stages:
+        stages = [
+            ('validation', 'validation'),
+            ('backtest', 'backtest'),
+            ('shuffle_test', 'shuffle'),
+            ('multi_window', 'multiwindow'),
+        ]
+
+        for db_stage, key in stages:
             avg_ms = session.execute(
                 select(func.avg(StrategyEvent.duration_ms))
-                .where(
-                    and_(
-                        StrategyEvent.stage == stage,
-                        StrategyEvent.duration_ms.isnot(None),
-                        StrategyEvent.timestamp >= since
-                    )
-                )
+                .where(and_(
+                    StrategyEvent.stage == db_stage,
+                    StrategyEvent.duration_ms.isnot(None),
+                    StrategyEvent.timestamp >= since
+                ))
             ).scalar()
 
-            timing[stage] = float(avg_ms) if avg_ms is not None else None
+            timing[key] = float(avg_ms) if avg_ms is not None else None
 
         return timing
 
-    def _get_overall_status(
-        self,
-        queue_depths: Dict[str, int],
-        success_rates: Dict[str, Optional[float]]
-    ) -> str:
-        """
-        Determine overall system health status.
+    def _get_throughput_interval(
+        self, session, since: datetime
+    ) -> Dict[str, int]:
+        """Get throughput (counts) for each stage in the interval."""
+        # Generation
+        gen = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'generation',
+                StrategyEvent.event_type == 'created',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
 
-        Returns: 'healthy', 'degraded', or 'critical'
-        """
-        active_count = queue_depths.get('ACTIVE', 0)
-        live_count = queue_depths.get('LIVE', 0)
-        bt_rate = success_rates.get('backtesting')
+        # Validation completed
+        val = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'validation',
+                StrategyEvent.event_type == 'completed',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
 
-        # Critical: no ACTIVE strategies and backtest rate is very low
-        if active_count == 0 and live_count == 0:
-            if bt_rate is not None and bt_rate < 0.01:
-                return 'critical'
-            return 'degraded'
+        # Backtest completed (scored OR parametric_failed)
+        # Counts all backtests that ran, not just those that passed thresholds
+        bt = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'backtest',
+                StrategyEvent.event_type.in_(['scored', 'parametric_failed']),
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
 
-        # Degraded: ACTIVE pool very low or backtest rate very low
-        if active_count < 10:
-            return 'degraded'
+        # Score passed (shuffle started)
+        score = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'shuffle_test',
+                StrategyEvent.event_type == 'started',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
 
-        return 'healthy'
+        # Shuffle passed
+        shuf = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'shuffle_test',
+                StrategyEvent.status == 'passed',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
 
-    def _get_quality_metrics(self, session) -> Dict[str, Optional[float]]:
-        """Get average quality metrics from ACTIVE strategies."""
-        from src.database.models import BacktestResult
+        # Multi-window passed
+        mw = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'multi_window',
+                StrategyEvent.status == 'passed',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
 
+        # Pool entered
+        pool = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'pool',
+                StrategyEvent.event_type == 'entered',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        return {
+            'gen': gen,
+            'val': val,
+            'bt': bt,
+            'score': score,
+            'shuf': shuf,
+            'mw': mw,
+            'pool': pool,
+        }
+
+    def _get_failures_24h(self, session, since: datetime) -> Dict[str, int]:
+        """Get failure counts by type for last 24h."""
+        # Validation failures
+        validation_fail = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'validation',
+                StrategyEvent.status == 'failed',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        # Score rejected
+        score_reject = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'backtest',
+                StrategyEvent.event_type == 'score_rejected',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        # Shuffle failed
+        shuffle_fail = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'shuffle_test',
+                StrategyEvent.status == 'failed',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        # Multi-window failed
+        mw_fail = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'multi_window',
+                StrategyEvent.status == 'failed',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        # Pool rejected
+        pool_reject = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'pool',
+                StrategyEvent.event_type == 'rejected',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        return {
+            'validation': validation_fail,
+            'score_reject': score_reject,
+            'shuffle_fail': shuffle_fail,
+            'mw_fail': mw_fail,
+            'pool_reject': pool_reject,
+        }
+
+    def _get_backpressure_status(
+        self, session, queue_depths: Dict[str, int]
+    ) -> Dict[str, Any]:
+        """Get backpressure status (queue depths and processing counts)."""
+        gen_count = queue_depths.get('GENERATED', 0)
+        val_count = queue_depths.get('VALIDATED', 0)
+
+        # Count strategies currently being processed
+        bt_processing = session.execute(
+            select(func.count(Strategy.id))
+            .where(and_(
+                Strategy.status == 'VALIDATED',
+                Strategy.processing_by.isnot(None)
+            ))
+        ).scalar() or 0
+
+        bt_waiting = val_count - bt_processing
+
+        # Check if queues are full
+        gen_full = gen_count >= self.limit_generated
+        val_full = val_count >= self.limit_validated
+
+        return {
+            'gen_queue': gen_count,
+            'gen_limit': self.limit_generated,
+            'gen_full': gen_full,
+            'val_queue': val_count,
+            'val_limit': self.limit_validated,
+            'bt_waiting': bt_waiting,
+            'bt_processing': bt_processing,
+        }
+
+    def _get_pool_stats(self, session) -> Dict[str, Any]:
+        """Get ACTIVE pool statistics."""
+        # Pool size
+        pool_size = session.execute(
+            select(func.count(Strategy.id))
+            .where(Strategy.status == 'ACTIVE')
+        ).scalar() or 0
+
+        # Score stats
+        score_stats = session.execute(
+            select(
+                func.min(Strategy.score_backtest),
+                func.max(Strategy.score_backtest),
+                func.avg(Strategy.score_backtest),
+            )
+            .where(Strategy.status == 'ACTIVE')
+        ).first()
+
+        return {
+            'size': pool_size,
+            'limit': self.limit_active,
+            'score_min': float(score_stats[0]) if score_stats[0] else None,
+            'score_max': float(score_stats[1]) if score_stats[1] else None,
+            'score_avg': float(score_stats[2]) if score_stats[2] else None,
+        }
+
+    def _get_pool_quality(self, session) -> Dict[str, Any]:
+        """Get quality metrics for ACTIVE pool strategies."""
         result = session.execute(
             select(
+                func.avg(BacktestResult.weighted_expectancy),
                 func.avg(BacktestResult.weighted_sharpe_pure),
                 func.avg(BacktestResult.weighted_win_rate),
-                func.avg(BacktestResult.weighted_expectancy),
+                func.avg(BacktestResult.weighted_max_drawdown),
             )
             .join(Strategy, BacktestResult.strategy_id == Strategy.id)
             .where(Strategy.status == 'ACTIVE')
         ).first()
 
-        if result:
+        if result and result[0] is not None:
             return {
-                'sharpe': float(result[0]) if result[0] is not None else None,
-                'win_rate': float(result[1]) if result[1] is not None else None,
-                'expectancy': float(result[2]) if result[2] is not None else None,
+                'edge_avg': float(result[0]) if result[0] else None,
+                'sharpe_avg': float(result[1]) if result[1] else None,
+                'winrate_avg': float(result[2]) if result[2] else None,
+                'dd_avg': float(result[3]) if result[3] else None,
             }
 
-        return {'sharpe': None, 'win_rate': None, 'expectancy': None}
+        return {
+            'edge_avg': None,
+            'sharpe_avg': None,
+            'winrate_avg': None,
+            'dd_avg': None,
+        }
 
-    def _get_pattern_ai_breakdown(self, session) -> Dict[str, int]:
-        """Count strategies by source (pattern vs AI)."""
-        pattern_count = session.execute(
+    def _get_retest_stats_24h(self, session, since: datetime) -> Dict[str, Any]:
+        """Get re-backtest statistics for last 24h."""
+        # Count retest events (look for stage=backtest with retest indicator)
+        # Retest events are tracked via the strategy's last_backtested_at update
+        # We look for strategies that were ACTIVE and got retested
+
+        # For now, we use a simpler approach: count strategies with
+        # last_backtested_at in the last 24h that are ACTIVE or RETIRED
+        retested = session.execute(
             select(func.count(Strategy.id))
-            .where(Strategy.ai_provider == 'pattern')
+            .where(and_(
+                Strategy.last_backtested_at >= since,
+                Strategy.status.in_(['ACTIVE', 'RETIRED'])
+            ))
         ).scalar() or 0
 
-        ai_count = session.execute(
+        # Passed = still ACTIVE after retest
+        passed = session.execute(
             select(func.count(Strategy.id))
-            .where(
-                (Strategy.ai_provider != 'pattern') | (Strategy.ai_provider.is_(None))
-            )
+            .where(and_(
+                Strategy.last_backtested_at >= since,
+                Strategy.status == 'ACTIVE'
+            ))
+        ).scalar() or 0
+
+        # Retired from retest
+        retired = session.execute(
+            select(func.count(Strategy.id))
+            .where(and_(
+                Strategy.retired_at >= since,
+                Strategy.status == 'RETIRED'
+            ))
         ).scalar() or 0
 
         return {
-            'pattern': pattern_count,
-            'ai': ai_count,
+            'tested': retested,
+            'passed': passed,
+            'retired': retired,
         }
+
+    def _get_live_rotation_stats(self, session, since: datetime) -> Dict[str, Any]:
+        """Get LIVE rotation statistics."""
+        # Current LIVE count
+        live_count = session.execute(
+            select(func.count(Strategy.id))
+            .where(Strategy.status == 'LIVE')
+        ).scalar() or 0
+
+        # Deployed in last 24h
+        deployed_24h = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'deployment',
+                StrategyEvent.event_type == 'succeeded',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        # Retired from LIVE in last 24h
+        retired_24h = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'live',
+                StrategyEvent.event_type == 'retired',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        # Average age of LIVE strategies (days)
+        avg_age_result = session.execute(
+            select(func.avg(
+                func.extract('epoch', func.now() - Strategy.live_since) / 86400
+            ))
+            .where(and_(
+                Strategy.status == 'LIVE',
+                Strategy.live_since.isnot(None)
+            ))
+        ).scalar()
+
+        avg_age = float(avg_age_result) if avg_age_result else None
+
+        return {
+            'live': live_count,
+            'limit': self.limit_live,
+            'deployed_24h': deployed_24h,
+            'retired_24h': retired_24h,
+            'avg_age_days': avg_age,
+        }
+
+    def _get_status_and_issue(
+        self,
+        queue_depths: Dict[str, int],
+        backpressure: Dict[str, Any],
+        throughput: Dict[str, int],
+    ) -> Tuple[str, Optional[str]]:
+        """Determine overall status and issue description."""
+        active = queue_depths.get('ACTIVE', 0)
+        live = queue_depths.get('LIVE', 0)
+        bt_waiting = backpressure.get('bt_waiting', 0)
+        bt_processing = backpressure.get('bt_processing', 0)
+
+        # Check for issues
+        issues = []
+
+        # Backtest stalled
+        if bt_waiting > 0 and bt_processing == 0 and throughput.get('bt', 0) == 0:
+            issues.append(f"Backtest stalled ({bt_waiting} waiting)")
+
+        # Generator queue full
+        if backpressure.get('gen_full', False):
+            issues.append("Generator queue full")
+
+        # No ACTIVE strategies
+        if active == 0 and live == 0:
+            issues.append("No ACTIVE strategies")
+
+        # Determine status
+        if not issues:
+            return 'HEALTHY', None
+        elif 'stalled' in ' '.join(issues).lower() or active == 0:
+            return 'DEGRADED', issues[0]
+        else:
+            return 'DEGRADED', issues[0]
+
+    def _save_snapshot(
+        self,
+        session,
+        queue_depths: Dict[str, int],
+        throughput: Dict[str, int],
+        funnel: Dict[str, Any],
+        pool_quality: Dict[str, Any],
+        status: str,
+    ) -> None:
+        """Save metrics snapshot to database."""
+        # Calculate utilization
+        gen_util = queue_depths.get('GENERATED', 0) / self.limit_generated if self.limit_generated > 0 else 0
+        val_util = queue_depths.get('VALIDATED', 0) / self.limit_validated if self.limit_validated > 0 else 0
+        active_util = queue_depths.get('ACTIVE', 0) / self.limit_active if self.limit_active > 0 else 0
+
+        # Calculate success rates
+        val_rate = funnel['validated_pct'] / 100 if funnel['validated_pct'] else None
+        bt_rate = funnel['pool_pct'] / 100 if funnel['pool_pct'] else None
+
+        snapshot = PipelineMetricsSnapshot(
+            timestamp=datetime.now(UTC),
+            queue_generated=queue_depths.get('GENERATED', 0),
+            queue_validated=queue_depths.get('VALIDATED', 0),
+            queue_active=queue_depths.get('ACTIVE', 0),
+            queue_live=queue_depths.get('LIVE', 0),
+            queue_retired=queue_depths.get('RETIRED', 0),
+            queue_failed=queue_depths.get('FAILED', 0),
+            throughput_generation=throughput.get('gen', 0) * 60,  # per hour
+            throughput_validation=throughput.get('val', 0) * 60,
+            throughput_backtesting=throughput.get('bt', 0) * 60,
+            utilization_generated=gen_util,
+            utilization_validated=val_util,
+            utilization_active=active_util,
+            success_rate_validation=val_rate,
+            success_rate_backtesting=bt_rate,
+            bottleneck_stage=None,
+            overall_status=status.lower(),
+            avg_sharpe=pool_quality.get('sharpe_avg'),
+            avg_win_rate=pool_quality.get('winrate_avg'),
+            avg_expectancy=pool_quality.get('edge_avg'),
+            pattern_count=0,
+            ai_count=0,
+        )
+
+        session.add(snapshot)
+        session.commit()
 
     def _log_metrics(
         self,
+        status: str,
+        issue: Optional[str],
         queue_depths: Dict[str, int],
-        throughput: Dict[str, Optional[float]],
-        success_rates: Dict[str, Optional[float]],
-        failures: Dict[str, List[Dict]],
-        timing: Dict[str, Optional[float]]
+        funnel: Dict[str, Any],
+        timing: Dict[str, Optional[float]],
+        throughput: Dict[str, int],
+        failures: Dict[str, int],
+        backpressure: Dict[str, Any],
+        pool_stats: Dict[str, Any],
+        pool_quality: Dict[str, Any],
+        retest_stats: Dict[str, Any],
+        live_stats: Dict[str, Any],
     ) -> None:
-        """Log metrics in detailed format."""
-        now = datetime.now(UTC)
-        should_log_detail = (now - self._last_detail_log).total_seconds() >= self.log_detail_interval
+        """Log metrics in Unix standard format (11 lines)."""
 
-        # Get current counts
+        # Helper functions
+        def fmt_pct(val: Optional[int]) -> str:
+            return f"{val}%" if val is not None else "--"
+
+        def fmt_time(ms: Optional[float]) -> str:
+            if ms is None:
+                return "--"
+            if ms >= 1000:
+                return f"{ms/1000:.1f}s"
+            return f"{int(ms)}ms"
+
+        def fmt_float(val: Optional[float], decimals: int = 1) -> str:
+            if val is None:
+                return "--"
+            return f"{val:.{decimals}f}"
+
+        def fmt_pct_float(val: Optional[float]) -> str:
+            if val is None:
+                return "--"
+            return f"{val*100:.0f}%"
+
+        # 1. status
+        if issue:
+            logger.info(f'status={status} issue="{issue}"')
+        else:
+            logger.info(f'status={status}')
+
+        # 2. state
         g = queue_depths.get('GENERATED', 0)
         v = queue_depths.get('VALIDATED', 0)
         a = queue_depths.get('ACTIVE', 0)
         l = queue_depths.get('LIVE', 0)
         r = queue_depths.get('RETIRED', 0)
         f = queue_depths.get('FAILED', 0)
+        logger.info(f'state generated={g} validated={v} active={a} live={l} retired={r} failed={f}')
 
-        # Get throughput (per hour)
-        gen_tp = throughput.get('generation') or 0
-        val_tp = throughput.get('validation') or 0
-        bt_tp = throughput.get('backtesting') or 0
+        # 3. funnel_24h
+        logger.info(
+            f'funnel_24h '
+            f'generated={funnel["generated"]} '
+            f'validated={funnel["validated"]}/{fmt_pct(funnel["validated_pct"])} '
+            f'backtested={funnel["backtested"]}/{fmt_pct(funnel["backtested_pct"])} '
+            f'score_ok={funnel["score_ok"]}/{fmt_pct(funnel["score_ok_pct"])} '
+            f'shuffle_ok={funnel["shuffle_ok"]}/{fmt_pct(funnel["shuffle_ok_pct"])} '
+            f'mw_ok={funnel["mw_ok"]}/{fmt_pct(funnel["mw_ok_pct"])} '
+            f'pool={funnel["pool"]}/{fmt_pct(funnel["pool_pct"])}'
+        )
 
-        # Convert hourly to interval (5min = 1/12 of hour)
-        interval_hours = self.interval_seconds / 3600
-        gen_interval = int(gen_tp * interval_hours)
-        val_interval = int(val_tp * interval_hours)
-        bt_interval = int(bt_tp * interval_hours)
+        # 4. timing_avg
+        logger.info(
+            f'timing_avg '
+            f'validation={fmt_time(timing.get("validation"))} '
+            f'backtest={fmt_time(timing.get("backtest"))} '
+            f'shuffle={fmt_time(timing.get("shuffle"))} '
+            f'multiwindow={fmt_time(timing.get("multiwindow"))}'
+        )
 
-        # Get success rates
-        val_rate = success_rates.get('validation')
-        bt_rate = success_rates.get('backtesting')
+        # 5. throughput_1min
+        logger.info(
+            f'throughput_1min '
+            f'gen=+{throughput["gen"]} '
+            f'val=+{throughput["val"]} '
+            f'bt=+{throughput["bt"]} '
+            f'score=+{throughput["score"]} '
+            f'shuf=+{throughput["shuf"]} '
+            f'mw=+{throughput["mw"]} '
+            f'pool=+{throughput["pool"]}'
+        )
 
-        # Get timing
-        gen_time = timing.get('generation')
-        val_time = timing.get('validation')
-        bt_time = timing.get('backtesting')
+        # 6. failures_24h
+        logger.info(
+            f'failures_24h '
+            f'validation={failures["validation"]} '
+            f'score_reject={failures["score_reject"]} '
+            f'shuffle_fail={failures["shuffle_fail"]} '
+            f'mw_fail={failures["mw_fail"]} '
+            f'pool_reject={failures["pool_reject"]}'
+        )
 
-        # Overall status
-        status = self._get_overall_status(queue_depths, success_rates).upper()
+        # 7. backpressure
+        gen_status = "(full)" if backpressure["gen_full"] else ""
+        logger.info(
+            f'backpressure '
+            f'gen_queue={backpressure["gen_queue"]}/{backpressure["gen_limit"]}{gen_status} '
+            f'val_queue={backpressure["val_queue"]}/{backpressure["val_limit"]} '
+            f'bt_waiting={backpressure["bt_waiting"]} '
+            f'bt_processing={backpressure["bt_processing"]}'
+        )
 
-        # Format timing strings
-        def fmt_time(ms: Optional[float]) -> str:
-            if ms is None:
-                return "N/A"
-            if ms >= 1000:
-                return f"{ms/1000:.1f}s"
-            return f"{ms:.0f}ms"
+        # 8. pool_stats
+        logger.info(
+            f'pool_stats '
+            f'size={pool_stats["size"]}/{pool_stats["limit"]} '
+            f'score_min={fmt_float(pool_stats["score_min"])} '
+            f'score_max={fmt_float(pool_stats["score_max"])} '
+            f'score_avg={fmt_float(pool_stats["score_avg"])}'
+        )
 
-        # Build failure breakdown strings
-        val_fails = failures.get('validation', [])
-        bt_fails = failures.get('backtesting', [])
+        # 9. pool_quality
+        edge_str = f'{pool_quality["edge_avg"]*100:.1f}%' if pool_quality["edge_avg"] else "--"
+        logger.info(
+            f'pool_quality '
+            f'edge_avg={edge_str} '
+            f'sharpe_avg={fmt_float(pool_quality["sharpe_avg"])} '
+            f'winrate_avg={fmt_pct_float(pool_quality["winrate_avg"])} '
+            f'dd_avg={fmt_pct_float(pool_quality["dd_avg"])}'
+        )
 
-        val_fail_str = ""
-        if val_fails:
-            parts = [f"{f['type']}={f['count']}" for f in val_fails[:3]]
-            val_fail_str = f" | fail: {' '.join(parts)}"
+        # 10. retest_24h
+        logger.info(
+            f'retest_24h '
+            f'tested={retest_stats["tested"]} '
+            f'passed={retest_stats["passed"]} '
+            f'retired={retest_stats["retired"]}'
+        )
 
-        bt_fail_str = ""
-        if bt_fails:
-            parts = [f"{f['type']}={f['count']}" for f in bt_fails[:3]]
-            bt_fail_str = f" | fail: {' '.join(parts)}"
+        # 11. live_rotation
+        avg_age_str = f'{live_stats["avg_age_days"]:.1f}d' if live_stats["avg_age_days"] else "--"
+        logger.info(
+            f'live_rotation '
+            f'live={live_stats["live"]}/{live_stats["limit"]} '
+            f'deployed_24h={live_stats["deployed_24h"]} '
+            f'retired_24h={live_stats["retired_24h"]} '
+            f'avg_live_age={avg_age_str}'
+        )
 
-        # Count passed/failed in interval
-        val_ok = int(val_interval * (val_rate or 0)) if val_rate else 0
-        val_ko = val_interval - val_ok
-        bt_ok = int(bt_interval * (bt_rate or 0)) if bt_rate else 0
-        bt_ko = bt_interval - bt_ok
-
-        # Log compact format (always)
-        interval_min = self.interval_seconds // 60
-        logger.info(f"Pipeline: {status} | {interval_min}min")
-        logger.info(f"  GEN:  +{gen_interval} ({fmt_time(gen_time)}) | queue={g}/{self.limit_generated}")
-
-        if val_rate is not None:
-            logger.info(f"  VAL:  +{val_ok} OK +{val_ko} FAIL ({fmt_time(val_time)}){val_fail_str} | queue={v}/{self.limit_validated}")
-        else:
-            logger.info(f"  VAL:  +{val_interval} ({fmt_time(val_time)}) | queue={v}/{self.limit_validated}")
-
-        if bt_rate is not None:
-            logger.info(f"  BT:   +{bt_ok} OK +{bt_ko} FAIL ({fmt_time(bt_time)}){bt_fail_str} | queue={v}")
-        else:
-            logger.info(f"  BT:   +{bt_interval} ({fmt_time(bt_time)}) | queue={v}")
-
-        logger.info(f"  POOL: {a}/{self.limit_active}")
-        logger.info(f"  LIVE: {l}/{self.limit_live} | retired={r} failed={f}")
-
-        # Log detailed breakdown periodically
-        if should_log_detail:
-            self._last_detail_log = now
-            self._log_detailed_metrics(failures, timing, success_rates)
-
-    def _log_detailed_metrics(
-        self,
-        failures: Dict[str, List[Dict]],
-        timing: Dict[str, Optional[float]],
-        success_rates: Dict[str, Optional[float]]
-    ) -> None:
-        """Log detailed breakdown every N minutes."""
-        logger.info("=" * 70)
-        logger.info("DETAILED METRICS BREAKDOWN")
-        logger.info("=" * 70)
-
-        # Validation failure breakdown
-        val_fails = failures.get('validation', [])
-        if val_fails:
-            logger.info("VALIDATION FAILURES:")
-            for f in val_fails:
-                pct = f.get('percentage', 0)
-                logger.info(f"  - {f['type']}: {f['count']} ({pct:.1f}%)")
-
-        # Backtest failure breakdown
-        bt_fails = failures.get('backtesting', [])
-        if bt_fails:
-            logger.info("BACKTEST FAILURES:")
-            for f in bt_fails:
-                pct = f.get('percentage', 0)
-                logger.info(f"  - {f['type']}: {f['count']} ({pct:.1f}%)")
-
-        # Timing breakdown
-        if any(v is not None for v in timing.values()):
-            logger.info("TIMING (avg per operation):")
-            for stage, ms in timing.items():
-                if ms is not None:
-                    if ms >= 1000:
-                        logger.info(f"  - {stage}: {ms/1000:.1f}s")
-                    else:
-                        logger.info(f"  - {stage}: {ms:.0f}ms")
-
-        # Success rates
-        logger.info("SUCCESS RATES:")
-        for stage, rate in success_rates.items():
-            if rate is not None:
-                logger.info(f"  - {stage}: {rate:.1%}")
-            else:
-                logger.info(f"  - {stage}: N/A (no data)")
-
-        logger.info("=" * 70)
+    # =========================================================================
+    # PUBLIC API METHODS (for external use)
+    # =========================================================================
 
     def get_funnel_metrics(self, hours: int = 24) -> Dict[str, Any]:
         """
@@ -631,118 +819,16 @@ class MetricsCollector:
         since = datetime.now(UTC) - timedelta(hours=hours)
 
         with get_session() as session:
-            # Count events at each stage
-            generated = session.execute(
-                select(func.count(StrategyEvent.id))
-                .where(
-                    and_(
-                        StrategyEvent.stage == 'generation',
-                        StrategyEvent.event_type == 'created',
-                        StrategyEvent.timestamp >= since
-                    )
-                )
-            ).scalar() or 0
-
-            validated = session.execute(
-                select(func.count(StrategyEvent.id))
-                .where(
-                    and_(
-                        StrategyEvent.stage == 'validation',
-                        StrategyEvent.event_type == 'completed',
-                        StrategyEvent.timestamp >= since
-                    )
-                )
-            ).scalar() or 0
-
-            pool_entered = session.execute(
-                select(func.count(StrategyEvent.id))
-                .where(
-                    and_(
-                        StrategyEvent.stage == 'pool',
-                        StrategyEvent.event_type == 'entered',
-                        StrategyEvent.timestamp >= since
-                    )
-                )
-            ).scalar() or 0
-
-            deployed = session.execute(
-                select(func.count(StrategyEvent.id))
-                .where(
-                    and_(
-                        StrategyEvent.stage == 'deployment',
-                        StrategyEvent.event_type == 'succeeded',
-                        StrategyEvent.timestamp >= since
-                    )
-                )
-            ).scalar() or 0
-
-            return {
-                'period_hours': hours,
-                'stages': [
-                    {
-                        'name': 'Generated',
-                        'count': generated,
-                        'conversion_rate': 1.0
-                    },
-                    {
-                        'name': 'Validated',
-                        'count': validated,
-                        'conversion_rate': validated / generated if generated > 0 else 0
-                    },
-                    {
-                        'name': 'Active Pool',
-                        'count': pool_entered,
-                        'conversion_rate': pool_entered / validated if validated > 0 else 0
-                    },
-                    {
-                        'name': 'Deployed',
-                        'count': deployed,
-                        'conversion_rate': deployed / pool_entered if pool_entered > 0 else 0
-                    },
-                ]
-            }
+            return self._get_funnel_24h(session, since)
 
     def get_failure_analysis(self, hours: int = 24) -> Dict[str, Any]:
         """
         Get detailed failure analysis for the specified time period.
-
-        Returns failure counts and reasons by stage.
         """
         since = datetime.now(UTC) - timedelta(hours=hours)
 
         with get_session() as session:
-            # Get all failure events with event_data
-            failures = session.execute(
-                select(
-                    StrategyEvent.stage,
-                    StrategyEvent.event_type,
-                    StrategyEvent.event_data
-                )
-                .where(
-                    and_(
-                        StrategyEvent.status == 'failed',
-                        StrategyEvent.timestamp >= since
-                    )
-                )
-            ).all()
-
-            # Aggregate by stage and reason
-            by_stage: Dict[str, Dict[str, int]] = {}
-            for stage, event_type, event_data in failures:
-                if stage not in by_stage:
-                    by_stage[stage] = {}
-
-                reason = event_type
-                if event_data and 'reason' in event_data:
-                    reason = event_data['reason']
-
-                by_stage[stage][reason] = by_stage[stage].get(reason, 0) + 1
-
-            return {
-                'period_hours': hours,
-                'by_stage': by_stage,
-                'total_failures': len(failures)
-            }
+            return self._get_failures_24h(session, since)
 
     def run(self) -> None:
         """Main collection loop (runs forever)."""

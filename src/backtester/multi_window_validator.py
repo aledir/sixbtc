@@ -122,8 +122,8 @@ class MultiWindowValidator:
                     target_count=self.max_coins
                 )
 
-                if not training_data or len(training_data) < 5:
-                    logger.debug(f"Window {i+1}: insufficient data, skipping")
+                if not training_data:
+                    logger.debug(f"Window {i+1}: no data loaded, skipping")
                     continue
 
                 # Run backtest on training period of this window
