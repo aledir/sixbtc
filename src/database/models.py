@@ -300,8 +300,8 @@ class BacktestResult(Base):
     # Walk-forward validation results
     walk_forward_enabled = Column(Boolean, default=True)
     walk_forward_windows = Column(Integer, default=4)
-    walk_forward_stability = Column(Float)  # Std dev of edge across windows
-    worst_window_edge = Column(Float)  # Edge in worst-performing window
+    walk_forward_stability = Column(Float)  # Std dev of expectancy across windows
+    worst_window_edge = Column(Float)  # Expectancy in worst-performing window (legacy name)
 
     # Validation checks
     lookahead_check_passed = Column(Boolean)  # AST analysis

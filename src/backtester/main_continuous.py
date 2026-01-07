@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 import importlib.util
 import tempfile
 import sys
+import time
 
 # Suppress pandas FutureWarning about fillna downcasting (from AI-generated strategies)
 warnings.filterwarnings('ignore', category=FutureWarning, message='.*Downcasting.*fillna.*')
@@ -158,7 +159,13 @@ class ContinuousBacktesterProcess:
         self.holdout_max_degradation = self.config.get_required('backtesting.holdout.max_degradation')
         self.holdout_min_sharpe = self.config.get_required('backtesting.holdout.min_sharpe')
         self.holdout_recency_weight = self.config.get_required('backtesting.holdout.recency_weight')
-        self.min_holdout_trades = self.config.get_required('backtesting.holdout.min_trades')
+
+        # Min trades per timeframe (parallel arrays)
+        timeframes = self.config.get_required('timeframes')
+        min_training = self.config.get_required('backtesting.min_trades.training')
+        min_holdout = self.config.get_required('backtesting.min_trades.holdout')
+        self.min_trades_training = dict(zip(timeframes, min_training))
+        self.min_trades_holdout = dict(zip(timeframes, min_holdout))
 
         # Initial capital for expectancy normalization
         self.initial_capital = self.config.get_required('backtesting.initial_capital')
@@ -453,28 +460,15 @@ class ContinuousBacktesterProcess:
                     try:
                         success, reason = future.result()
                         if success:
-                            logger.info(f"[{future_type}] {strategy_name} completed: {reason}")
+                            logger.info(f"[{strategy_name}] {future_type} completed: {reason}")
                         else:
-                            logger.info(f"[{future_type}] {strategy_name} failed: {reason}")
+                            logger.info(f"[{strategy_name}] {future_type} failed: {reason}")
                     except Exception as e:
-                        logger.error(f"[{future_type}] Backtest error for {strategy_name}: {e}")
+                        logger.error(f"[{strategy_name}] {future_type} error: {e}")
 
-            # Check downstream backpressure (ACTIVE pool)
-            active_count = self.processor.count_available("ACTIVE")
-            if active_count >= self.active_limit:
-                cooldown = self.processor.calculate_backpressure_cooldown(
-                    active_count,
-                    self.active_limit,
-                    self.base_cooldown,
-                    self.cooldown_increment,
-                    self.max_cooldown
-                )
-                logger.info(
-                    f"Downstream backpressure: {active_count} ACTIVE "
-                    f"(pool max {self.active_limit}), waiting {cooldown}s"
-                )
-                await asyncio.sleep(cooldown)
-                continue
+            # NOTE: No backpressure on ACTIVE pool - pool_manager handles eviction.
+            # When pool is full and new strategy is better, worst gets retired.
+            # Backtester should always process, let pool_manager decide membership.
 
             total_futures = len(validated_futures) + len(retest_futures)
 
@@ -502,7 +496,7 @@ class ContinuousBacktesterProcess:
                         strategy_data['backtest_pairs']
                     )
                     retest_futures[future] = (str(strategy_data['id']), strategy_data['name'])
-                    logger.info(f"[RETEST] Started re-backtest for {strategy_data['name']}")
+                    logger.info(f"[{strategy_data['name']}] RETEST started")
                     await asyncio.sleep(0.1)
                     continue
 
@@ -561,10 +555,11 @@ class ContinuousBacktesterProcess:
         """
         from src.database.event_tracker import EventTracker
 
-        # Emit backtest started event
+        # Emit backtest started event and track timing
         EventTracker.backtest_started(
             strategy_id, strategy_name, original_tf, base_code_hash
         )
+        backtest_start_time = time.time()
 
         try:
             # Load strategy instance
@@ -680,7 +675,7 @@ class ContinuousBacktesterProcess:
                     holdout_result = None
 
                 # Validate holdout and calculate final metrics
-                validation = self._validate_holdout(training_result, holdout_result)
+                validation = self._validate_holdout(training_result, holdout_result, tf)
 
                 if not validation['passed']:
                     logger.info(
@@ -707,7 +702,6 @@ class ContinuousBacktesterProcess:
                 # Save training backtest result
                 training_backtest_id = self._save_backtest_result(
                     strategy_id, training_result, pairs, tf,
-                    is_optimal=False,
                     period_type='training',
                     period_days=self.training_days
                 )
@@ -718,7 +712,6 @@ class ContinuousBacktesterProcess:
                 if holdout_result:
                     holdout_backtest_id = self._save_backtest_result(
                         strategy_id, holdout_result, pairs, tf,
-                        is_optimal=False,
                         period_type='holdout',
                         period_days=self.holdout_days
                     )
@@ -835,12 +828,12 @@ class ContinuousBacktesterProcess:
 
                             # Validate holdout performance
                             validation_for_params = self._validate_holdout(
-                                param_result, holdout_result_for_params
+                                param_result, holdout_result_for_params, optimal_tf
                             )
 
                             if not validation_for_params['passed']:
                                 logger.info(
-                                    f"Parametric strategy #{i} REJECTED on holdout: "
+                                    f"[{strategy_name}/p{i}] REJECTED on holdout: "
                                     f"{validation_for_params['reason']}"
                                 )
                                 continue  # Skip this strategy (overfitted)
@@ -893,8 +886,8 @@ class ContinuousBacktesterProcess:
                                 )
 
                                 logger.info(
-                                    f"Parametric strategy {i} PASSED holdout validation: "
-                                    f"Final score {final_result_for_params.get('final_score', 0):.2f}"
+                                    f"[{strategy_name}/p{i}] PASSED holdout: "
+                                    f"score={final_result_for_params.get('final_score', 0):.2f}"
                                 )
 
                                 # Direct promotion to ACTIVE pool (skip re-insertion into pipeline)
@@ -903,25 +896,24 @@ class ContinuousBacktesterProcess:
                                         BacktestResult.id == training_bt_id
                                     ).first()
                                     if backtest_for_promo:
+                                        # Pass degradation for recency bonus calculation
+                                        param_degradation = final_result_for_params.get('degradation', 0.0)
                                         entered, promo_reason = self._promote_to_active_pool(
-                                            parametric_strategy_id, backtest_for_promo
+                                            parametric_strategy_id, backtest_for_promo,
+                                            backtest_start_time, param_degradation
                                         )
                                         if entered:
                                             logger.info(
-                                                f"Parametric strategy {i} entered ACTIVE pool: {promo_reason}"
+                                                f"[{strategy_name}/p{i}] Entered ACTIVE pool: {promo_reason}"
                                             )
                                         else:
                                             logger.info(
-                                                f"Parametric strategy {i} rejected from pool: {promo_reason}"
+                                                f"[{strategy_name}/p{i}] Rejected from pool: {promo_reason}"
                                             )
 
                         except Exception as e:
-                            logger.error(f"Failed to validate parametric strategy #{i}: {e}")
+                            logger.error(f"[{strategy_name}/p{i}] Validation error: {e}")
                             continue
-
-            # Mark optimal backtest
-            if optimal_tf in tf_backtest_ids:
-                self._mark_optimal_backtest(tf_backtest_ids[optimal_tf])
 
             # Promote to ACTIVE pool using leaderboard logic
             optimal_backtest_id = tf_backtest_ids.get(optimal_tf)
@@ -935,9 +927,13 @@ class ContinuousBacktesterProcess:
                     ).first()
 
                     if backtest_result:
+                        # Get degradation for recency bonus
+                        optimal_result = tf_results[optimal_tf]
+                        tf_degradation = optimal_result.get('degradation', 0.0)
+
                         # Try to enter ACTIVE pool (handles leaderboard logic)
                         entered, pool_reason = self._promote_to_active_pool(
-                            strategy_id, backtest_result
+                            strategy_id, backtest_result, backtest_start_time, tf_degradation
                         )
 
                         if entered:
@@ -967,7 +963,7 @@ class ContinuousBacktesterProcess:
             return (False, "No optimal backtest result found")
 
         except Exception as e:
-            logger.error(f"Backtest error for {strategy_name}: {e}", exc_info=True)
+            logger.error(f"[{strategy_name}] Backtest error: {e}", exc_info=True)
             self.processor.mark_failed(strategy_id, str(e), delete=True)
             return (False, str(e))
 
@@ -1158,8 +1154,8 @@ class ContinuousBacktesterProcess:
             return []
 
         logger.info(
-            f"Running parametric backtest: {n_bars} bars, {n_symbols} symbols, "
-            f"{total_signals} signals, {self.parametric_backtester._count_strategies()} candidate strategies"
+            f"[{strategy_name}] Running parametric: {n_bars} bars, {n_symbols} symbols, "
+            f"{total_signals} signals, {self.parametric_backtester._count_strategies()} candidates"
         )
 
         # Set timeframe for correct Sharpe annualization
@@ -1222,7 +1218,7 @@ class ContinuousBacktesterProcess:
         if results:
             best = results[0]
             logger.info(
-                f"Parametric: generated {len(results)} strategies | "
+                f"[{strategy_name}] Parametric: {len(results)} strategies | "
                 f"Best: Sharpe={best['sharpe_ratio']:.2f}, Trades={best['total_trades']}, "
                 f"SL={best['params']['sl_pct']:.1%}, TP={best['params']['tp_pct']:.1%}"
             )
@@ -1236,12 +1232,12 @@ class ContinuousBacktesterProcess:
                 best_expectancy = results_df['expectancy'].max()
                 min_dd = results_df['max_drawdown'].min()
                 logger.info(
-                    f"Parametric: 0/{n_tested} passed thresholds | "
-                    f"Best metrics: Sharpe={best_sharpe:.2f} (need {self.min_sharpe}), "
+                    f"[{strategy_name}] Parametric: 0/{n_tested} passed | "
+                    f"Best: Sharpe={best_sharpe:.2f} (need {self.min_sharpe}), "
                     f"WR={best_wr:.1%} (need {self.min_win_rate:.1%}), "
                     f"Trades={max_trades} (need {self.min_trades}), "
-                    f"Expectancy={best_expectancy:.4f} (need {self.min_expectancy}), "
-                    f"MinDD={min_dd:.1%} (need <{self.max_drawdown:.0%})"
+                    f"Exp={best_expectancy:.4f} (need {self.min_expectancy}), "
+                    f"DD={min_dd:.1%} (need <{self.max_drawdown:.0%})"
                 )
 
                 # DEBUG: Show failure breakdown per threshold
@@ -1251,7 +1247,7 @@ class ContinuousBacktesterProcess:
                 pass_exp = (results_df['expectancy'] >= self.min_expectancy).sum()
                 pass_dd = (results_df['max_drawdown'] <= self.max_drawdown).sum()
                 logger.info(
-                    f"  Threshold breakdown: Sharpe>={self.min_sharpe}: {pass_sharpe}/{n_tested}, "
+                    f"[{strategy_name}]   Breakdown: Sharpe>={self.min_sharpe}: {pass_sharpe}/{n_tested}, "
                     f"WR>={self.min_win_rate:.0%}: {pass_wr}/{n_tested}, "
                     f"Trades>={self.min_trades}: {pass_trades}/{n_tested}, "
                     f"Exp>=0: {pass_exp}/{n_tested}, "
@@ -1274,7 +1270,7 @@ class ContinuousBacktesterProcess:
                         fails.append(f"DD={row['max_drawdown']:.1%}")
                     fail_str = ", ".join(fails) if fails else "ALL PASS?"
                     logger.info(
-                        f"  Top combo: SL={row['sl_pct']:.1%} TP={row['tp_pct']:.1%} "
+                        f"[{strategy_name}]   Top: SL={row['sl_pct']:.1%} TP={row['tp_pct']:.1%} "
                         f"Lev={row['leverage']} Exit={row['exit_bars']} | "
                         f"Score={row['score']:.1f} Sharpe={row['sharpe']:.2f} "
                         f"WR={row['win_rate']:.1%} Trades={row['total_trades']} | FAILS: {fail_str}"
@@ -1298,7 +1294,8 @@ class ContinuousBacktesterProcess:
     def _validate_holdout(
         self,
         training_result: Dict,
-        holdout_result: Optional[Dict]
+        holdout_result: Optional[Dict],
+        timeframe: str
     ) -> Dict:
         """
         Validate holdout performance for anti-overfitting check
@@ -1310,10 +1307,29 @@ class ContinuousBacktesterProcess:
         CRITICAL: Training must have positive Sharpe first - if training Sharpe
         is negative or below threshold, strategy has no edge regardless of holdout.
 
+        Args:
+            training_result: Training period backtest results
+            holdout_result: Holdout period backtest results
+            timeframe: Strategy timeframe for min_trades lookup
+
         Returns:
             Dict with 'passed', 'reason', 'degradation', 'holdout_bonus'
         """
         training_sharpe = training_result.get('sharpe_ratio', 0)
+        training_trades = training_result.get('total_trades', 0)
+
+        # Get min trades for this timeframe
+        min_training = self.min_trades_training.get(timeframe, 300)
+        min_holdout = self.min_trades_holdout.get(timeframe, 30)
+
+        # CRITICAL: Training must have enough trades for statistical significance
+        if training_trades < min_training:
+            return {
+                'passed': False,
+                'reason': f'Training trades insufficient: {training_trades} < {min_training} (for {timeframe})',
+                'degradation': 0.0,
+                'holdout_bonus': 0.0,
+            }
 
         # CRITICAL: Training must show edge first
         # If training Sharpe is negative, strategy has no edge - reject early
@@ -1325,31 +1341,14 @@ class ContinuousBacktesterProcess:
                 'holdout_bonus': 0.0,
             }
 
-        # Check holdout trades - penalize low activity instead of rejecting
-        # This allows strategies to pass when market conditions don't match pattern
-        # (e.g., flat market for momentum patterns), but with lower final score
+        # Check holdout trades - REJECT if below minimum (no longer just penalty)
         holdout_trades = holdout_result.get('total_trades', 0) if holdout_result else 0
-        if holdout_trades == 0:
-            # No holdout trades = pattern not active in recent period
-            # Pass with heavy penalty - training edge is still valid
-            logger.debug(
-                f"No holdout trades - pattern dormant in current market. "
-                f"Passing with -30% penalty."
-            )
+        if holdout_trades < min_holdout:
             return {
-                'passed': True,
-                'reason': 'No holdout trades - pattern dormant',
-                'degradation': 0.5,
-                'holdout_bonus': -0.30,  # Heavy penalty for dormant patterns
-            }
-
-        if holdout_trades < self.min_holdout_trades:
-            # Some trades but below threshold - moderate penalty
-            return {
-                'passed': True,
-                'reason': f'Low holdout trades: {holdout_trades} < {self.min_holdout_trades}',
-                'degradation': 0.3,
-                'holdout_bonus': -0.15,
+                'passed': False,
+                'reason': f'Holdout trades insufficient: {holdout_trades} < {min_holdout} (for {timeframe})',
+                'degradation': 0.0,
+                'holdout_bonus': 0.0,
             }
 
         holdout_sharpe = holdout_result.get('sharpe_ratio', 0)
@@ -1792,19 +1791,20 @@ class ContinuousBacktesterProcess:
         result: Dict,
         pairs: List[str],
         timeframe: str,
-        is_optimal: bool = False,
         period_type: str = 'training',
         period_days: Optional[int] = None
     ) -> Optional[str]:
         """
-        Save backtest results to database
+        Save backtest results to database.
+
+        Note: is_optimal_tf is always True because each strategy has exactly
+        one assigned timeframe (no TF optimization).
 
         Args:
             strategy_id: Strategy UUID
             result: Backtest metrics dictionary
             pairs: List of symbols tested
             timeframe: Timeframe tested
-            is_optimal: Whether this is the optimal TF
             period_type: 'training' or 'holdout'
             period_days: Number of days in this period
 
@@ -1841,7 +1841,7 @@ class ContinuousBacktesterProcess:
                     # Multi-pair/TF fields
                     symbols_tested=pairs,
                     timeframe_tested=timeframe,
-                    is_optimal_tf=is_optimal,
+                    is_optimal_tf=True,  # Always True - each strategy has one assigned TF
                     per_symbol_results=result.get('symbol_breakdown', {}),
 
                     # Dual-period fields
@@ -1913,7 +1913,7 @@ class ContinuousBacktesterProcess:
                         )
 
                     logger.info(
-                        f"Updated strategy {strategy.name}: "
+                        f"[{strategy.name}] Updated: "
                         f"optimal_tf={optimal_tf}, pairs={len(pairs)}{params_str}"
                     )
         except Exception as e:
@@ -2005,7 +2005,7 @@ class ContinuousBacktesterProcess:
                 session.commit()
 
                 logger.info(
-                    f"Created parametric strategy {strategy.name} with params: "
+                    f"[{strategy.name}] Created: "
                     f"SL={params.get('sl_pct', 0):.1%}, "
                     f"TP={params.get('tp_pct', 0):.1%}, "
                     f"lev={params.get('leverage', 1)}"
@@ -2089,20 +2089,6 @@ class ContinuousBacktesterProcess:
             logger.warning(f"Failed to update strategy params: {e}")
             return None
 
-    def _mark_optimal_backtest(self, backtest_id: str):
-        """Mark a backtest result as optimal TF"""
-        try:
-            with get_session() as session:
-                bt = session.query(BacktestResult).filter(
-                    BacktestResult.id == backtest_id
-                ).first()
-
-                if bt:
-                    bt.is_optimal_tf = True
-                    session.commit()
-        except Exception as e:
-            logger.error(f"Failed to mark optimal backtest: {e}")
-
     def _extract_class_name(self, code: str) -> Optional[str]:
         """Extract class name from strategy code (supports Strategy_ and PatStrat_)"""
         import re
@@ -2115,7 +2101,7 @@ class ContinuousBacktesterProcess:
         try:
             # Check if code is valid
             if not code or len(code.strip()) < 50:
-                logger.warning(f"Strategy code is empty or too short ({len(code) if code else 0} chars)")
+                logger.warning(f"[{class_name}] Code is empty or too short ({len(code) if code else 0} chars)")
                 return None
 
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
@@ -2128,7 +2114,7 @@ class ContinuousBacktesterProcess:
             )
 
             if not spec or not spec.loader:
-                logger.warning(f"Could not create module spec for {class_name}")
+                logger.warning(f"[{class_name}] Could not create module spec")
                 return None
 
             module = importlib.util.module_from_spec(spec)
@@ -2141,11 +2127,11 @@ class ContinuousBacktesterProcess:
             else:
                 # Log available classes in module
                 available = [name for name in dir(module) if not name.startswith('_')]
-                logger.warning(f"Class {class_name} not found in module. Available: {available[:5]}")
+                logger.warning(f"[{class_name}] Class not found in module. Available: {available[:5]}")
                 return None
 
         except Exception as e:
-            logger.warning(f"Failed to load strategy instance {class_name}: {type(e).__name__}: {e}")
+            logger.warning(f"[{class_name}] Load failed: {type(e).__name__}: {e}")
             return None
         finally:
             if temp_path:
@@ -2224,7 +2210,7 @@ class ContinuousBacktesterProcess:
             (success, reason) tuple
         """
         try:
-            logger.info(f"[RETEST] {strategy_name}: Starting re-backtest on {optimal_tf}")
+            logger.info(f"[{strategy_name}] RETEST: Starting on {optimal_tf}")
 
             # Load strategy instance
             class_name = self._extract_class_name(code)
@@ -2243,7 +2229,7 @@ class ContinuousBacktesterProcess:
             )
 
             if validated_pairs is None:
-                logger.warning(f"[RETEST] {strategy_name}: pairs validation failed ({status})")
+                logger.warning(f"[{strategy_name}] RETEST: pairs validation failed ({status})")
                 # Mark strategy for retirement (data quality degraded)
                 self.pool_manager._retire_strategy(
                     strategy_id,
@@ -2257,7 +2243,7 @@ class ContinuousBacktesterProcess:
             )
 
             if not training_data:
-                logger.warning(f"[RETEST] {strategy_name}: no training data loaded")
+                logger.warning(f"[{strategy_name}] RETEST: no training data loaded")
                 return (False, "No training data")
 
             # Run training backtest (no parametric - use existing params)
@@ -2266,7 +2252,7 @@ class ContinuousBacktesterProcess:
             )
 
             if training_result is None or training_result.get('total_trades', 0) == 0:
-                logger.warning(f"[RETEST] {strategy_name}: no trades in training")
+                logger.warning(f"[{strategy_name}] RETEST: no trades in training")
                 return (False, "No trades in training period")
 
             # Run holdout backtest (min_bars=20 for 1d timeframe support)
@@ -2278,10 +2264,10 @@ class ContinuousBacktesterProcess:
                 )
 
             # Validate holdout
-            validation = self._validate_holdout(training_result, holdout_result)
+            validation = self._validate_holdout(training_result, holdout_result, optimal_tf)
 
             if not validation['passed']:
-                logger.info(f"[RETEST] {strategy_name}: holdout failed ({validation['reason']})")
+                logger.info(f"[{strategy_name}] RETEST: holdout failed ({validation['reason']})")
                 self.pool_manager._retire_strategy(strategy_id, f"Re-test holdout: {validation['reason']}")
                 return (False, f"Holdout validation failed: {validation['reason']}")
 
@@ -2299,14 +2285,14 @@ class ContinuousBacktesterProcess:
             })
 
             logger.info(
-                f"[RETEST] {strategy_name}: new score {new_score:.1f} "
+                f"[{strategy_name}] RETEST: new_score={new_score:.1f} "
                 f"(sharpe={final_result.get('weighted_sharpe_pure', 0):.2f})"
             )
 
             # Update backtest result (save new metrics)
             self._save_backtest_result(
                 strategy_id, training_result, validated_pairs, optimal_tf,
-                is_optimal=True, period_type='training', period_days=self.training_days
+                period_type='training', period_days=self.training_days
             )
 
             # Revalidate pool membership with new score
@@ -2315,26 +2301,28 @@ class ContinuousBacktesterProcess:
             )
 
             if still_active:
-                logger.info(f"[RETEST] {strategy_name}: PASSED - {reason}")
+                logger.info(f"[{strategy_name}] RETEST: PASSED - {reason}")
                 return (True, reason)
             else:
-                logger.info(f"[RETEST] {strategy_name}: RETIRED - {reason}")
+                logger.info(f"[{strategy_name}] RETEST: RETIRED - {reason}")
                 return (False, reason)
 
         except Exception as e:
-            logger.error(f"[RETEST] {strategy_name}: error - {e}", exc_info=True)
+            logger.error(f"[{strategy_name}] RETEST error: {e}", exc_info=True)
             return (False, str(e))
 
     def _promote_to_active_pool(
         self,
         strategy_id: UUID,
-        backtest_result: BacktestResult
+        backtest_result: BacktestResult,
+        backtest_start_time: Optional[float] = None,
+        degradation: float = 0.0
     ) -> Tuple[bool, str]:
         """
         Attempt to promote a strategy to the ACTIVE pool after backtest.
 
         Flow:
-        1. Calculate score from backtest result
+        1. Calculate score from backtest result (training metrics + recency bonus)
         2. If score < min_score -> reject (no shuffle test needed)
         3. Run shuffle test (cached by base_code_hash)
         4. If shuffle fails -> reject
@@ -2344,7 +2332,9 @@ class ContinuousBacktesterProcess:
 
         Args:
             strategy_id: Strategy UUID
-            backtest_result: BacktestResult with optimal TF metrics
+            backtest_result: BacktestResult with training period metrics
+            backtest_start_time: Start time for duration calculation
+            degradation: Holdout degradation for recency bonus (-degradation x 50, capped +-15)
 
         Returns:
             (success, reason) tuple
@@ -2352,26 +2342,33 @@ class ContinuousBacktesterProcess:
         from src.database.event_tracker import EventTracker
 
         try:
-            # Calculate score from backtest result
-            score = self.scorer.score_from_backtest_result(backtest_result)
+            # Calculate backtest duration
+            duration_ms = None
+            if backtest_start_time is not None:
+                duration_ms = int((time.time() - backtest_start_time) * 1000)
+
+            # Calculate score from training metrics + recency bonus
+            score = self.scorer.score_from_backtest_result(backtest_result, degradation)
             strategy = backtest_result.strategy
             strategy_name = strategy.name if strategy else str(strategy_id)
 
-            # Emit scoring event
+            # Emit scoring event with duration (using training metrics, not weighted)
             EventTracker.backtest_scored(
                 strategy_id, strategy_name, score,
-                sharpe=backtest_result.weighted_sharpe_pure or 0,
-                win_rate=backtest_result.weighted_win_rate or 0,
-                edge=backtest_result.weighted_expectancy or 0,
-                consistency=backtest_result.weighted_walk_forward_stability or 0,
-                drawdown=backtest_result.weighted_max_drawdown or 0
+                sharpe=backtest_result.sharpe_ratio or 0,
+                win_rate=backtest_result.win_rate or 0,
+                expectancy=backtest_result.expectancy or 0,
+                consistency=backtest_result.win_rate or 0,  # Consistency = win rate
+                drawdown=backtest_result.max_drawdown or 0,
+                duration_ms=duration_ms
             )
 
             # Check minimum score threshold first (avoid unnecessary shuffle test)
             if score < self.pool_min_score:
-                logger.debug(f"Strategy {strategy_id} score {score:.1f} < {self.pool_min_score}, skipping shuffle test")
+                logger.debug(f"[{strategy_id}] Score {score:.1f} < {self.pool_min_score}, skipping shuffle test")
                 EventTracker.backtest_score_rejected(
-                    strategy_id, strategy_name, score, self.pool_min_score
+                    strategy_id, strategy_name, score, self.pool_min_score,
+                    duration_ms=duration_ms
                 )
                 return (False, f"score_below_threshold:{score:.1f}")
 
@@ -2413,29 +2410,34 @@ class ContinuousBacktesterProcess:
 
     @property
     def test_data(self) -> pd.DataFrame:
-        """Lazy-load test data for shuffle test"""
+        """Lazy-load test data for lookahead test"""
         if self._test_data is None:
             self._test_data = self._load_test_data()
         return self._test_data
 
     def _load_test_data(self) -> pd.DataFrame:
-        """Load test data for shuffle test validation"""
-        try:
-            data = self.data_loader.load_single_symbol('BTC', '15m', days=30)
-            logger.info(f"Loaded {len(data)} bars of BTC 15m test data for shuffle test")
-            return data
-        except Exception as e:
-            logger.debug(f"No cached data available ({e}), generating synthetic test data")
-            # Generate synthetic test data
-            import numpy as np
-            dates = pd.date_range(start='2024-01-01', periods=500, freq='15min')
-            return pd.DataFrame({
-                'open': np.random.uniform(40000, 45000, 500),
-                'high': np.random.uniform(40000, 45000, 500),
-                'low': np.random.uniform(40000, 45000, 500),
-                'close': np.random.uniform(40000, 45000, 500),
-                'volume': np.random.uniform(100, 1000, 500)
-            }, index=dates)
+        """
+        Load test data for lookahead test validation.
+
+        Uses minimum timeframe from config (most candles = most rigorous test).
+        If lookahead passes on min TF, it passes on all higher TFs.
+
+        Fast Fail: crashes if no data available (no synthetic fallback).
+        Synthetic data would mask lookahead bias - strategies with lookahead
+        could pass on random data where indicator values are already uncorrelated.
+        """
+        # Use minimum timeframe (most candles = most rigorous test)
+        timeframes = self.config.get_required('timeframes')
+        min_tf = min(timeframes, key=lambda tf: self.data_loader._timeframe_to_minutes(tf))
+
+        data = self.data_loader.load_single_symbol('BTC', min_tf, days=30)
+        if data.empty:
+            raise RuntimeError(
+                f"No BTC {min_tf} data in cache for lookahead test. "
+                "Run data_scheduler to download data first."
+            )
+        logger.info(f"Loaded {len(data)} bars of BTC {min_tf} data for lookahead test")
+        return data
 
     def _run_shuffle_test(self, strategy_id: UUID, strategy: Strategy) -> bool:
         """
@@ -2459,13 +2461,13 @@ class ContinuousBacktesterProcess:
         if cached_result is not None:
             duration_ms = int((time.time() - start_time) * 1000)
             if cached_result:
-                logger.debug(f"Strategy {strategy.name}: shuffle test PASSED (cached)")
+                logger.debug(f"[{strategy.name}] Shuffle test PASSED (cached)")
                 EventTracker.shuffle_test_passed(
                     strategy_id, strategy.name, cached=True,
                     duration_ms=duration_ms, base_code_hash=base_code_hash
                 )
             else:
-                logger.info(f"Strategy {strategy.name}: shuffle test FAILED (cached)")
+                logger.info(f"[{strategy.name}] Shuffle test FAILED (cached)")
                 EventTracker.shuffle_test_failed(
                     strategy_id, strategy.name, reason="cached_failure",
                     cached=True, duration_ms=duration_ms, base_code_hash=base_code_hash
@@ -2481,7 +2483,7 @@ class ContinuousBacktesterProcess:
             # Extract actual class name from code (may differ from strategy.name)
             class_name = self._extract_class_name(strategy.code)
             if not class_name:
-                logger.warning(f"Strategy {strategy.name}: cannot extract class name from code")
+                logger.warning(f"[{strategy.name}] Cannot extract class name from code")
                 duration_ms = int((time.time() - start_time) * 1000)
                 EventTracker.shuffle_test_failed(
                     strategy_id, strategy.name, reason="class_name_not_found",
@@ -2492,7 +2494,7 @@ class ContinuousBacktesterProcess:
             strategy_instance = self._load_strategy_instance(strategy.code, class_name)
 
             if strategy_instance is None:
-                logger.warning(f"Strategy {strategy.name}: cannot load instance for shuffle test (class: {class_name})")
+                logger.warning(f"[{strategy.name}] Cannot load instance for shuffle test (class: {class_name})")
                 duration_ms = int((time.time() - start_time) * 1000)
                 EventTracker.shuffle_test_failed(
                     strategy_id, strategy.name, reason="instance_load_failed",
@@ -2507,13 +2509,13 @@ class ContinuousBacktesterProcess:
             self._cache_shuffle_result(base_code_hash, result.passed)
 
             if result.passed:
-                logger.debug(f"Strategy {strategy.name}: shuffle test PASSED")
+                logger.debug(f"[{strategy.name}] Shuffle test PASSED")
                 EventTracker.shuffle_test_passed(
                     strategy_id, strategy.name, cached=False,
                     duration_ms=duration_ms, base_code_hash=base_code_hash
                 )
             else:
-                logger.info(f"Strategy {strategy.name}: shuffle test FAILED - {result.details}")
+                logger.info(f"[{strategy.name}] Shuffle test FAILED: {result.details}")
                 EventTracker.shuffle_test_failed(
                     strategy_id, strategy.name, reason=str(result.details),
                     duration_ms=duration_ms, base_code_hash=base_code_hash
@@ -2616,13 +2618,13 @@ class ContinuousBacktesterProcess:
             # Extract actual class name from code (may differ from strategy.name)
             class_name = self._extract_class_name(strategy.code)
             if not class_name:
-                logger.warning(f"Strategy {strategy.name}: cannot extract class name for multi-window")
+                logger.warning(f"[{strategy.name}] Cannot extract class name for multi-window")
                 return (True, "class_name_not_found_skip")
 
             # Load strategy instance
             strategy_instance = self._load_strategy_instance(strategy.code, class_name)
             if strategy_instance is None:
-                logger.warning(f"Strategy {strategy.name}: cannot load instance for multi-window (class: {class_name})")
+                logger.warning(f"[{strategy.name}] Cannot load instance for multi-window (class: {class_name})")
                 return (True, "instance_load_failed_skip")
 
             # Get pairs and timeframe from backtest result
@@ -2630,7 +2632,7 @@ class ContinuousBacktesterProcess:
             timeframe = backtest_result.timeframe_tested
 
             if not pairs or not timeframe:
-                logger.warning(f"Strategy {strategy.name}: missing symbols/timeframe for multi-window")
+                logger.warning(f"[{strategy.name}] Missing symbols/timeframe for multi-window")
                 return (True, "missing_data_skip")
 
             # Run validation
@@ -2643,7 +2645,7 @@ class ContinuousBacktesterProcess:
             duration_ms = int((time.time() - start_time) * 1000)
 
             if passed:
-                logger.debug(f"Strategy {strategy.name}: multi-window PASSED ({reason})")
+                logger.debug(f"[{strategy.name}] Multi-window PASSED ({reason})")
                 avg_sharpe = metrics.get('avg_sharpe', 0) if metrics else 0
                 cv = metrics.get('cv', 0) if metrics else 0
                 EventTracker.multi_window_passed(
@@ -2651,7 +2653,7 @@ class ContinuousBacktesterProcess:
                     duration_ms=duration_ms, base_code_hash=base_code_hash
                 )
             else:
-                logger.info(f"Strategy {strategy.name}: multi-window FAILED ({reason})")
+                logger.info(f"[{strategy.name}] Multi-window FAILED ({reason})")
                 EventTracker.multi_window_failed(
                     strategy.id, strategy.name, reason,
                     duration_ms=duration_ms, base_code_hash=base_code_hash,

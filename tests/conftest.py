@@ -197,7 +197,7 @@ def dry_run_config():
         },
         'classification': {
             'score_weights': {
-                'edge': 0.40,
+                'expectancy': 0.40,
                 'sharpe': 0.30,
                 'consistency': 0.20,
                 'stability': 0.10

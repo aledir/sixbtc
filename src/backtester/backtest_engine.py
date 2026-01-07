@@ -465,8 +465,9 @@ class BacktestEngine:
             if max_positions is None:
                 max_positions = 10
 
+        strategy_name = strategy.__class__.__name__
         logger.info(
-            f"Running realistic portfolio backtest "
+            f"[{strategy_name}] Running portfolio backtest "
             f"({len(data)} symbols, max_positions={max_positions})"
         )
 
@@ -581,7 +582,7 @@ class BacktestEngine:
         # Log profiling results
         _t_total = time.perf_counter() - _t_start
         logger.info(
-            f"Backtest complete: {len(closed_trades)} trades, {len(symbols)} symbols, "
+            f"[{strategy_name}] Backtest complete: {len(closed_trades)} trades, {len(symbols)} symbols, "
             f"{len(common_index)} bars | "
             f"Time: {_t_total:.2f}s (align={_t_align:.2f}s, signals={_t_signals:.2f}s, "
             f"prepare={_t_prepare:.3f}s, sim={_t_simulation:.3f}s)"
@@ -779,8 +780,9 @@ class BacktestEngine:
             if max_positions is None:
                 max_positions = 10
 
+        strategy_name = strategy.__class__.__name__
         logger.info(
-            f"Running Python portfolio backtest "
+            f"[{strategy_name}] Running Python portfolio backtest "
             f"({len(data)} symbols, max_positions={max_positions})"
         )
 
@@ -1110,7 +1112,7 @@ class BacktestEngine:
         # Log profiling results
         _t_total = time.perf_counter() - _t_start
         logger.info(
-            f"Backtest complete: {len(closed_trades)} trades, {len(symbols)} symbols, "
+            f"[{strategy_name}] Backtest complete: {len(closed_trades)} trades, {len(symbols)} symbols, "
             f"{len(common_index)} bars | "
             f"Time: {_t_total:.2f}s (align={_t_align:.2f}s, signals={_t_signals:.2f}s, sim={_t_simulation:.2f}s)"
         )

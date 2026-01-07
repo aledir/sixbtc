@@ -232,23 +232,28 @@ backtesting:
   max_coins: 30
 
   # Training/Holdout split (unified approach)
-  # Total period = training_days + holdout_days = 210 days
-  training_days: 365         # 12 months for training (robust statistical validation)
+  # Total period = training_days + holdout_days = 760 days
+  training_days: 730         # 24 months for training (multiple market cycles)
   holdout_days: 30           # Last 30 days for validation (anti-overfitting + recency)
   min_coverage_pct: 0.80     # 80% minimum data coverage required for coins
+
+  # Minimum trades per timeframe (parallel arrays with timeframes config)
+  # timeframes: ['15m', '30m', '1h', '4h', '1d']
+  min_trades:
+    training: [600, 400, 300, 160, 100]  # For 730d period
+    holdout:  [30,  20,  15,  8,  5]     # For 30d period
 
   # Holdout validation thresholds
   holdout:
     max_degradation: 0.50    # Max 50% degradation from training to holdout
     min_sharpe: 0.0          # Holdout Sharpe must be positive
     recency_weight: 0.60     # Weight for holdout score in final ranking
-    min_trades: 3            # Minimum trades required in holdout period
 
   # Multi-window validation (post-scoring, only for score >= min_score)
   # Tests strategy on N non-overlapping time windows for consistency
   multi_window:
     enabled: true              # Enable multi-window validation
-    windows: 3                 # Number of validation windows
+    windows: 4                 # Number of validation windows (divides training period)
     min_avg_sharpe: 0.2        # Avg Sharpe across windows must be >= 0.2
     max_cv: 0.5                # Max coefficient of variation (std/avg) = 0.5
 
@@ -278,9 +283,9 @@ trading:
 # ==============================================================================
 scorer:
   # Unified scoring weights (used for both backtest and live)
-  # Score = (0.45 x Edge) + (0.25 x Sharpe) + (0.15 x Consistency) + (0.15 x Drawdown)
+  # Score = (0.45 x Expectancy) + (0.25 x Sharpe) + (0.15 x Consistency) + (0.15 x Drawdown)
   weights:
-    edge: 0.45        # Expectancy - most important metric
+    expectancy: 0.45  # Expectancy - most important metric
     sharpe: 0.25      # Risk-adjusted return
     consistency: 0.15 # Win rate
     drawdown: 0.15    # Penalizes high drawdown (lower DD = higher score)
@@ -325,7 +330,7 @@ classification:
   # DEPRECATED: Use scorer.weights instead (unified formula)
   # Kept for backwards compatibility during transition
   score_weights:
-    edge: 0.45
+    expectancy: 0.45
     sharpe: 0.25
     consistency: 0.15
     drawdown: 0.15

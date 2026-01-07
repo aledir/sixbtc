@@ -255,9 +255,10 @@ class EventTracker:
         score: float,
         sharpe: float,
         win_rate: float,
-        edge: float,
+        expectancy: float,
         consistency: float,
-        drawdown: float
+        drawdown: float,
+        duration_ms: Optional[int] = None
     ) -> bool:
         """Emit event when strategy is scored after backtest."""
         return EventTracker.emit(
@@ -269,9 +270,10 @@ class EventTracker:
             score=score,
             sharpe=sharpe,
             win_rate=win_rate,
-            edge=edge,
+            expectancy=expectancy,
             consistency=consistency,
-            drawdown=drawdown
+            drawdown=drawdown,
+            duration_ms=duration_ms
         )
 
     @staticmethod
@@ -279,7 +281,8 @@ class EventTracker:
         strategy_id: UUID,
         strategy_name: str,
         score: float,
-        threshold: float
+        threshold: float,
+        duration_ms: Optional[int] = None
     ) -> bool:
         """Emit event when strategy is rejected due to low score."""
         return EventTracker.emit(
@@ -290,7 +293,8 @@ class EventTracker:
             strategy_name=strategy_name,
             score=score,
             threshold=threshold,
-            reason="score_below_threshold"
+            reason="score_below_threshold",
+            duration_ms=duration_ms
         )
 
     @staticmethod

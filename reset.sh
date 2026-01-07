@@ -27,6 +27,7 @@ TRUNCATE TABLE backtest_results CASCADE;
 TRUNCATE TABLE strategies CASCADE;
 TRUNCATE TABLE strategy_templates CASCADE;
 TRUNCATE TABLE pipeline_metrics_snapshots CASCADE;
+TRUNCATE TABLE strategy_events CASCADE;
 " 2>/dev/null
 echo "- Database reset"
 

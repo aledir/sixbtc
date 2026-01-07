@@ -108,28 +108,29 @@ class MultiWindowValidator:
         # Run backtest on each window
         window_results = []
 
-        for i, (end_offset_days, train_days, holdout_days) in enumerate(windows):
-            end_date = datetime.now() - timedelta(days=end_offset_days)
+        for i, (start_offset_days, window_days) in enumerate(windows):
+            # end_date = end of window = today - (start_offset - window_days)
+            end_date = datetime.now() - timedelta(days=start_offset_days - window_days)
+            period_desc = f"{start_offset_days}d-{start_offset_days - window_days}d ago"
 
             try:
-                # Load data for this window
-                training_data, holdout_data = self.data_loader.load_multi_symbol_training_holdout(
+                # Load data for this window (no train/holdout split needed)
+                window_data = self.data_loader.load_multi_symbol(
                     symbols=pairs,
                     timeframe=timeframe,
-                    training_days=train_days,
-                    holdout_days=holdout_days,
+                    days=window_days,
                     end_date=end_date,
                     target_count=self.max_coins
                 )
 
-                if not training_data:
-                    logger.debug(f"Window {i+1}: no data loaded, skipping")
+                if not window_data:
+                    logger.debug(f"Window {i+1} ({period_desc}): no data loaded, skipping")
                     continue
 
-                # Run backtest on training period of this window
+                # Run backtest on this window
                 result = self.engine.backtest(
                     strategy=strategy,
-                    data=training_data,
+                    data=window_data,
                     timeframe=timeframe
                 )
 
@@ -140,16 +141,17 @@ class MultiWindowValidator:
                         'sharpe': sharpe,
                         'trades': result.get('total_trades', 0),
                         'win_rate': result.get('win_rate', 0),
-                        'end_date': end_date.strftime('%Y-%m-%d')
+                        'period': period_desc
                     })
                     logger.debug(
-                        f"Window {i+1}: Sharpe={sharpe:.2f}, trades={result.get('total_trades', 0)}"
+                        f"Window {i+1} ({period_desc}): Sharpe={sharpe:.2f}, "
+                        f"trades={result.get('total_trades', 0)}"
                     )
                 else:
-                    logger.debug(f"Window {i+1}: no trades")
+                    logger.debug(f"Window {i+1} ({period_desc}): no trades")
 
             except Exception as e:
-                logger.warning(f"Window {i+1} backtest failed: {e}")
+                logger.warning(f"Window {i+1} ({period_desc}) backtest failed: {e}")
                 continue
 
         # Analyze results
@@ -207,36 +209,36 @@ class MultiWindowValidator:
 
         return (passed, reason, metrics)
 
-    def _generate_windows(self) -> List[Tuple[int, int, int]]:
+    def _generate_windows(self) -> List[Tuple[int, int]]:
         """
-        Generate time window definitions.
+        Divide the backtest period into N non-overlapping windows.
+
+        Instead of looking further back in time (which causes 0 symbols),
+        we divide the SAME period used by the main backtest into N windows.
+
+        With 760d total (730 training + 30 holdout) and 4 windows:
+        - Each window = 190d
+        - Window 1: oldest (760d-570d ago)
+        - Window 4: most recent (190d-0d ago)
 
         Returns:
-            List of (end_offset_days, training_days, holdout_days) tuples
-
-        Example with 365d training + 30d holdout and 3 windows:
-        - Window 1: end=today, train=180d, holdout=30d (most recent)
-        - Window 2: end=today-90d, train=180d, holdout=30d
-        - Window 3: end=today-180d, train=180d, holdout=30d
+            List of (start_offset_days, window_days) tuples
+            - start_offset_days: days from today to START of window
+            - window_days: duration of the window
         """
-        # For multi-window, use shorter training period (180d vs 365d)
-        # This allows more non-overlapping windows in the available data
-        window_training = 180
-        window_holdout = 30
-        total_window = window_training + window_holdout
-
-        # Calculate offset between windows to minimize overlap
-        # With 365+30 data, we can fit ~3 windows of 180+30 each
-        available_data = self.training_days + self.holdout_days  # Total data we have
-        window_offset = (available_data - total_window) // (self.n_windows - 1) if self.n_windows > 1 else 0
-
-        # Ensure minimum offset of 30 days between holdout periods
-        window_offset = max(window_offset, 30)
+        total_days = self.training_days + self.holdout_days
+        window_days = total_days // self.n_windows
 
         windows = []
         for i in range(self.n_windows):
-            end_offset = i * window_offset
-            windows.append((end_offset, window_training, window_holdout))
+            # i=0: oldest window, i=n-1: most recent window
+            start_offset = total_days - (i * window_days)
+            windows.append((start_offset, window_days))
+
+        logger.debug(
+            f"Generated {self.n_windows} windows of {window_days}d each "
+            f"covering {total_days}d total"
+        )
 
         return windows
 

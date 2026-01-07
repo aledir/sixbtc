@@ -9,6 +9,7 @@ Manages the ACTIVE strategy pool with leaderboard logic:
 Single Responsibility: Manage pool membership (no scoring, no deployment)
 """
 
+import threading
 from datetime import datetime, UTC
 from typing import Optional, Tuple
 from uuid import UUID
@@ -46,6 +47,9 @@ class PoolManager:
         self.min_score = pool_config['min_score']
 
         self.scorer = BacktestScorer(config)
+
+        # Lock to prevent race condition when multiple threads try to enter pool
+        self._pool_lock = threading.Lock()
 
         logger.info(
             f"PoolManager initialized: max_size={self.max_size}, "
@@ -134,46 +138,48 @@ class PoolManager:
         Returns:
             Tuple of (success: bool, reason: str)
         """
-        # Rule 1: Score below minimum threshold
+        # Rule 1: Score below minimum threshold (no lock needed)
         if score < self.min_score:
             self._retire_strategy(strategy_id, f"score {score:.1f} < threshold {self.min_score}")
             return False, f"Score {score:.1f} below minimum {self.min_score}"
 
-        with get_session() as session:
-            # Get current pool count
-            pool_count = (
-                session.query(func.count(Strategy.id))
-                .filter(Strategy.status == 'ACTIVE')
-                .scalar()
-            ) or 0
+        # Lock to prevent race condition: check + insert must be atomic
+        with self._pool_lock:
+            with get_session() as session:
+                # Get current pool count
+                pool_count = (
+                    session.query(func.count(Strategy.id))
+                    .filter(Strategy.status == 'ACTIVE')
+                    .scalar()
+                ) or 0
 
-            # Rule 2: Pool not full
-            if pool_count < self.max_size:
-                self._activate_strategy(strategy_id, score)
-                return True, f"Pool not full ({pool_count}/{self.max_size})"
+                # Rule 2: Pool not full
+                if pool_count < self.max_size:
+                    self._activate_strategy(strategy_id, score)
+                    return True, f"Pool not full ({pool_count}/{self.max_size})"
 
-            # Rule 3 & 4: Pool full - check if better than worst
-            worst = self.get_worst_strategy_in_pool()
-            if worst is None:
-                # Edge case: pool count says full but no strategies found
-                self._activate_strategy(strategy_id, score)
-                return True, "Pool was empty"
+                # Rule 3 & 4: Pool full - check if better than worst
+                worst = self.get_worst_strategy_in_pool()
+                if worst is None:
+                    # Edge case: pool count says full but no strategies found
+                    self._activate_strategy(strategy_id, score)
+                    return True, "Pool was empty"
 
-            worst_id, worst_name, worst_score = worst
+                worst_id, worst_name, worst_score = worst
 
-            if score > worst_score:
-                # Evict worst and enter
-                self._retire_strategy(worst_id, f"evicted by {strategy_id} (score {worst_score:.1f} < {score:.1f})")
-                self._activate_strategy(strategy_id, score)
-                logger.info(
-                    f"Leaderboard: evicted {worst_name} (score={worst_score:.1f}), "
-                    f"admitted strategy {strategy_id} (score={score:.1f})"
-                )
-                return True, f"Evicted {worst_name} (score {worst_score:.1f})"
+                if score > worst_score:
+                    # Evict worst and enter
+                    self._retire_strategy(worst_id, f"evicted by {strategy_id} (score {worst_score:.1f} < {score:.1f})")
+                    self._activate_strategy(strategy_id, score)
+                    logger.info(
+                        f"[{worst_name}] EVICTED by {strategy_id} "
+                        f"(score {worst_score:.1f} < {score:.1f})"
+                    )
+                    return True, f"Evicted {worst_name} (score {worst_score:.1f})"
 
-            # Rule 4: Not good enough
-            self._retire_strategy(strategy_id, f"score {score:.1f} <= pool minimum {worst_score:.1f}")
-            return False, f"Score {score:.1f} <= pool minimum {worst_score:.1f}"
+                # Rule 4: Not good enough
+                self._retire_strategy(strategy_id, f"score {score:.1f} <= pool minimum {worst_score:.1f}")
+                return False, f"Score {score:.1f} <= pool minimum {worst_score:.1f}"
 
     def _activate_strategy(self, strategy_id: UUID, score: float):
         """Set strategy to ACTIVE status with score."""
@@ -184,7 +190,7 @@ class PoolManager:
                 strategy.score_backtest = score
                 strategy.last_backtested_at = datetime.now(UTC)
                 session.commit()
-                logger.info(f"Strategy {strategy.name} entered ACTIVE pool (score={score:.1f})")
+                logger.info(f"[{strategy.name}] Entered ACTIVE pool (score={score:.1f})")
 
     def _retire_strategy(self, strategy_id: UUID, reason: str):
         """Set strategy to RETIRED status."""
@@ -194,7 +200,7 @@ class PoolManager:
                 strategy.status = 'RETIRED'
                 strategy.retired_at = datetime.now(UTC)
                 session.commit()
-                logger.info(f"Strategy {strategy.name} RETIRED: {reason}")
+                logger.info(f"[{strategy.name}] RETIRED: {reason}")
 
     def revalidate_after_retest(self, strategy_id: UUID, new_score: float) -> Tuple[bool, str]:
         """
@@ -249,5 +255,5 @@ class PoolManager:
             strategy.last_backtested_at = datetime.now(UTC)
             session.commit()
 
-            logger.info(f"Strategy {strategy.name} re-validated in ACTIVE pool (new score={new_score:.1f})")
+            logger.info(f"[{strategy.name}] Re-validated in ACTIVE pool (new_score={new_score:.1f})")
             return True, f"Re-validated with score {new_score:.1f}"

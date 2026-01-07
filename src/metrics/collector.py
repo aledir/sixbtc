@@ -466,27 +466,32 @@ class MetricsCollector:
 
     def _get_pool_quality(self, session) -> Dict[str, Any]:
         """Get quality metrics for ACTIVE pool strategies."""
+        # Note: Use training backtest metrics (more stable than holdout)
+        # weighted_sharpe_pure is inflated by short holdout period
         result = session.execute(
             select(
-                func.avg(BacktestResult.weighted_expectancy),
-                func.avg(BacktestResult.weighted_sharpe_pure),
-                func.avg(BacktestResult.weighted_win_rate),
-                func.avg(BacktestResult.weighted_max_drawdown),
+                func.avg(BacktestResult.expectancy),      # Training expectancy
+                func.avg(BacktestResult.sharpe_ratio),    # Training sharpe (not inflated)
+                func.avg(BacktestResult.win_rate),        # Training win rate
+                func.avg(BacktestResult.max_drawdown),    # Training drawdown
             )
             .join(Strategy, BacktestResult.strategy_id == Strategy.id)
-            .where(Strategy.status == 'ACTIVE')
+            .where(and_(
+                Strategy.status == 'ACTIVE',
+                BacktestResult.period_type == 'training'
+            ))
         ).first()
 
         if result and result[0] is not None:
             return {
-                'edge_avg': float(result[0]) if result[0] else None,
+                'expectancy_avg': float(result[0]) if result[0] else None,
                 'sharpe_avg': float(result[1]) if result[1] else None,
                 'winrate_avg': float(result[2]) if result[2] else None,
                 'dd_avg': float(result[3]) if result[3] else None,
             }
 
         return {
-            'edge_avg': None,
+            'expectancy_avg': None,
             'sharpe_avg': None,
             'winrate_avg': None,
             'dd_avg': None,
@@ -494,16 +499,19 @@ class MetricsCollector:
 
     def _get_retest_stats_24h(self, session, since: datetime) -> Dict[str, Any]:
         """Get re-backtest statistics for last 24h."""
-        # Count retest events (look for stage=backtest with retest indicator)
-        # Retest events are tracked via the strategy's last_backtested_at update
-        # We look for strategies that were ACTIVE and got retested
+        # A retest is when a strategy that was already ACTIVE gets backtested again.
+        # We detect this by: created_at < since (strategy existed before 24h window)
+        # AND last_backtested_at >= since (backtested in last 24h)
+        # First backtest: created_at and last_backtested_at are both recent
+        # Retest: created_at is old, last_backtested_at is recent
 
-        # For now, we use a simpler approach: count strategies with
-        # last_backtested_at in the last 24h that are ACTIVE or RETIRED
+        # Retested = strategies created BEFORE the 24h window
+        # but backtested WITHIN the 24h window (true retest)
         retested = session.execute(
             select(func.count(Strategy.id))
             .where(and_(
-                Strategy.last_backtested_at >= since,
+                Strategy.created_at < since,  # Created before 24h ago
+                Strategy.last_backtested_at >= since,  # Backtested in last 24h
                 Strategy.status.in_(['ACTIVE', 'RETIRED'])
             ))
         ).scalar() or 0
@@ -512,12 +520,13 @@ class MetricsCollector:
         passed = session.execute(
             select(func.count(Strategy.id))
             .where(and_(
+                Strategy.created_at < since,
                 Strategy.last_backtested_at >= since,
                 Strategy.status == 'ACTIVE'
             ))
         ).scalar() or 0
 
-        # Retired from retest
+        # Retired from retest (retired in last 24h)
         retired = session.execute(
             select(func.count(Strategy.id))
             .where(and_(
@@ -590,13 +599,19 @@ class MetricsCollector:
         """Determine overall status and issue description."""
         active = queue_depths.get('ACTIVE', 0)
         live = queue_depths.get('LIVE', 0)
+        generated = queue_depths.get('GENERATED', 0)
+        validated = queue_depths.get('VALIDATED', 0)
         bt_waiting = backpressure.get('bt_waiting', 0)
         bt_processing = backpressure.get('bt_processing', 0)
 
-        # Check for issues
+        # Pipeline activity indicators
+        pipeline_has_work = generated > 0 or validated > 0 or bt_processing > 0
+        pipeline_throughput = sum(throughput.values())
+
+        # Check for real issues (not just empty pool)
         issues = []
 
-        # Backtest stalled
+        # Backtest stalled (waiting but not processing)
         if bt_waiting > 0 and bt_processing == 0 and throughput.get('bt', 0) == 0:
             issues.append(f"Backtest stalled ({bt_waiting} waiting)")
 
@@ -604,17 +619,18 @@ class MetricsCollector:
         if backpressure.get('gen_full', False):
             issues.append("Generator queue full")
 
-        # No ACTIVE strategies
-        if active == 0 and live == 0:
-            issues.append("No ACTIVE strategies")
-
         # Determine status
-        if not issues:
-            return 'HEALTHY', None
-        elif 'stalled' in ' '.join(issues).lower() or active == 0:
+        if issues:
+            # Real problems
             return 'DEGRADED', issues[0]
+        elif active == 0 and live == 0:
+            # Pool empty but check if pipeline is working
+            if pipeline_has_work or pipeline_throughput > 0:
+                return 'WARMING_UP', None
+            else:
+                return 'IDLE', None
         else:
-            return 'DEGRADED', issues[0]
+            return 'HEALTHY', None
 
     def _save_snapshot(
         self,
@@ -655,7 +671,7 @@ class MetricsCollector:
             overall_status=status.lower(),
             avg_sharpe=pool_quality.get('sharpe_avg'),
             avg_win_rate=pool_quality.get('winrate_avg'),
-            avg_expectancy=pool_quality.get('edge_avg'),
+            avg_expectancy=pool_quality.get('expectancy_avg'),
             pattern_count=0,
             ai_count=0,
         )
@@ -716,16 +732,24 @@ class MetricsCollector:
         f = queue_depths.get('FAILED', 0)
         logger.info(f'state generated={g} validated={v} active={a} live={l} retired={r} failed={f}')
 
-        # 3. funnel_24h
+        # 3. funnel_24h (format: count/base(pct%) where base is previous stage)
+        # gen→val→bt→score→shuf→mw→pool
+        gen = funnel["generated"]
+        val = funnel["validated"]
+        bt = funnel["backtested"]
+        score = funnel["score_ok"]
+        shuf = funnel["shuffle_ok"]
+        mw = funnel["mw_ok"]
+        pool = funnel["pool"]
         logger.info(
             f'funnel_24h '
-            f'generated={funnel["generated"]} '
-            f'validated={funnel["validated"]}/{fmt_pct(funnel["validated_pct"])} '
-            f'backtested={funnel["backtested"]}/{fmt_pct(funnel["backtested_pct"])} '
-            f'score_ok={funnel["score_ok"]}/{fmt_pct(funnel["score_ok_pct"])} '
-            f'shuffle_ok={funnel["shuffle_ok"]}/{fmt_pct(funnel["shuffle_ok_pct"])} '
-            f'mw_ok={funnel["mw_ok"]}/{fmt_pct(funnel["mw_ok_pct"])} '
-            f'pool={funnel["pool"]}/{fmt_pct(funnel["pool_pct"])}'
+            f'generated={gen} '
+            f'validated={val}/{gen}({fmt_pct(funnel["validated_pct"])}) '
+            f'backtested={bt}/{val}({fmt_pct(funnel["backtested_pct"])}) '
+            f'score_ok={score}/{bt}({fmt_pct(funnel["score_ok_pct"])}) '
+            f'shuffle_ok={shuf}/{score}({fmt_pct(funnel["shuffle_ok_pct"])}) '
+            f'mw_ok={mw}/{shuf}({fmt_pct(funnel["mw_ok_pct"])}) '
+            f'pool={pool}/{mw}({fmt_pct(funnel["pool_pct"])})'
         )
 
         # 4. timing_avg
@@ -779,21 +803,21 @@ class MetricsCollector:
         )
 
         # 9. pool_quality
-        edge_str = f'{pool_quality["edge_avg"]*100:.1f}%' if pool_quality["edge_avg"] else "--"
+        expectancy_str = f'{pool_quality["expectancy_avg"]*100:.1f}%' if pool_quality["expectancy_avg"] else "--"
         logger.info(
             f'pool_quality '
-            f'edge_avg={edge_str} '
+            f'expectancy_avg={expectancy_str} '
             f'sharpe_avg={fmt_float(pool_quality["sharpe_avg"])} '
             f'winrate_avg={fmt_pct_float(pool_quality["winrate_avg"])} '
             f'dd_avg={fmt_pct_float(pool_quality["dd_avg"])}'
         )
 
-        # 10. retest_24h
+        # 10. retest_24h (tested=re-backtested strategies, retired=all retirements including pool eviction)
         logger.info(
             f'retest_24h '
             f'tested={retest_stats["tested"]} '
             f'passed={retest_stats["passed"]} '
-            f'retired={retest_stats["retired"]}'
+            f'evicted_24h={retest_stats["retired"]}'
         )
 
         # 11. live_rotation
