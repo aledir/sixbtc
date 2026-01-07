@@ -59,7 +59,7 @@ class GeneratedStrategy:
     validation_errors: list[str]
     leverage: int = 1
     pattern_id: Optional[str] = None  # Pattern UUID if pattern-based
-    generation_mode: str = "custom"  # "pattern", "custom", or "template"
+    generation_mode: str = "ai_free"  # "pattern", "ai_free", "ai_assigned", "optimized"
     template_id: Optional[str] = None  # Template UUID if template-based
     parameters: Optional[dict] = None  # Parameters used if template-based
     parameter_hash: Optional[str] = None  # Hash for deduplication
@@ -134,16 +134,16 @@ class StrategyBuilder:
         # Initialize indicator combinator for AI strategy variety (Phase 3)
         self.indicator_combinator = IndicatorCombinator()
 
-        # Cache strategy sources config
+        # Cache strategy sources config (names match generation_mode values)
         self._strategy_sources = self.config.get('generation', {}).get('strategy_sources', {
-            'pattern_based': {'enabled': True},
-            'ai_fixed_indicators': {'enabled': True},
-            'ai_parametric_indicators': {'enabled': True}
+            'pattern': {'enabled': True},
+            'ai_free': {'enabled': True},
+            'ai_assigned': {'enabled': True}
         })
 
-        # AI source ratio: probability of using ai_fixed_indicators when both enabled
-        # 0.7 = 70% ai_fixed, 30% ai_parametric
-        self._ai_fixed_ratio = self.config.get('generation', {}).get('ai_fixed_ratio', 0.7)
+        # AI source ratio: probability of using ai_free when both AI sources enabled
+        # 0.7 = 70% ai_free, 30% ai_assigned
+        self._ai_free_ratio = self.config.get('generation', {}).get('ai_free_ratio', 0.7)
 
     def _default_config(self) -> dict:
         """Default configuration (for tests only - production must provide full config)"""
@@ -273,12 +273,12 @@ class StrategyBuilder:
                     strategy_type=result.strategy_type,
                     timeframe=result.timeframe,
                     patterns_used=result.patterns_used,
-                    ai_provider="direct",
+                    ai_provider="direct",  # No AI used - direct code embedding
                     validation_passed=result.validation_passed,
                     validation_errors=result.validation_errors,
                     leverage=result.leverage,
                     pattern_id=result.pattern_id,
-                    generation_mode="direct",
+                    generation_mode="pattern",  # From pattern-discovery API
                     pattern_coins=pattern_coins
                 )
             elif mode == "direct":
@@ -389,7 +389,7 @@ class StrategyBuilder:
                 validation_errors=errors,
                 leverage=leverage,
                 pattern_id=pattern.id,
-                generation_mode="ai_pattern",
+                generation_mode="pattern",  # From pattern-discovery API (AI-wrapped)
                 pattern_coins=pattern_coins
             )
 
@@ -455,10 +455,10 @@ class StrategyBuilder:
         """
         Generate strategies using configured sources.
 
-        Sources (configurable via strategy_sources):
-        1. pattern_based: Strategies from pattern-discovery API
-        2. ai_fixed_indicators: AI with self-chosen indicators
-        3. ai_parametric_indicators: AI with assigned indicator combinations
+        Sources (configurable via strategy_sources, names match generation_mode):
+        1. pattern: PatStrat_* from pattern-discovery API
+        2. ai_free: Strategy_* - AI chooses indicators freely
+        3. ai_assigned: Strategy_* - AI uses IndicatorCombinator-assigned indicators
 
         Args:
             strategy_type: Type of strategy (MOM, REV, TRN, etc.)
@@ -471,9 +471,9 @@ class StrategyBuilder:
             List of GeneratedStrategy objects
         """
         # ==================================================================
-        # SOURCE 1: Pattern-based generation
+        # SOURCE 1: Pattern-based generation (generation_mode='pattern')
         # ==================================================================
-        if self._is_source_enabled('pattern_based'):
+        if self._is_source_enabled('pattern'):
             pattern = None
             if patterns and len(patterns) > 0:
                 pattern = patterns[0]
@@ -501,41 +501,41 @@ class StrategyBuilder:
         # ==================================================================
         # SOURCE 2 & 3: AI-based generation (no patterns available)
         # ==================================================================
-        ai_parametric_enabled = self._is_source_enabled('ai_parametric_indicators')
-        ai_fixed_enabled = self._is_source_enabled('ai_fixed_indicators')
+        ai_assigned_enabled = self._is_source_enabled('ai_assigned')
+        ai_free_enabled = self._is_source_enabled('ai_free')
 
-        if not ai_parametric_enabled and not ai_fixed_enabled:
+        if not ai_assigned_enabled and not ai_free_enabled:
             logger.warning("All AI generation sources disabled and no patterns")
             return []
 
         # Decide which AI mode to use
-        if ai_fixed_enabled and ai_parametric_enabled:
-            # Both enabled: use ratio to decide (e.g., 70% fixed, 30% parametric)
-            use_fixed = random.random() < self._ai_fixed_ratio
-            if use_fixed:
-                logger.debug(f"AI mode: fixed_indicators (ratio={self._ai_fixed_ratio:.0%})")
-                return self._generate_with_fixed_indicators(strategy_type, timeframe)
+        if ai_free_enabled and ai_assigned_enabled:
+            # Both enabled: use ratio to decide (e.g., 70% ai_free, 30% ai_assigned)
+            use_free = random.random() < self._ai_free_ratio
+            if use_free:
+                logger.debug(f"AI mode: ai_free (ratio={self._ai_free_ratio:.0%})")
+                return self._generate_ai_free(strategy_type, timeframe)
             else:
-                logger.debug(f"AI mode: parametric_indicators (ratio={1-self._ai_fixed_ratio:.0%})")
-                return self._generate_with_indicator_combinator(strategy_type, timeframe)
-        elif ai_fixed_enabled:
-            # Only fixed enabled
-            return self._generate_with_fixed_indicators(strategy_type, timeframe)
+                logger.debug(f"AI mode: ai_assigned (ratio={1-self._ai_free_ratio:.0%})")
+                return self._generate_ai_assigned(strategy_type, timeframe)
+        elif ai_free_enabled:
+            # Only ai_free enabled
+            return self._generate_ai_free(strategy_type, timeframe)
         else:
-            # Only parametric enabled
-            return self._generate_with_indicator_combinator(strategy_type, timeframe)
+            # Only ai_assigned enabled
+            return self._generate_ai_assigned(strategy_type, timeframe)
 
-    def _generate_with_fixed_indicators(
+    def _generate_ai_free(
         self,
         strategy_type: StrategyType,
         timeframe: str
     ) -> list[GeneratedStrategy]:
         """
-        Generate strategy using AI with self-chosen indicators (legacy mode).
+        Generate strategy with AI freely choosing indicators (generation_mode='ai_free').
 
         AI decides which indicators to use based on strategy type.
         """
-        logger.info(f"Using AI with fixed indicators for {strategy_type}/{timeframe}")
+        logger.info(f"Using ai_free for {strategy_type}/{timeframe}")
 
         if not self.template_generator:
             logger.error("Template generator not available")
@@ -550,18 +550,18 @@ class StrategyBuilder:
             return [self._convert_parametric_strategy(strategies[0], template)]
         return []
 
-    def _generate_with_indicator_combinator(
+    def _generate_ai_assigned(
         self,
         strategy_type: str,
         timeframe: str
     ) -> list[GeneratedStrategy]:
         """
-        Generate strategy using IndicatorCombinator for unique indicator combinations.
+        Generate strategy with IndicatorCombinator-assigned indicators (generation_mode='ai_assigned').
 
         Ensures variety by tracking used combinations in database.
         Space: ~112 billion unique combinations.
         """
-        logger.info(f"Using IndicatorCombinator for {strategy_type}/{timeframe}")
+        logger.info(f"Using ai_assigned for {strategy_type}/{timeframe}")
 
         if not self.template_generator:
             logger.error("Template generator not available")
@@ -605,7 +605,7 @@ class StrategyBuilder:
             self._mark_combination_used(
                 strategy_type, timeframe, main_indicators, filter_indicators
             )
-            return [self._convert_parametric_strategy(strategies[0], template)]
+            return [self._convert_parametric_strategy(strategies[0], template, "ai_assigned")]
 
         return []
 
@@ -753,12 +753,12 @@ class StrategyBuilder:
 
         # Summary
         pattern_count = sum(1 for s in strategies if s.generation_mode == "pattern")
-        template_count = sum(1 for s in strategies if s.generation_mode == "template")
+        ai_count = sum(1 for s in strategies if s.generation_mode in ("ai_free", "ai_assigned"))
         validated_count = sum(1 for s in strategies if s.validation_passed)
 
         logger.info(
             f"Batch generation complete: {len(strategies)} strategies "
-            f"({pattern_count} pattern-based, {template_count} template-based), "
+            f"({pattern_count} pattern, {ai_count} AI), "
             f"{validated_count} validated"
         )
 
@@ -840,7 +840,8 @@ class StrategyBuilder:
     def _convert_parametric_strategy(
         self,
         ps: ParametricStrategy,
-        template: StrategyTemplate
+        template: StrategyTemplate,
+        generation_mode: str = "ai_free"
     ) -> GeneratedStrategy:
         """Convert ParametricStrategy to GeneratedStrategy format"""
         return GeneratedStrategy(
@@ -849,12 +850,12 @@ class StrategyBuilder:
             strategy_type=ps.strategy_type,
             timeframe=ps.timeframe,
             patterns_used=[],
-            ai_provider=template.ai_provider or "template",
+            ai_provider=template.ai_provider or "unknown",
             validation_passed=ps.validation_passed,
             validation_errors=ps.validation_errors,
             leverage=1,  # Set from parameters if available
             pattern_id=None,
-            generation_mode="template",
+            generation_mode=generation_mode,
             template_id=ps.template_id,
             parameters=ps.parameters,
             parameter_hash=ps.parameter_hash

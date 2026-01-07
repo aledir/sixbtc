@@ -6488,4 +6488,572 @@ puoi riscrivere aggiornandolo al codice attuale quello che mi hai detto prima?
   # + chiamata diretta a _promote_to_active_pool()
   Le strategie template vanno direttamente al pool manager per shuffle/multi-window/pool entry. Nessun loop.
 
-  
+  ● Ora riscrivo il flusso aggiornato al codice attuale:
+
+  ---
+  FLUSSO STRATEGIE - VERSIONE CORRETTA (Post-Fix)
+
+  A) PATTERN-BASED (generation_mode='pattern')
+
+  1. Generator (strategy_builder.py)
+  class PatStrat_MOM_abc123(StrategyCore):
+      # Params di DEFAULT (NON ottimizzati!)
+      sl_pct = 0.03      # 3% - placeholder dal pattern
+      tp_pct = 0.0       # 0% - nessun take profit
+      leverage = 1       # 1x - conservativo
+      exit_after_bars = 0
+
+      def generate_signal(self, df):
+          # LOGICA DI ENTRY (da pattern-discovery)
+          rsi = ta.RSI(df['close'], 14)
+          if rsi.iloc[-1] < 30:
+              return Signal(direction='LONG', ...)
+  - generation_mode = "pattern"
+  - status = "GENERATED"
+
+  2. Validator
+  - Controlla sintassi Python
+  - Verifica che erediti da StrategyCore
+  - status: GENERATED → VALIDATED
+
+  3. Backtester (PARAMETRIC OPTIMIZATION)
+  # main_continuous.py:592
+  use_parametric = True  # SEMPRE true ora
+  Testa 1050 combinazioni di parametri (dalla costante PARAM_SPACE):
+  - sl_pct: [1%, 1.5%, 2%, 3%, 5%]
+  - tp_pct: [0%, 2%, 3%, 5%, 7%, 10%]
+  - exit_bars: [0, 10, 20, 50, 100]
+  - leverage: [1, 2, 3, 5, 10, 20, 40]
+
+  4. Per ogni combo che passa le threshold:
+
+  Combo #47: sl=2%, tp=5%, lev=3, exit=20
+  ├── Training backtest (180 giorni): Sharpe=1.2, WR=58%, Trades=150
+  ├── THRESHOLD CHECK: ✓ Sharpe>=0.3, WR>=35%, Trades>=10
+  ├── Holdout backtest (30 giorni): Sharpe=0.9, WR=55%
+  ├── DEGRADATION CHECK: 25% degradation (max 50%) ✓
+  └── PASSA → Crea nuova strategia
+
+  5. Backtester crea NUOVA strategia (_create_parametric_strategy)
+  # main_continuous.py:1974
+  strategy.status = "VALIDATED"  # Pronta per promozione diretta
+
+  # main_continuous.py:1999
+  strategy.generation_mode = 'template'  # Marca come derivata
+
+  # main_continuous.py:2002
+  strategy.tested_at = datetime.now(UTC)  # Già testata
+
+  class Strategy_MOM_xyz789(StrategyCore):
+      # Params OTTIMIZZATI (dalla combo #47)
+      sl_pct = 0.02      # 2% - ottimizzato!
+      tp_pct = 0.05      # 5% - ottimizzato!
+      leverage = 3       # 3x - ottimizzato!
+      exit_after_bars = 20
+
+      def generate_signal(self, df):
+          # STESSA LOGICA della strategia originale
+          ...
+
+  6. Promozione DIRETTA al pool (_promote_to_active_pool)
+  # main_continuous.py:900-916
+  entered, promo_reason = self._promote_to_active_pool(
+      parametric_strategy_id, backtest_for_promo
+  )
+
+  Il pool manager (pool_manager.py) esegue:
+  1. Shuffle test (anti-lookahead empirico)
+  2. Multi-window validation (4 finestre temporali)
+  3. Pool entry (leaderboard, max 300 strategie)
+
+  status: VALIDATED → ACTIVE (se entra nel pool)
+
+  ---
+  B) AI-BASED (generation_mode='ai' o 'ai_pattern')
+
+  Attualmente il tipo AI con indicatori fissi è disabilitato. L'unica fonte AI attiva usa l'IndicatorCombinator:
+
+  1. Generator (strategy_builder.py + indicator_combinator.py)
+  class Strategy_REV_def456(StrategyCore):
+      # Params di DEFAULT (NON ottimizzati!)
+      sl_pct = 0.02      # 2% - default dal parametric_generator
+      tp_pct = 0.04      # 4% - default
+      leverage = 2       # 2x - default
+      exit_after_bars = 0
+
+      def generate_signal(self, df):
+          # LOGICA da AI (indicatori scelti dal combinator)
+          rsi = ta.RSI(df['close'], 14)
+          bb = ta.BBANDS(df['close'])
+          if rsi.iloc[-1] < 25 and df['close'].iloc[-1] < bb['lower'].iloc[-1]:
+              return Signal(direction='LONG', ...)
+  - generation_mode = "ai" oppure "ai_pattern"
+  - status = "GENERATED"
+
+  2-6. STESSO FLUSSO di Pattern-based:
+  - Validator → VALIDATED
+  - Backtester: parametric optimization (1050 combos)
+  - Per ogni combo che passa:
+    - Crea nuova strategia con generation_mode='template', status='VALIDATED'
+    - Promozione diretta → shuffle → multi-window → pool
+
+  ---
+  C) TEMPLATE (generation_mode='template')
+
+  Queste NON vengono generate direttamente. Sono create dal Backtester durante la parametric optimization (step 5 sopra).
+
+  Caratteristiche:
+  - Hanno params GIÀ OTTIMIZZATI nel codice
+  - status = "VALIDATED" dalla creazione
+  - tested_at già impostato
+  - NON rientrano nella pipeline (il bug era qui!)
+
+  Flusso diretto:
+  Creazione → _promote_to_active_pool() → shuffle → multi-window → ACTIVE
+
+  ---
+  RIASSUNTO DIFFERENZE (Aggiornato)
+
+  | Tipo     | Chi genera                       | Params      | Backtester fa parametric? | Promozione   |
+  |----------|----------------------------------|-------------|---------------------------|--------------|
+  | Pattern  | Generator (pattern-discovery)    | DEFAULT     | SÌ (1050 combos)          | Via template |
+  | AI       | Generator (indicator combinator) | DEFAULT     | SÌ (1050 combos)          | Via template |
+  | Template | Backtester                       | OTTIMIZZATI | NO (già testato)          | DIRETTA      |
+
+  ---
+  PIPELINE COMPLETA (Stati)
+
+  GENERATED ─────► VALIDATED ─────────────────────► ACTIVE ─────► LIVE ─────► RETIRED
+      │               │                                │
+      │               │  Parametric optimization       │
+      │               │  (1050 combos)                 │
+      │               │          │                     │
+      │               │          ▼                     │
+      │               │    Template strategy           │
+      │               │    (status=VALIDATED)          │
+      │               │          │                     │
+      │               │          ▼                     │
+      │               │   _promote_to_active_pool()    │
+      │               │          │                     │
+      │               │          ├──► shuffle test     │
+      │               │          ├──► multi-window     │
+      │               │          └──► pool entry ──────┘
+      │               │
+      │               └──► (strategia originale prosegue
+      │                     con il suo backtest diretto)
+      │
+      └──► FAILED (se non passa validation)
+
+  ---
+  IL BUG E IL FIX
+
+  PRIMA (BUG):
+  strategy.status = "GENERATED"  # ❌ Re-entra nella pipeline!
+  Le strategie template tornavano al Validator, poi al Backtester, che faceva di nuovo parametric optimization creando ALTRE strategie template → LOOP INFINITO (188K strategie in coda).
+
+  DOPO (FIX):
+  strategy.status = "VALIDATED"  # ✅ Salta validator/backtester
+  # + chiamata diretta a _promote_to_active_pool()
+  Le strategie template vanno direttamente al pool manager per shuffle/multi-window/pool entry. Nessun loop.
+
+> B) AI-BASED (generation_mode='ai' o 'ai_pattern')
+
+  Attualmente il tipo AI con indicatori fissi è disabilitato. L'unica fonte AI attiva usa l'IndicatorCombinator:
+
+questo non mi quadra affatto. In config.yaml:
+# ==============================================================================
+# GENERATION (AI Templates + Parametric Variations)
+# ==============================================================================
+generation:
+  min_interval_seconds: 0      # Min seconds between AI calls
+  parallel_threads: 1
+  # NOTE: Each template generates ALL parametric variations (no AI cost)
+  # Flow control is handled by pipeline backpressure below
+  # Leverage is read from DB (coins.max_leverage), not configured here
+
+  # Parametric optimization (runs in Backtester, not Generator)
+  # Parameter space defined in src/backtester/parametric_constants.py (per-timeframe)
+  parametric:
+    enabled: true              # Enable parametric optimization in Backtester
+
+  # Strategy sources - enable/disable each type for debugging
+  strategy_sources:
+    pattern_based:
+      enabled: true            # Strategies from pattern-discovery API
+    ai_fixed_indicators:
+      enabled: false           # AI generates strategy with self-chosen indicators
+    ai_parametric_indicators:
+      enabled: true            # AI generates strategy with assigned indicator combinations
+
+  # Indicator combinator settings (for ai_parametric_indicators)
+  indicator_combinator:
+    max_main_indicators: 3     # 2 or 3 main indicators
+    max_filter_indicators: 2   # 0, 1, or 2 filters
+    prefer_2_indicators: true  # Try 2-indicator combos before 3-indicator
+
+quindi dovrebbero essere attivi tutte e tre i tipi di strategie
+
+altra cosa che non mi quadra, manca in config un settings che dovrebbe esserci cioè avevamo stabilito che per le strategie genrate da ai ci doveva essere un
+settings che regola la propozione di strategie ai_fixed_indicators e ai_parametric_indicators, ad esempio 70% ai_fixed_indicators e 30% ai_parametric_indicators, ma
+ non lo vedo
+
+● Hai ragione su entrambi i punti. Verifico il codice per capire come implementare:
+
+● Search(pattern: "ai_fixed_indicators|ai_parametric_indicators", path: "src", output_mode: "content")
+  ⎿  Found 6 lines (ctrl+o to expand)
+
+● Read(src/generator/strategy_builder.py)
+  ⎿  Read 80 lines
+
+● Capisco il problema. Il codice attuale (linea 507-513) usa if/else quindi sceglie SOLO UNO dei due tipi AI, non entrambi con una proporzione:
+
+  if ai_parametric_enabled:
+      return self._generate_with_indicator_combinator(...)
+  else:
+      return self._generate_with_fixed_indicators(...)
+
+  Devo:
+  1. Aggiungere il setting ai_ratio nel config
+  2. Modificare il codice per usare la proporzione
+  3. Abilitare ai_fixed_indicators
+
+● Read(config/config.yaml)
+  ⎿  Read 80 lines
+
+● Search(pattern: "strategy_sources:", path: "config/config.yaml", output_mode: "content")
+  ⎿  Found 16 lines (ctrl+o to expand)
+
+● Update(config/config.yaml)
+  ⎿  Added 5 lines, removed 1 line
+      137      pattern_based:
+      138        enabled: true            # Strategies from pattern-discovery API
+      139      ai_fixed_indicators:
+      140 -      enabled: false           # AI generates strategy with self-chosen indicators
+      140 +      enabled: true            # AI generates strategy with self-chosen indicators
+      141      ai_parametric_indicators:
+      142        enabled: true            # AI generates strategy with assigned indicator combinations
+      143
+      144 +  # When both AI sources are enabled, this ratio controls the mix
+      145 +  # ai_fixed_ratio: 0.7 means 70% ai_fixed_indicators, 30% ai_parametric_indicators
+      146 +  ai_fixed_ratio: 0.7
+      147 +
+      148    # Indicator combinator settings (for ai_parametric_indicators)
+      149    indicator_combinator:
+      150      max_main_indicators: 3     # 2 or 3 main indicators
+
+● Ora aggiorno il codice per usare la proporzione:
+
+● Read(src/generator/strategy_builder.py)
+  ⎿  Read 30 lines
+
+● Update(src/generator/strategy_builder.py)
+  ⎿  Added 5 lines, removed 1 line
+      138          self._strategy_sources = self.config.get('generation', {}).get('strategy_sources', {
+      139              'pattern_based': {'enabled': True},
+      140              'ai_fixed_indicators': {'enabled': True},
+      141 -            'ai_parametric_indicators': {'enabled': False}
+      141 +            'ai_parametric_indicators': {'enabled': True}
+      142          })
+      143
+      144 +        # AI source ratio: probability of using ai_fixed_indicators when both enabled
+      145 +        # 0.7 = 70% ai_fixed, 30% ai_parametric
+      146 +        self._ai_fixed_ratio = self.config.get('generation', {}).get('ai_fixed_ratio', 0.7)
+      147 +
+      148      def _default_config(self) -> dict:
+      149          """Default configuration (for tests only - production must provide full config)"""
+      150          return {
+
+● Ora modifico la logica di selezione:
+
+● Update(src/generator/strategy_builder.py)
+  ⎿  Added 14 lines, removed 5 lines
+      509              return []
+      510
+      511          # Decide which AI mode to use
+      512 -        if ai_parametric_enabled:
+      513 -            # SOURCE 3: AI with IndicatorCombinator (unique combinations)
+      514 -            return self._generate_with_indicator_combinator(strategy_type, timeframe)
+      515 -        else:
+      516 -            # SOURCE 2: AI with fixed indicators (legacy behavior)
+      512 +        if ai_fixed_enabled and ai_parametric_enabled:
+      513 +            # Both enabled: use ratio to decide (e.g., 70% fixed, 30% parametric)
+      514 +            use_fixed = random.random() < self._ai_fixed_ratio
+      515 +            if use_fixed:
+      516 +                logger.debug(f"AI mode: fixed_indicators (ratio={self._ai_fixed_ratio:.0%})")
+      517 +                return self._generate_with_fixed_indicators(strategy_type, timeframe)
+      518 +            else:
+      519 +                logger.debug(f"AI mode: parametric_indicators (ratio={1-self._ai_fixed_ratio:.0%})")
+      520 +                return self._generate_with_indicator_combinator(strategy_type, timeframe)
+      521 +        elif ai_fixed_enabled:
+      522 +            # Only fixed enabled
+      523              return self._generate_with_fixed_indicators(strategy_type, timeframe)
+      524 +        else:
+      525 +            # Only parametric enabled
+      526 +            return self._generate_with_indicator_combinator(strategy_type, timeframe)
+      527
+      528      def _generate_with_fixed_indicators(
+      529          self,
+
+● Bash(python -m py_compile /home/bitwolf/sixbtc/src/generator/strategy_builder.py && echo "Syntax OK")
+  ⎿  Error: Exit code 127
+     /bin/bash: line 1: python: command not found
+
+● Bash(source /home/bitwolf/sixbtc/.venv/bin/activate && python -m py_compile /home/bitwolf/sixbtc/src/generator/strategy_builder.py && echo "Syntax OK")
+  ⎿  Syntax OK
+
+● Bash(git add -A && git commit -m "feat: add ai_fixed_ratio config for AI strategy source selection…)
+  ⎿  [main 3b54c0d] feat: add ai_fixed_ratio config for AI strategy source selection
+      3 files changed, 547 insertions(+), 13 deletions(-)
+     To github.com:aledir/sixbtc.git
+        7cb406c..3b54c0d  main -> main
+
+● Fatto! Aggiorno il flusso con tutti e 3 i tipi di strategie:
+
+  ---
+  FLUSSO STRATEGIE - VERSIONE CORRETTA (Finale)
+
+  SORGENTI ATTIVE (config.yaml)
+
+  strategy_sources:
+    pattern_based:
+      enabled: true              # ✅ Da pattern-discovery API
+    ai_fixed_indicators:
+      enabled: true              # ✅ AI sceglie indicatori
+    ai_parametric_indicators:
+      enabled: true              # ✅ AI con IndicatorCombinator
+
+  # Proporzione quando entrambi AI attivi
+  ai_fixed_ratio: 0.7            # 70% fixed, 30% parametric
+
+  ---
+  A) PATTERN-BASED (generation_mode='pattern')
+
+  Sorgente: Pattern-discovery API (tier 1, quality >= 0.75)
+
+  class PatStrat_MOM_abc123(StrategyCore):
+      # Params DEFAULT
+      sl_pct = 0.03
+      tp_pct = 0.0
+      leverage = 1
+      exit_after_bars = 0
+
+      def generate_signal(self, df):
+          # Logica da pattern (es: RSI oversold)
+          rsi = ta.RSI(df['close'], 14)
+          if rsi.iloc[-1] < 30:
+              return Signal(direction='LONG', ...)
+
+  Pipeline: Generator → Validator → Backtester (parametric 1050 combos) → Template strategies → Pool
+
+  ---
+  B) AI FIXED INDICATORS (generation_mode='ai') - 70%
+
+  Sorgente: AI sceglie liberamente quali indicatori usare
+
+  class Strategy_TRN_def456(StrategyCore):
+      # Params DEFAULT
+      sl_pct = 0.02
+      tp_pct = 0.04
+      leverage = 2
+      exit_after_bars = 0
+
+      def generate_signal(self, df):
+          # Logica scelta dall'AI (indicatori a sua discrezione)
+          macd = ta.MACD(df['close'])
+          ema_fast = ta.EMA(df['close'], 12)
+          ema_slow = ta.EMA(df['close'], 26)
+          if macd['macd'].iloc[-1] > 0 and ema_fast.iloc[-1] > ema_slow.iloc[-1]:
+              return Signal(direction='LONG', ...)
+
+  Pipeline: Generator → Validator → Backtester (parametric 1050 combos) → Template strategies → Pool
+
+  ---
+  C) AI PARAMETRIC INDICATORS (generation_mode='ai_pattern') - 30%
+
+  Sorgente: IndicatorCombinator assegna combinazioni uniche di indicatori
+
+  class Strategy_REV_ghi789(StrategyCore):
+      # Params DEFAULT
+      sl_pct = 0.02
+      tp_pct = 0.04
+      leverage = 2
+      exit_after_bars = 0
+
+      def generate_signal(self, df):
+          # Logica con indicatori ASSEGNATI dal combinator
+          # (es: RSI + Bollinger Bands - combo #4521)
+          rsi = ta.RSI(df['close'], 14)
+          bb = ta.BBANDS(df['close'])
+          if rsi.iloc[-1] < 25 and df['close'].iloc[-1] < bb['lower'].iloc[-1]:
+              return Signal(direction='LONG', ...)
+
+  Differenza da B): Gli indicatori sono scelti dal IndicatorCombinator, non dall'AI. Questo garantisce varietà (~112 miliardi combinazioni) e tracciamento delle combinazioni usate.
+
+  Pipeline: Generator → Validator → Backtester (parametric 1050 combos) → Template strategies → Pool
+
+  ---
+  D) TEMPLATE (generation_mode='template')
+
+  NON generato direttamente - Creato dal Backtester durante parametric optimization.
+
+  class Strategy_MOM_xyz789(StrategyCore):
+      # Params OTTIMIZZATI (dalla combo che ha passato holdout)
+      sl_pct = 0.02      # Ottimizzato!
+      tp_pct = 0.05      # Ottimizzato!
+      leverage = 3       # Ottimizzato!
+      exit_after_bars = 20
+
+      def generate_signal(self, df):
+          # STESSA logica della strategia originale
+          ...
+
+  Pipeline: Creazione diretta → _promote_to_active_pool() → shuffle → multi-window → ACTIVE
+
+  ---
+  RIASSUNTO FINALE
+
+  | Tipo          | Sorgente              | Chi sceglie indicatori | Probabilità  | Params      |
+  |---------------|-----------------------|------------------------|--------------|-------------|
+  | Pattern       | pattern-discovery API | Pattern                | Prima scelta | DEFAULT     |
+  | AI Fixed      | AI prompt             | AI liberamente         | 70%          | DEFAULT     |
+  | AI Parametric | IndicatorCombinator   | Combinator assegna     | 30%          | DEFAULT     |
+  | Template      | Backtester            | (ereditato)            | N/A          | OTTIMIZZATI |
+
+  Logica di selezione:
+  1. Se ci sono pattern disponibili → usa Pattern
+  2. Se no pattern → estrai random con probabilità ai_fixed_ratio:
+    - 70% → AI Fixed Indicators
+    - 30% → AI Parametric Indicators
+> A) PATTERN-BASED (generation_mode='pattern')
+B) AI FIXED INDICATORS (generation_mode='ai') - 70%
+C) AI PARAMETRIC INDICATORS (generation_mode='ai_pattern') - 30%
+D) TEMPLATE (generation_mode='template')
+
+1) generation_mode cosa significa?
+2) differnza tra B) e C) tu dici: Gli indicatori sono scelti dal IndicatorCombinator, non dall'AI. Questo garantisce varietà (~112 miliardi combinazioni) e
+tracciamento delle combinazioni usate. Si ma non solo cambia il template di generazione, cosa molto importante. Per capire a fondo e spiegare anche a me, dovresti
+esaminare:
+bitwolf@fivebtc-dev:~/sixbtc$ ls -la /home/bitwolf/sixbtc/src/generator/templates
+total 48
+drwxrwxr-x 2 bitwolf bitwolf  4096 Jan  6 19:10 .
+drwxrwxr-x 4 bitwolf bitwolf  4096 Jan  7 08:55 ..
+-rw------- 1 bitwolf bitwolf   565 Dec 20 15:06 fix_code.j2
+-rw------- 1 bitwolf bitwolf  5515 Dec 26 18:07 generate_from_pattern.j2
+-rw------- 1 bitwolf bitwolf  6837 Jan  3 10:25 generate_from_pattern_v2.j2
+-rw------- 1 bitwolf bitwolf 16924 Jan  6 19:10 generate_template.j2
+
+● Esamino i template per capire le differenze:
+
+● Read(src/generator/templates/generate_template.j2)
+  ⎿  Read 456 lines
+
+● Read(src/generator/templates/generate_from_pattern.j2)
+  ⎿  Read 155 lines
+
+● Read(src/generator/templates/generate_from_pattern_v2.j2)
+  ⎿  Read 197 lines
+
+● Ora capisco! Esamino quale codice usa quale template:
+
+● Read(src/generator/strategy_builder.py)
+  ⎿  Read 80 lines
+
+● Search(pattern: "main_indicators|generate_template.j2", path: "src/generator/template_generator.py", output_mode: "content")
+  ⎿  Found 6 lines (ctrl+o to expand)
+
+● Read(src/generator/template_generator.py)
+  ⎿  Read 80 lines
+
+● Ora ho il quadro completo. Rispondendo alle tue domande:
+
+  ---
+  1) Cosa significa generation_mode?
+
+  È un campo nel modello Strategy che traccia la SORGENTE della strategia:
+
+  # src/database/models.py:209
+  generation_mode = Column(String(20), default="ai")  # "ai", "pattern", "template"
+
+  Valori possibili:
+  | Valore     | Significato                       | Creato da                           |
+  |------------|-----------------------------------|-------------------------------------|
+  | pattern    | Da pattern-discovery API          | Generator                           |
+  | ai         | AI con indicatori liberi          | Generator                           |
+  | ai_pattern | AI con indicatori assegnati       | Generator (via IndicatorCombinator) |
+  | template   | Strategia parametrica ottimizzata | Backtester                          |
+  | direct     | Generazione diretta (debug)       | direct_generator.py                 |
+
+  A cosa serve:
+  - Debugging: capire da dove viene una strategia
+  - Statistiche: quante pattern vs AI
+  - Tracciabilità nel pipeline
+
+  ---
+  2) Differenza tra AI Fixed e AI Parametric
+
+  STESSO template file (generate_template.j2) ma variabili diverse passate!
+
+  AI Fixed Indicators (linea 544):
+
+  # strategy_builder.py:544
+  template = self.template_generator.generate_template(strategy_type, timeframe)
+  # NESSUN main_indicators passato!
+
+  Nel template (linee 134-138):
+  {% else %}
+  === ENTRY LOGIC CATEGORIES ===
+
+  Choose ONE primary category for your entry logic. This creates diversity across templates.
+  {% endif %}
+
+  → L'AI ha LIBERTÀ TOTALE di scegliere indicatori da:
+  - Indicator-based (RSI, MACD, Stochastic...)
+  - Price action (N-bar high/low...)
+  - Structure-based (support/resistance...)
+  - Volume-based (volume spike...)
+
+  AI Parametric Indicators (linee 588-592):
+
+  # strategy_builder.py:588-592
+  template = self.template_generator.generate_template(
+      strategy_type,
+      timeframe,
+      main_indicators=main_indicators,      # es: ['RSI', 'MACD']
+      filter_indicators=filter_indicators   # es: ['ADX']
+  )
+
+  Nel template (linee 86-108):
+  {% if main_indicators %}
+  === MANDATORY INDICATORS (IndicatorCombinator) ===
+
+  You MUST use these SPECIFIC indicators in your strategy. Do NOT use other indicators.
+
+  MAIN INDICATORS (for signal generation):
+  {% for ind in main_indicators %}
+  - {{ ind }}
+  {% endfor %}
+
+  {% if filter_indicators %}
+  FILTER INDICATORS (for entry confirmation):
+  {% for ind in filter_indicators %}
+  - {{ ind }}
+  {% endfor %}
+  {% endif %}
+
+  → L'AI è OBBLIGATA a usare SOLO gli indicatori assegnati dal IndicatorCombinator
+
+  ---
+  Riepilogo differenze
+
+  | Aspetto         | AI Fixed                 | AI Parametric                        |
+  |-----------------|--------------------------|--------------------------------------|
+  | Template        | generate_template.j2     | generate_template.j2                 |
+  | Indicatori      | AI sceglie liberamente   | IndicatorCombinator assegna          |
+  | Sezione prompt  | "ENTRY LOGIC CATEGORIES" | "MANDATORY INDICATORS"               |
+  | Diversità       | Dipende dall'AI          | Garantita (~112B combinazioni)       |
+  | Tracciamento    | No                       | Sì (DB: used_indicator_combinations) |
+  | generation_mode | "ai"                     | "ai_pattern"                         |
+
+  La differenza NON è solo il template ma cosa viene passato al template:
+  - Fixed: niente indicatori → AI libera
+  - Parametric: indicatori specifici → AI vincolata

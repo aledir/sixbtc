@@ -34,7 +34,7 @@ class DirectGeneratedStrategy:
     validation_errors: list[str]
     leverage: int = 1
     pattern_id: Optional[str] = None
-    generation_mode: str = "direct"
+    generation_mode: str = "pattern"  # From pattern-discovery API (direct embedding)
 
 
 class DirectPatternGenerator:
@@ -305,7 +305,7 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
                 validation_errors=errors,
                 leverage=leverage,
                 pattern_id=pattern.id,
-                generation_mode="direct"
+                generation_mode="pattern"  # From pattern-discovery API
             )
 
         except Exception as e:

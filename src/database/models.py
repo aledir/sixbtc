@@ -206,7 +206,8 @@ class Strategy(Base):
     # Template-based generation
     template_id = Column(UUID(as_uuid=True), ForeignKey("strategy_templates.id"), nullable=True, index=True)
     # If generated from template, link to parent template
-    generation_mode = Column(String(20), default="ai")  # "ai", "pattern", "template"
+    # Generation source: "pattern", "ai_free", "ai_assigned", "optimized"
+    generation_mode = Column(String(20), default="ai_free")
     parameters = Column(JSON)  # Parameters used if template-based
     parametric_backtest_metrics = Column(JSONB, nullable=True)  # Stores training/holdout metrics from parametric optimization
 

@@ -1996,8 +1996,8 @@ class ContinuousBacktesterProcess:
 
                 strategy.template_id = template.template_id
                 strategy.pattern_ids = template.pattern_ids
-                strategy.generation_mode = 'template'  # Mark as template-generated
-                strategy.parameters = params  # Store parameters used
+                strategy.generation_mode = 'optimized'  # Parametric optimization output
+                strategy.parameters = params  # Optimized parameters
                 strategy.created_at = datetime.now(UTC)
                 strategy.tested_at = datetime.now(UTC)  # Already tested via parametric backtest
 

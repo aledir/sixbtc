@@ -61,7 +61,7 @@ class GeneratedStrategy:
     template_name: str
     parameters: dict  # Specific parameters used
     parameter_hash: str  # Hash for deduplication
-    generation_mode: str = "template"
+    generation_mode: str = "ai_free"  # Will be set by caller based on source
     validation_passed: bool = True
     validation_errors: list = None
     base_code_hash: str = ""  # SHA256 of base code BEFORE parameter embedding
@@ -411,7 +411,7 @@ class ParametricGenerator:
             template_name=template.name,
             parameters=params_with_leverage,
             parameter_hash=parameter_hash,
-            generation_mode="template",
+            # generation_mode defaults to "ai_free", can be overridden by caller
             validation_passed=validation_passed,
             validation_errors=errors
         )

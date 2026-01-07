@@ -132,20 +132,21 @@ generation:
   parametric:
     enabled: true              # Enable parametric optimization in Backtester
 
-  # Strategy sources - enable/disable each type for debugging
+  # Strategy sources - enable/disable each type
+  # Names match generation_mode values for consistency
   strategy_sources:
-    pattern_based:
-      enabled: true            # Strategies from pattern-discovery API
-    ai_fixed_indicators:
-      enabled: true            # AI generates strategy with self-chosen indicators
-    ai_parametric_indicators:
-      enabled: true            # AI generates strategy with assigned indicator combinations
+    pattern:
+      enabled: true            # PatStrat_* from pattern-discovery API
+    ai_free:
+      enabled: true            # Strategy_* - AI chooses indicators freely
+    ai_assigned:
+      enabled: true            # Strategy_* - AI uses IndicatorCombinator-assigned indicators
 
   # When both AI sources are enabled, this ratio controls the mix
-  # ai_fixed_ratio: 0.7 means 70% ai_fixed_indicators, 30% ai_parametric_indicators
-  ai_fixed_ratio: 0.7
+  # ai_free_ratio: 0.7 means 70% ai_free, 30% ai_assigned
+  ai_free_ratio: 0.7
 
-  # Indicator combinator settings (for ai_parametric_indicators)
+  # Indicator combinator settings (for ai_assigned strategies)
   indicator_combinator:
     max_main_indicators: 3     # 2 or 3 main indicators
     max_filter_indicators: 2   # 0, 1, or 2 filters
