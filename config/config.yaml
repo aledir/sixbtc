@@ -44,13 +44,16 @@ database:
 # HYPERLIQUID EXCHANGE
 # ==============================================================================
 hyperliquid:
-  private_key: ${HL_PRIVATE_KEY}
-  vault_address: ${HL_VAULT_ADDRESS}
+  # Master address for read-only queries (from .env)
+  # Required for WebSocket private channels (webData2, userFills) and trade sync
+  user_address: "${HL_USER_ADDRESS}"
 
-  # User address for WebSocket private channels (webData2, userFills)
-  # Required for trade sync and live performance tracking
-  # Optional - if not set, trade sync will be disabled
-  user_address: "${HL_USER_ADDRESS:-}"
+  # SUBACCOUNT CREDENTIALS:
+  # Credentials for each subaccount are loaded from .env:
+  # - HYPERLIQUID_PRIVATE_KEY_1, HYPERLIQUID_SUBACCOUNT_ADDRESS_1
+  # - HYPERLIQUID_PRIVATE_KEY_2, HYPERLIQUID_SUBACCOUNT_ADDRESS_2
+  # - ... up to 100 subaccounts
+  # Number of active subaccounts is auto-detected from .env
 
   # Fees for backtesting (taker fee = market orders)
   fee_rate: 0.00045  # 0.045% taker fee

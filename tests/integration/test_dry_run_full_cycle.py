@@ -23,7 +23,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src.executor.hyperliquid_client import HyperliquidClient, OrderStatus
 from src.executor.risk_manager import RiskManager
 from src.executor.position_tracker import PositionTracker
-from src.executor.subaccount_manager import SubaccountManager
 from src.strategies.base import StrategyCore, Signal
 
 
@@ -165,7 +164,7 @@ class TestDryRunFullCycle:
 
             # 3. Calculate position size (ATR-based)
             current_price = sample_ohlcv['close'].iloc[-1]
-            account_balance = client.get_account_balance()
+            account_balance = client.get_account_balance(1)
 
             position_size, stop_loss, take_profit = risk_manager.calculate_position_size(
                 account_balance=account_balance,
@@ -192,8 +191,9 @@ class TestDryRunFullCycle:
             assert allowed is True
             assert reason == "OK"
 
-            # 5. Execute order (dry-run)
+            # 5. Execute order (dry-run) - subaccount_id is now required
             order = client.place_market_order(
+                subaccount_id=1,
                 symbol='BTC',
                 side='long',
                 size=position_size,
@@ -224,11 +224,9 @@ class TestDryRunFullCycle:
             client = HyperliquidClient(dry_run=True)
             risk_manager = RiskManager(config)
 
-            # Trade on subaccount 1
-            client.switch_subaccount(1)
-            assert client.current_subaccount == 1
-
+            # Trade on subaccount 1 - now passing subaccount_id directly
             order1 = client.place_market_order(
+                subaccount_id=1,
                 symbol='BTC',
                 side='long',
                 size=0.1,
@@ -238,11 +236,9 @@ class TestDryRunFullCycle:
 
             assert order1.order_id.startswith('dry_run_')
 
-            # Switch to subaccount 2
-            client.switch_subaccount(2)
-            assert client.current_subaccount == 2
-
+            # Trade on subaccount 2 - no need to switch, just pass subaccount_id
             order2 = client.place_market_order(
+                subaccount_id=2,
                 symbol='ETH',
                 side='short',
                 size=1.0,
@@ -270,7 +266,7 @@ class TestDryRunFullCycle:
             risk_manager = RiskManager(config)
 
             current_price = sample_ohlcv['close'].iloc[-1]
-            account_balance = client.get_account_balance()
+            account_balance = client.get_account_balance(1)
 
             # Try to exceed max positions per subaccount
             max_positions = config['risk']['limits']['max_open_positions_per_subaccount']
@@ -357,7 +353,7 @@ class TestDryRunFullCycle:
             risk_manager = RiskManager(config)
 
             current_price = sample_ohlcv['close'].iloc[-1]
-            account_balance = client.get_account_balance()
+            account_balance = client.get_account_balance(1)
 
             # Calculate position size for short
             position_size, stop_loss, take_profit = risk_manager.calculate_position_size(
@@ -380,6 +376,7 @@ class TestDryRunFullCycle:
 
             # Execute short order
             order = client.place_market_order(
+                subaccount_id=1,
                 symbol='BTC',
                 side='short',
                 size=position_size,
@@ -413,6 +410,7 @@ class TestDryRunFullCycle:
             orders = []
             for symbol in ['BTC', 'ETH', 'SOL']:
                 order = client.place_market_order(
+                    subaccount_id=1,
                     symbol=symbol,
                     side='long',
                     size=0.1,
@@ -446,12 +444,14 @@ class TestDryRunFullCycle:
 
             # Create orders
             order1 = client.place_market_order(
+                subaccount_id=1,
                 symbol='BTC',
                 side='long',
                 size=0.1
             )
 
             order2 = client.place_market_order(
+                subaccount_id=1,
                 symbol='ETH',
                 side='short',
                 size=1.0
@@ -479,7 +479,7 @@ class TestDryRunFullCycle:
             risk_manager = RiskManager(config)
 
             current_price = sample_ohlcv['close'].iloc[-1]
-            account_balance = client.get_account_balance()
+            account_balance = client.get_account_balance(1)
 
             # Calculate position size
             position_size, stop_loss, take_profit = risk_manager.calculate_position_size(
@@ -490,6 +490,7 @@ class TestDryRunFullCycle:
 
             # Place order
             order = client.place_market_order(
+                subaccount_id=1,
                 symbol='BTC',
                 side='long',
                 size=position_size,
@@ -515,15 +516,12 @@ class TestDryRunFullCycle:
             mock_info_instance.all_mids.return_value = {'BTC': '50000.0'}
             mock_info.return_value = mock_info_instance
 
-            # Initialize without credentials (safe in dry-run)
-            client = HyperliquidClient(
-                private_key=None,
-                vault_address=None,
-                dry_run=True
-            )
+            # Initialize in dry-run mode (no credentials needed)
+            client = HyperliquidClient(dry_run=True)
 
             # Should work fine
             order = client.place_market_order(
+                subaccount_id=1,
                 symbol='BTC',
                 side='long',
                 size=0.1
@@ -531,25 +529,24 @@ class TestDryRunFullCycle:
 
             assert order.order_id.startswith('dry_run_')
 
-            # Verify health check works without credentials
+            # Verify health check works
             assert client.health_check()['status'] == 'healthy'
 
     def test_live_mode_requires_credentials(self):
-        """Test that live mode requires valid credentials"""
+        """Test that live mode requires HL_USER_ADDRESS in .env"""
         from unittest.mock import patch, MagicMock
 
-        # Should raise error without credentials
-        with patch('src.executor.hyperliquid_client.Info') as mock_info:
+        # Without HL_USER_ADDRESS, live mode should fail at initialization
+        with patch.dict('os.environ', {'HL_USER_ADDRESS': ''}, clear=False), \
+             patch('src.config.loader.detect_subaccount_count', return_value=0), \
+             patch('src.executor.hyperliquid_client.Info') as mock_info:
             mock_info_instance = MagicMock()
             mock_info_instance.meta.return_value = {'universe': []}
             mock_info.return_value = mock_info_instance
 
-            with pytest.raises(ValueError, match="Live trading requires valid private_key and wallet_address"):
-                HyperliquidClient(
-                    private_key=None,
-                    vault_address=None,
-                    dry_run=False
-                )
+            # Live mode requires HL_USER_ADDRESS to be set
+            with pytest.raises(ValueError, match="Live trading requires HL_USER_ADDRESS"):
+                HyperliquidClient(dry_run=False)
 
 
 class TestDryRunEdgeCases:
@@ -557,10 +554,18 @@ class TestDryRunEdgeCases:
 
     def test_close_nonexistent_position(self):
         """Test closing position that doesn't exist"""
-        client = HyperliquidClient(dry_run=True)
+        from unittest.mock import patch, MagicMock
 
-        success = client.close_position('NONEXISTENT')
-        assert success is False
+        with patch('src.executor.hyperliquid_client.Info') as mock_info:
+            mock_info_instance = MagicMock()
+            mock_info_instance.meta.return_value = {'universe': [{'name': 'BTC', 'szDecimals': 4, 'maxLeverage': 50}]}
+            mock_info_instance.user_state.return_value = {'assetPositions': []}  # No positions
+            mock_info.return_value = mock_info_instance
+
+            client = HyperliquidClient(dry_run=True)
+            # In dry_run without positions, close should return False
+            success = client.close_position(1, 'NONEXISTENT')
+            assert success is False
 
     def test_invalid_order_parameters(self):
         """Test order validation in dry-run"""
@@ -569,6 +574,7 @@ class TestDryRunEdgeCases:
         # Invalid side
         with pytest.raises(ValueError, match="Invalid side"):
             client.place_market_order(
+                subaccount_id=1,
                 symbol='BTC',
                 side='invalid',
                 size=0.1
@@ -577,6 +583,7 @@ class TestDryRunEdgeCases:
         # Invalid size
         with pytest.raises(ValueError, match="Invalid size"):
             client.place_market_order(
+                subaccount_id=1,
                 symbol='BTC',
                 side='long',
                 size=-0.1
@@ -584,6 +591,7 @@ class TestDryRunEdgeCases:
 
         with pytest.raises(ValueError, match="Invalid size"):
             client.place_market_order(
+                subaccount_id=1,
                 symbol='BTC',
                 side='long',
                 size=0.0
@@ -603,6 +611,7 @@ class TestDryRunEdgeCases:
 
             # Open position
             order = client.place_market_order(
+                subaccount_id=1,
                 symbol='BTC',
                 side='long',
                 size=0.1,
@@ -615,12 +624,12 @@ class TestDryRunEdgeCases:
             assert order.take_profit == 51000.0
 
             # Update stop loss - returns dict with status in new implementation
-            result_sl = client.update_stop_loss('BTC', 49500.0)
+            result_sl = client.update_stop_loss(1, 'BTC', 49500.0)
             # In dry_run, update methods return dict with status
             assert result_sl is not None
 
             # Update take profit
-            result_tp = client.update_take_profit('BTC', 52000.0)
+            result_tp = client.update_take_profit(1, 'BTC', 52000.0)
             assert result_tp is not None
 
     def test_get_current_price_dry_run(self):

@@ -127,18 +127,21 @@ def detect_subaccount_count() -> int:
     """
     Auto-detect number of subaccounts from .env credentials.
 
-    Counts HYPERLIQUID_PRIVATE_KEY_1, _2, _3... variables.
+    Counts sequential HYPERLIQUID_PRIVATE_KEY_N + HYPERLIQUID_SUBACCOUNT_ADDRESS_N pairs.
+    Both variables must be present for a subaccount to be counted.
 
     Returns:
-        Number of configured subaccounts (0 if none found)
+        Number of fully configured subaccounts (0 if none found)
     """
     count = 0
     for i in range(1, 101):  # Support up to 100 subaccounts
-        key_var = f"HYPERLIQUID_PRIVATE_KEY_{i}"
-        if os.getenv(key_var):
+        private_key = os.getenv(f"HYPERLIQUID_PRIVATE_KEY_{i}")
+        address = os.getenv(f"HYPERLIQUID_SUBACCOUNT_ADDRESS_{i}")
+
+        if private_key and address:
             count += 1
         else:
-            break  # Stop at first missing
+            break  # Stop at first incomplete pair
     return count
 
 
@@ -146,13 +149,47 @@ def get_subaccount_count() -> int:
     """
     Get number of subaccounts from .env credentials.
 
-    Counts HYPERLIQUID_PRIVATE_KEY_1, _2, _3... variables.
-    Returns minimum 1 to allow system to run.
+    Counts HYPERLIQUID_PRIVATE_KEY_N + HYPERLIQUID_SUBACCOUNT_ADDRESS_N pairs.
+    Returns minimum 1 to allow system to run in dry_run mode.
 
     Returns:
         Number of subaccounts (minimum 1)
     """
     return max(1, detect_subaccount_count())
+
+
+def get_subaccount_credentials(subaccount_id: int) -> Dict[str, str]:
+    """
+    Get credentials for a specific subaccount.
+
+    Args:
+        subaccount_id: Subaccount number (1, 2, 3, ...)
+
+    Returns:
+        Dict with 'private_key' and 'address'
+
+    Raises:
+        ValueError: If subaccount not configured (Fast Fail)
+    """
+    private_key = os.getenv(f"HYPERLIQUID_PRIVATE_KEY_{subaccount_id}")
+    address = os.getenv(f"HYPERLIQUID_SUBACCOUNT_ADDRESS_{subaccount_id}")
+
+    if not private_key:
+        raise ValueError(
+            f"Subaccount {subaccount_id} not configured: "
+            f"HYPERLIQUID_PRIVATE_KEY_{subaccount_id} missing in .env"
+        )
+
+    if not address:
+        raise ValueError(
+            f"Subaccount {subaccount_id} not configured: "
+            f"HYPERLIQUID_SUBACCOUNT_ADDRESS_{subaccount_id} missing in .env"
+        )
+
+    return {
+        'private_key': private_key,
+        'address': address
+    }
 
 
 # Global config cache to avoid duplicate loads and prints

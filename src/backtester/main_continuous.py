@@ -2607,7 +2607,7 @@ class ContinuousBacktesterProcess:
         from src.database.event_tracker import EventTracker
 
         start_time = time.time()
-        windows_count = self.multi_window_validator.config.get('windows', 3)
+        windows_count = self.multi_window_validator.n_windows
         base_code_hash = strategy.base_code_hash
 
         EventTracker.multi_window_started(
@@ -2636,12 +2636,11 @@ class ContinuousBacktesterProcess:
                 logger.warning(f"[{strategy.name}] Missing symbols/timeframe for multi-window")
                 return (True, "missing_data_skip")
 
-            # Run validation
+            # Run validation (no cache - each strategy tested independently)
             passed, reason, metrics = self.multi_window_validator.validate(
                 strategy=strategy_instance,
                 pairs=pairs,
-                timeframe=timeframe,
-                base_code_hash=strategy.base_code_hash
+                timeframe=timeframe
             )
             duration_ms = int((time.time() - start_time) * 1000)
 

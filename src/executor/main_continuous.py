@@ -516,7 +516,7 @@ class ContinuousExecutorProcess:
             )
 
             # Set leverage (isolated mode)
-            self.client.set_leverage(symbol, actual_leverage)
+            self.client.set_leverage(subaccount['id'], symbol, actual_leverage)
 
             if self.dry_run:
                 logger.info(
@@ -653,7 +653,7 @@ class ContinuousExecutorProcess:
             return
 
         # Close on exchange
-        success = self.client.close_position(symbol, reason=exit_reason)
+        success = self.client.close_position(subaccount['id'], symbol, reason=exit_reason)
 
         if success:
             # Update trade record with exit data

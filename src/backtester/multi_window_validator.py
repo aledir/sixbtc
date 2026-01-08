@@ -9,16 +9,13 @@ Pass criteria:
 2. Coefficient of Variation (std/avg) <= max_cv (consistency)
 """
 
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-from uuid import UUID
+from datetime import datetime, timedelta, UTC
+from typing import Dict, List, Tuple
 import numpy as np
 
 from src.strategies.base import StrategyCore
 from src.backtester.backtest_engine import BacktestEngine
 from src.backtester.data_loader import BacktestDataLoader
-from src.database import get_session
-from src.database.models import ValidationCache
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -67,17 +64,18 @@ class MultiWindowValidator:
         self,
         strategy: StrategyCore,
         pairs: List[str],
-        timeframe: str,
-        base_code_hash: Optional[str] = None
+        timeframe: str
     ) -> Tuple[bool, str, Dict]:
         """
         Validate strategy across multiple time windows.
+
+        Each strategy is tested independently - no caching by base_code_hash
+        because consistency depends on parameters, not just base code.
 
         Args:
             strategy: StrategyCore instance to validate
             pairs: List of trading pairs (already validated)
             timeframe: Timeframe to test
-            base_code_hash: For caching (same base code = same result)
 
         Returns:
             Tuple of (passed, reason, metrics):
@@ -87,16 +85,6 @@ class MultiWindowValidator:
         """
         if not self.enabled:
             return (True, "multi_window_disabled", {})
-
-        # Check cache first (if base_code_hash provided)
-        if base_code_hash:
-            cached = self._get_cached_result(base_code_hash)
-            if cached is not None:
-                passed, reason = cached
-                logger.debug(
-                    f"Multi-window result from cache: {passed} ({reason})"
-                )
-                return (passed, f"cached:{reason}", {})
 
         # Generate time windows
         windows = self._generate_windows()
@@ -110,7 +98,7 @@ class MultiWindowValidator:
 
         for i, (start_offset_days, window_days) in enumerate(windows):
             # end_date = end of window = today - (start_offset - window_days)
-            end_date = datetime.now() - timedelta(days=start_offset_days - window_days)
+            end_date = datetime.now(UTC) - timedelta(days=start_offset_days - window_days)
             period_desc = f"{start_offset_days}d-{start_offset_days - window_days}d ago"
 
             try:
@@ -157,8 +145,6 @@ class MultiWindowValidator:
         # Analyze results
         if len(window_results) < 2:
             reason = f"only_{len(window_results)}_windows_with_trades"
-            if base_code_hash:
-                self._cache_result(base_code_hash, True, reason)
             return (True, reason, {'window_results': window_results})
 
         # Calculate statistics
@@ -196,10 +182,6 @@ class MultiWindowValidator:
             reason = f"passed:avg={avg_sharpe:.2f},cv={cv:.2f}"
         else:
             reason = ";".join(reason_parts)
-
-        # Cache result
-        if base_code_hash:
-            self._cache_result(base_code_hash, passed, reason)
 
         logger.info(
             f"Multi-window validation: {'PASSED' if passed else 'FAILED'} - "
@@ -241,56 +223,3 @@ class MultiWindowValidator:
         )
 
         return windows
-
-    def _get_cached_result(self, base_code_hash: str) -> Optional[Tuple[bool, str]]:
-        """
-        Check ValidationCache for existing multi-window result.
-
-        Args:
-            base_code_hash: Hash of base strategy code
-
-        Returns:
-            Tuple of (passed, reason) or None if not cached
-        """
-        try:
-            with get_session() as session:
-                cache = session.query(ValidationCache).filter(
-                    ValidationCache.code_hash == base_code_hash
-                ).first()
-
-                if cache and cache.multi_window_passed is not None:
-                    return (cache.multi_window_passed, cache.multi_window_reason or "")
-                return None
-        except Exception as e:
-            logger.debug(f"Cache lookup failed: {e}")
-            return None
-
-    def _cache_result(self, base_code_hash: str, passed: bool, reason: str) -> None:
-        """
-        Save multi-window validation result to cache.
-
-        Args:
-            base_code_hash: Hash of base strategy code
-            passed: Whether validation passed
-            reason: Description of result
-        """
-        try:
-            with get_session() as session:
-                cache = session.query(ValidationCache).filter(
-                    ValidationCache.code_hash == base_code_hash
-                ).first()
-
-                if cache:
-                    cache.multi_window_passed = passed
-                    cache.multi_window_reason = reason[:200]  # Truncate if needed
-                    cache.validated_at = datetime.utcnow()
-                else:
-                    session.add(ValidationCache(
-                        code_hash=base_code_hash,
-                        multi_window_passed=passed,
-                        multi_window_reason=reason[:200],
-                        validated_at=datetime.utcnow()
-                    ))
-                session.commit()
-        except Exception as e:
-            logger.warning(f"Failed to cache multi-window result: {e}")

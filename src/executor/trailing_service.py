@@ -297,6 +297,7 @@ class TrailingService:
             # Use client's atomic update method (place new → cancel old)
             # This is safer: if placement fails, old SL still protects position
             result = self.client.update_sl_atomic(
+                subaccount_id=state.subaccount_id,
                 symbol=coin,
                 new_stop_loss=new_sl,
                 old_order_id=state.current_sl_oid,

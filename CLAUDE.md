@@ -172,13 +172,17 @@ There is ONLY: **STRATEGY**.
 **CODE IMPLICATIONS**:
 - Variable names: `strategies` not `variations`, `generated_strategies` not `template_instances`
 - No "template_id" field in Strategy model (it's just metadata, not identity)
-- Each strategy goes through FULL pipeline: GENERATED → VALIDATED → ACTIVE → LIVE → RETIRED
+- Each strategy goes through FULL pipeline: GENERATED → VALIDATED → ACTIVE → LIVE → RETIRED (or FAILED at any stage)
 - Pattern-based strategies = AI-based strategies = Parametric strategies (all are STRATEGIES)
 
 **WHY THIS MATTERS**:
-- Prevents bugs like "parametric variations skip validation" (wrong - they're strategies, need validation)
 - Prevents confusion like "400 variations of one strategy" (wrong - 400 separate strategies)
 - Ensures uniform treatment in pipeline (all strategies follow same flow)
+- Each strategy is scored and validated independently
+
+**CACHING CLARIFICATION**:
+- **Shuffle test**: CAN be cached by `base_code_hash` because lookahead bias is a property of the BASE CODE, not parameters. If base code has no lookahead, all parametric strategies from it won't have lookahead either.
+- **Multi-window validation**: CANNOT be cached because consistency across time windows depends on PARAMETERS. Each strategy must be tested independently.
 
 **EXCEPTIONS** (where "combination" IS correct):
 - ✅ "Parameter combination" = the SET of parameters (SL × TP × leverage × exit) used to generate a strategy
@@ -321,55 +325,98 @@ prompt = template.render(threshold=threshold, patterns=patterns)
 ```
 sixbtc/
 ├── src/
-│   ├── generator/              # AI strategy generation
-│   │   ├── ai_manager.py       # Multi-provider rotation (from fivebtc)
-│   │   ├── pattern_fetcher.py  # Query pattern-discovery API
-│   │   ├── strategy_builder.py # Combine patterns → StrategyCore
-│   │   └── templates/          # Jinja2 prompts
+│   ├── ai/                     # AI provider integration
+│   │   └── providers.py        # Claude, Gemini, etc.
+│   │
+│   ├── api/                    # REST API endpoints
+│   │   └── routes.py           # FastAPI routes
 │   │
 │   ├── backtester/             # Numba-JIT backtest engine
-│   │   ├── backtest_engine.py  # Backtest executor (Numba-optimized)
+│   │   ├── backtest_engine.py  # Portfolio simulation (Numba-optimized)
 │   │   ├── data_loader.py      # Binance data downloader
-│   │   ├── optimizer.py        # Walk-forward parameter tuning
-│   │   └── validator.py        # Lookahead + shuffle test
+│   │   ├── parametric_backtest.py  # Parameter optimization
+│   │   ├── multi_window_validator.py  # 4-window consistency test
+│   │   ├── validator.py        # AST lookahead + shuffle test
+│   │   └── main_continuous.py  # Backtester daemon
 │   │
-│   ├── scorer/                 # Strategy scoring
-│   │   ├── backtest_scorer.py  # Unified score formula
-│   │   ├── live_scorer.py      # Live performance scoring
-│   │   └── pool_manager.py     # ACTIVE pool management
+│   ├── config/                 # Configuration
+│   │   └── loader.py           # YAML config reader (Fast Fail)
 │   │
-│   ├── rotator/                # ACTIVE → LIVE rotation
-│   │   ├── selector.py         # Strategy selection
-│   │   └── deployer.py         # Subaccount deployment
-│   │
-│   ├── executor/               # Live trading
-│   │   ├── hyperliquid_client.py # From sevenbtc
-│   │   ├── subaccount_manager.py # Manage 10 subaccounts
-│   │   ├── position_tracker.py   # Track open positions
-│   │   └── risk_manager.py       # Position sizing, stops
-│   │
-│   ├── strategies/             # Strategy core
-│   │   └── base.py             # StrategyCore abstract class
+│   ├── data/                   # Market data management
+│   │   ├── coin_registry.py    # Tradeable coins from Hyperliquid
+│   │   └── pairs_updater.py    # Updates coin metadata 2x/day
 │   │
 │   ├── database/               # PostgreSQL layer
 │   │   ├── models.py           # SQLAlchemy models
 │   │   └── connection.py       # Connection pool
 │   │
-│   └── config/
-│       └── config_loader.py    # YAML config reader
+│   ├── executor/               # Live trading
+│   │   ├── hyperliquid_client.py  # Hyperliquid SDK wrapper
+│   │   ├── position_tracker.py    # Track open positions
+│   │   ├── risk_manager.py        # Position sizing, stops
+│   │   ├── trailing_service.py    # Trailing stop management
+│   │   └── main_continuous.py     # Executor daemon
+│   │
+│   ├── generator/              # AI strategy generation
+│   │   ├── direct_generator.py    # AI calls → code generation
+│   │   ├── parametric_generator.py # Template expansion
+│   │   ├── pattern_fetcher.py     # Query pattern-discovery API
+│   │   ├── strategy_builder.py    # Combine patterns → StrategyCore
+│   │   ├── indicator_combinator.py # For ai_assigned mode
+│   │   ├── templates/             # Jinja2 prompts
+│   │   └── main_continuous.py     # Generator daemon
+│   │
+│   ├── metrics/                # Performance metrics
+│   │   └── collector.py        # Pipeline metrics snapshots
+│   │
+│   ├── monitor/                # Live monitoring
+│   │   ├── dashboard.py        # Rich console dashboard
+│   │   └── main_continuous.py  # Monitor daemon
+│   │
+│   ├── orchestration/          # Execution orchestration
+│   │   └── scheduler.py        # Adaptive execution scheduler
+│   │
+│   ├── processes/              # Process management
+│   │   └── manager.py          # Multi-daemon coordination
+│   │
+│   ├── rotator/                # ACTIVE → LIVE rotation
+│   │   ├── selector.py         # Strategy selection
+│   │   ├── deployer.py         # Subaccount deployment
+│   │   └── main_continuous.py  # Rotator daemon
+│   │
+│   ├── scheduler/              # Task scheduling
+│   │   └── main_continuous.py  # Scheduler daemon
+│   │
+│   ├── scorer/                 # Strategy scoring
+│   │   ├── backtest_scorer.py  # Unified score formula
+│   │   ├── live_scorer.py      # Live performance scoring
+│   │   └── pool_manager.py     # ACTIVE pool management (max 300)
+│   │
+│   ├── strategies/             # Strategy core
+│   │   └── base.py             # StrategyCore abstract class
+│   │
+│   ├── subaccount/             # Subaccount management
+│   │   ├── allocator.py        # Capital allocation
+│   │   └── main_continuous.py  # Subaccount daemon
+│   │
+│   ├── utils/                  # Utilities
+│   │   └── logger.py           # Logging setup (ASCII only)
+│   │
+│   └── validator/              # Validation pipeline
+│       ├── syntax_validator.py    # Python syntax check
+│       ├── lookahead_test.py      # AST analysis
+│       ├── execution_validator.py # Execution safety
+│       └── main_continuous.py     # Validator daemon
 │
 ├── config/
 │   └── config.yaml             # Master configuration
 │
-├── strategies/                 # (LEGACY - database is source of truth)
-│   └── cache/                  # Temporary file cache only
-│
 ├── data/                       # Market data cache
 │   └── binance/                # OHLCV data
 │
-├── main.py                     # CLI orchestrator
+├── main.py                     # CLI entry point (scaffold)
 ├── CLAUDE.md                   # This file
-└── DEVELOPMENT_PLAN.md         # Implementation roadmap
+└── tests/                      # Test suite
 ```
 
 ### Workflow Overview
@@ -377,40 +424,83 @@ sixbtc/
 ┌────────────────────────────────────────────────────────────────┐
 │ PHASE 1: GENERATION                                            │
 ├────────────────────────────────────────────────────────────────┤
-│ Generator: AI/Pattern → base code → parametric expansion       │
+│ Generator daemon: AI/Pattern → base code                       │
 │ Output: strategies (status: GENERATED)                         │
 └────────────────────────────────────────────────────────────────┘
                           ↓
 ┌────────────────────────────────────────────────────────────────┐
 │ PHASE 2: VALIDATION (3 phases)                                 │
 ├────────────────────────────────────────────────────────────────┤
-│ Validator: syntax → AST lookahead → execution                  │
-│ Output: strategies (status: VALIDATED or DELETE)               │
+│ Validator daemon: syntax → AST lookahead → execution test      │
+│ Output: strategies (status: VALIDATED or FAILED)               │
 └────────────────────────────────────────────────────────────────┘
                           ↓
 ┌────────────────────────────────────────────────────────────────┐
 │ PHASE 3: BACKTESTING                                           │
 ├────────────────────────────────────────────────────────────────┤
-│ Backtester: training (365d) + holdout (30d)                    │
+│ Backtester daemon: training (730d) + holdout (30d)             │
 │ Score calculation (unified formula)                            │
-│ Post-scoring: shuffle test + multi-window (if score >= 40)     │
-│ Output: strategies (status: ACTIVE pool or DELETE)             │
+│ If score >= min_score:                                         │
+│   - Shuffle test (cached by base_code_hash)                    │
+│   - Multi-window validation (NOT cached - per-strategy)        │
+│ Output: strategies (status: ACTIVE pool or FAILED)             │
 └────────────────────────────────────────────────────────────────┘
                           ↓
 ┌────────────────────────────────────────────────────────────────┐
 │ PHASE 4: ROTATION                                              │
 ├────────────────────────────────────────────────────────────────┤
-│ Rotator: selects top from ACTIVE → deploys to subaccounts      │
+│ Rotator daemon: selects top from ACTIVE → deploys to subaccounts│
 │ Output: strategies (status: LIVE)                              │
 └────────────────────────────────────────────────────────────────┘
                           ↓
 ┌────────────────────────────────────────────────────────────────┐
 │ PHASE 5: MONITORING                                            │
 ├────────────────────────────────────────────────────────────────┤
-│ Monitor: tracks live performance, retires underperformers      │
+│ Monitor daemon: tracks live performance, retires underperformers│
 │ Output: strategies (status: RETIRED if degraded)               │
 └────────────────────────────────────────────────────────────────┘
 ```
+
+### Daemon Processes
+
+The system runs as **8 independent daemon processes**, each with its own `main_continuous.py`:
+
+| Daemon | Location | Purpose |
+|--------|----------|---------|
+| **Generator** | `src/generator/main_continuous.py` | Creates strategies via AI/patterns |
+| **Validator** | `src/validator/main_continuous.py` | Syntax, AST, execution validation |
+| **Backtester** | `src/backtester/main_continuous.py` | Backtest, score, shuffle, multi-window |
+| **Rotator** | `src/rotator/main_continuous.py` | ACTIVE → LIVE rotation |
+| **Executor** | `src/executor/main_continuous.py` | Live trading on Hyperliquid |
+| **Monitor** | `src/monitor/main_continuous.py` | Performance tracking dashboard |
+| **Scheduler** | `src/scheduler/main_continuous.py` | Scheduled tasks (pairs update, etc.) |
+| **Subaccount** | `src/subaccount/main_continuous.py` | Subaccount allocation management |
+
+**Running daemons:**
+```bash
+# Each daemon runs independently
+python -m src.generator.main_continuous
+python -m src.validator.main_continuous
+python -m src.backtester.main_continuous
+python -m src.executor.main_continuous
+# etc.
+```
+
+### Strategy Status Lifecycle
+
+```
+GENERATED → VALIDATED → ACTIVE → LIVE → RETIRED
+     ↓           ↓          ↓
+   FAILED     FAILED     FAILED
+```
+
+**Status definitions:**
+- `GENERATED`: Created by AI, awaiting validation
+- `VALIDATED`: Passed syntax/AST/execution checks
+- `ACTIVE`: In pool (max 300), passed backtest + shuffle + multi-window
+- `LIVE`: Currently trading live on subaccount
+- `RETIRED`: Removed from live trading
+- `FAILED`: Failed at any stage (validation, backtest, or tests)
 
 ### Strategy Sources and generation_mode
 
@@ -449,210 +539,28 @@ generation:
 
 3. **ai_assigned**: Generator gets indicator combo from IndicatorCombinator → calls AI with assigned indicators → Validator → Backtester (parametric optimization) → creates `optimized` strategies → Pool
 
-4. **optimized**: Created by Backtester during parametric optimization. Already has optimized params, goes directly to Pool (shuffle test → multi-window → ACTIVE).
+4. **optimized**: Created by Backtester during parametric optimization. Already has optimized params, goes to Pool after validation tests.
+
+**Validation caching:**
+- **Shuffle test**: Cached by `base_code_hash` (lookahead = property of base code)
+- **Multi-window**: NOT cached (consistency = property of parameters, each strategy tested independently)
 
 ---
 
-## 🚀 SCALABILITY ARCHITECTURE (Designed for 1000+ Strategies)
+## 🚀 SCALABILITY (Future Plans)
 
-### Design Philosophy
-SixBTC is architected from the foundation to scale from 10 to 1000+ live strategies without architectural rewrites. The system uses a **hybrid execution model** that adapts based on load.
+**Current implementation**: Sync execution with `ThreadPoolExecutor` for parallel backtesting.
 
-### Scalability Tiers
+**Future scalability tiers** (not yet implemented):
 
-| Strategies | Mode | CPU Cores | RAM | WebSockets | Throughput | Notes |
-|-----------|------|-----------|-----|------------|------------|-------|
-| **1-50** | Sync | 1-2 | 500MB | 1 | 20/sec | Simple, single-threaded |
-| **50-100** | Async | 2-4 | 1GB | 1-2 | 100/sec | Event loop concurrency |
-| **100-500** | Multi-process | 8-16 | 2GB | 5 | 200/sec | Worker pool |
-| **500-1000** | Hybrid | 16-32 | 4GB | 10 | 500/sec | Multi-process + async |
-| **1000+** | Distributed | N/A | N/A | 20+ | 2000/sec | Redis + multiple servers |
+| Strategies | Mode | Status |
+|-----------|------|--------|
+| **1-100** | Sync + ThreadPool | ✅ Current |
+| **100-500** | Async + ProcessPool | 🔮 Planned |
+| **500+** | Hybrid (multi-process + async) | 🔮 Planned |
+| **1000+** | Distributed (Redis + multiple servers) | 🔮 Planned |
 
-### Execution Modes
-
-#### **Mode 1: Sync (Default for <50 strategies)**
-```python
-class SyncOrchestrator:
-    """Simple single-threaded execution"""
-    def run_iteration(self, strategies: list):
-        for strategy in strategies:
-            signal = strategy.generate_signal(df)
-            if signal:
-                self.execute_signal(strategy, signal)
-```
-
-**Characteristics**:
-- ✅ Simple, easy to debug
-- ✅ No concurrency issues
-- ❌ Limited throughput (~20 strategies/sec)
-
----
-
-#### **Mode 2: Async (50-100 strategies)**
-```python
-class AsyncOrchestrator:
-    """Event loop for concurrent I/O"""
-    async def run_iteration(self, strategies: list):
-        # Generate signals (CPU-bound, but fast)
-        signals = [s.generate_signal(df) for s in strategies]
-
-        # Execute concurrently (I/O-bound)
-        tasks = [
-            self.async_client.execute_signal(sig)
-            for sig in signals if sig
-        ]
-        await asyncio.gather(*tasks)
-```
-
-**Characteristics**:
-- ✅ Concurrent API calls (100+ req/sec)
-- ✅ Single process, low overhead
-- ⚠️ Requires async Hyperliquid client
-
----
-
-#### **Mode 3: Multi-Process (100-500 strategies)**
-```python
-class MultiProcessOrchestrator:
-    """Worker pool for CPU parallelism"""
-    def __init__(self, n_workers: int = 10):
-        self.executor = ProcessPoolExecutor(max_workers=n_workers)
-
-    def run_iteration(self, strategies: list):
-        # Distribute strategies to workers
-        futures = [
-            self.executor.submit(self._execute_strategy, s)
-            for s in strategies
-        ]
-
-        # Wait for completion
-        results = [f.result() for f in futures]
-```
-
-**Characteristics**:
-- ✅ True parallelism (multi-core)
-- ✅ Linear scaling with CPU cores
-- ⚠️ Requires shared data layer (Redis or shared memory)
-
----
-
-#### **Mode 4: Hybrid (500-1000 strategies)** ⭐ **RECOMMENDED**
-```python
-class HybridOrchestrator:
-    """Combines multi-process + async for optimal performance"""
-    def __init__(self, n_workers: int = 10):
-        self.executor = ProcessPoolExecutor(max_workers=n_workers)
-        self.async_client = AsyncHyperliquidClient()
-
-    async def run_iteration(self, strategies: list):
-        loop = asyncio.get_event_loop()
-
-        # 1. Parallel signal generation (CPU-bound)
-        signal_futures = [
-            loop.run_in_executor(
-                self.executor,
-                strategy.generate_signal,
-                df
-            )
-            for strategy in strategies
-        ]
-        signals = await asyncio.gather(*signal_futures)
-
-        # 2. Concurrent API execution (I/O-bound)
-        exec_tasks = [
-            self.async_client.execute_signal(sig)
-            for sig in signals if sig
-        ]
-        await asyncio.gather(*exec_tasks)
-```
-
-**Characteristics**:
-- ✅ Best of both worlds
-- ✅ 200+ signals/sec (CPU) + 1000+ orders/sec (I/O)
-- ✅ Scales to 1000 strategies on single server
-
----
-
-### Multi-WebSocket Architecture
-
-**Problem**: Hyperliquid WebSocket limit ~100-150 symbols per connection
-
-**Solution**: Multiple WebSocket connections with shared cache
-
-```python
-class MultiWebSocketDataProvider:
-    """Manages multiple WebSocket connections for >100 symbols"""
-    def __init__(self, max_symbols_per_ws: int = 100):
-        self.websockets = []
-        self.cache = {}  # Shared thread-safe cache
-        self.lock = threading.RLock()
-
-    def subscribe_all(self, symbols: list[str], timeframes: list[str]):
-        # Split symbols across connections
-        chunks = self._chunk(symbols, max_symbols_per_ws)
-
-        for chunk in chunks:
-            ws = HyperliquidWebSocket()
-            for symbol in chunk:
-                for tf in timeframes:
-                    ws.subscribe_candles(symbol, tf)
-
-            self.websockets.append(ws)
-            threading.Thread(
-                target=self._listen,
-                args=[ws],
-                daemon=True
-            ).start()
-
-    def _listen(self, ws: HyperliquidWebSocket):
-        """WebSocket listener - updates shared cache"""
-        while True:
-            msg = ws.recv()
-            with self.lock:
-                self._update_cache(msg)
-```
-
-**Scaling**:
-- 100 symbols → 1 WebSocket
-- 500 symbols → 5 WebSockets
-- 1000 symbols → 10 WebSockets
-
----
-
-### Adaptive Execution Scheduler
-
-```python
-class AdaptiveScheduler:
-    """Automatically selects execution mode based on load"""
-    def __init__(self):
-        self.mode = 'sync'  # Start simple
-
-    def determine_mode(self, n_strategies: int) -> str:
-        if n_strategies <= 50:
-            return 'sync'
-        elif n_strategies <= 100:
-            return 'async'
-        elif n_strategies <= 500:
-            return 'multiprocess'
-        else:
-            return 'hybrid'
-
-    def run_iteration(self, strategies: list):
-        # Auto-detect optimal mode
-        mode = self.determine_mode(len(strategies))
-
-        if mode != self.mode:
-            logger.info(f"Switching execution mode: {self.mode} → {mode}")
-            self._switch_mode(mode)
-
-        # Execute with appropriate orchestrator
-        return self.orchestrator.run_iteration(strategies)
-```
-
-**Benefits**:
-- ✅ Starts simple (sync)
-- ✅ Automatically scales up as strategies increase
-- ✅ No manual configuration required
+**Note**: The architecture is designed to scale, but advanced execution modes will be implemented when needed.
 
 ---
 
@@ -741,45 +649,35 @@ hyperliquid:
 # Activate environment
 source /home/bitwolf/sixbtc/.venv/bin/activate
 
-# Verify configuration
-python -m src.config.validator
+# Verify configuration loads without errors
+python -c "from src.config import load_config; load_config()"
 
 # Test database connection
-python -m src.database.test_connection
+python -c "from src.database.connection import get_engine; get_engine().connect()"
 
-# Test Hyperliquid API
-python -m src.executor.test_connection
+# Test Hyperliquid API (requires valid credentials)
+python -c "from src.executor.hyperliquid_client import HyperliquidClient; HyperliquidClient()"
 ```
 
-### 2. Development Phase
+### 2. Running Daemons
 ```bash
-# Generate strategies
-python main.py generate --count 10
-
-# Backtest single strategy
-python main.py backtest --strategy Strategy_MOM_abc123
-
-# Backtest all pending
-python main.py backtest --all
-
-# Classify and select top 10
-python main.py classify
-
-# Deploy to subaccounts
-python main.py deploy --dry-run  # Test first
-python main.py deploy            # Live deployment
+# Start individual daemons (each in separate terminal/tmux pane)
+python -m src.generator.main_continuous    # Strategy generation
+python -m src.validator.main_continuous    # Validation pipeline
+python -m src.backtester.main_continuous   # Backtesting + scoring
+python -m src.rotator.main_continuous      # ACTIVE → LIVE rotation
+python -m src.executor.main_continuous     # Live trading execution
+python -m src.monitor.main_continuous      # Performance dashboard
+python -m src.scheduler.main_continuous    # Scheduled tasks
+python -m src.subaccount.main_continuous   # Subaccount management
 ```
 
-### 3. Monitoring Phase
+### 3. CLI (Scaffold - Limited Functionality)
 ```bash
-# Real-time dashboard
-python main.py monitor
-
-# Check subaccount performance
+# Basic status check
 python main.py status
 
-# Emergency stop all
-python main.py emergency-stop
+# Note: Most functionality is in the daemon processes, not CLI
 ```
 
 ### 4. Testing Requirements

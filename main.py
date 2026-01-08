@@ -681,8 +681,9 @@ def deploy(ctx, dry_run, live):
         console.print("[dim]No real orders will be placed[/dim]\n")
 
     try:
-        from src.executor.subaccount_manager import SubaccountManager
         from src.executor.hyperliquid_client import HyperliquidClient
+        from src.database import get_session, Strategy, Subaccount
+        from src.config.loader import get_subaccount_count
 
         # Load selected strategies
         if not SELECTED_DIR.exists():
@@ -697,53 +698,75 @@ def deploy(ctx, dry_run, live):
 
         console.print(f"Found {len(selected_files)} strategies to deploy\n")
 
-        # Initialize client and manager
-        client = HyperliquidClient(config, dry_run=dry_run)
-        manager = SubaccountManager(client, config)
+        # Initialize client for health check
+        client = HyperliquidClient(config._raw_config, dry_run=dry_run)
 
-        # Get subaccount count
-        if config.get('hyperliquid.subaccounts.test_mode.enabled', False):
-            max_subaccounts = config.get('hyperliquid.subaccounts.test_mode.count', 3)
-        else:
-            max_subaccounts = config.get('hyperliquid.subaccounts.total', 10)
+        # Get subaccount count from .env credentials
+        max_subaccounts = get_subaccount_count()
+        console.print(f"Available subaccounts: {max_subaccounts}\n")
 
         strategies_to_deploy = selected_files[:max_subaccounts]
 
         console.print(f"Deploying to {len(strategies_to_deploy)} subaccounts...\n")
 
-        # Deploy strategies
+        # Deploy strategies via database
         deployed = []
 
-        for i, strategy_path in enumerate(strategies_to_deploy, 1):
-            strategy_name = strategy_path.stem
+        with get_session() as session:
+            for i, strategy_path in enumerate(strategies_to_deploy, 1):
+                strategy_name = strategy_path.stem
 
-            try:
-                result = manager.deploy_strategy(
-                    subaccount_id=i,
-                    strategy_name=strategy_name
-                )
+                try:
+                    # Find strategy in database by name
+                    strategy = session.query(Strategy).filter(
+                        Strategy.name == strategy_name
+                    ).first()
 
-                deployed.append({
-                    'subaccount': i,
-                    'strategy': strategy_name,
-                    'status': 'DEPLOYED' if result else 'FAILED'
-                })
+                    if not strategy:
+                        logger.warning(f"Strategy {strategy_name} not found in database")
+                        deployed.append({
+                            'subaccount': i,
+                            'strategy': strategy_name,
+                            'status': 'NOT_FOUND'
+                        })
+                        continue
 
-                # Move to live directory
-                if result:
+                    # Update strategy status to LIVE
+                    strategy.status = 'LIVE'
+
+                    # Find or create subaccount record
+                    subaccount = session.query(Subaccount).filter(
+                        Subaccount.id == i
+                    ).first()
+
+                    if not subaccount:
+                        subaccount = Subaccount(id=i, status='ACTIVE')
+                        session.add(subaccount)
+
+                    # Link strategy to subaccount
+                    subaccount.strategy_id = strategy.id
+                    subaccount.status = 'ACTIVE'
+
+                    deployed.append({
+                        'subaccount': i,
+                        'strategy': strategy_name,
+                        'status': 'DEPLOYED'
+                    })
+
+                    # Move to live directory
                     LIVE_DIR.mkdir(parents=True, exist_ok=True)
                     dest = LIVE_DIR / strategy_path.name
                     strategy_path.rename(dest)
 
-                logger.info(f"Deployed {strategy_name} to subaccount {i}")
+                    logger.info(f"Deployed {strategy_name} to subaccount {i}")
 
-            except Exception as e:
-                logger.error(f"Failed to deploy {strategy_name}: {e}")
-                deployed.append({
-                    'subaccount': i,
-                    'strategy': strategy_name,
-                    'status': 'ERROR'
-                })
+                except Exception as e:
+                    logger.error(f"Failed to deploy {strategy_name}: {e}")
+                    deployed.append({
+                        'subaccount': i,
+                        'strategy': strategy_name,
+                        'status': 'ERROR'
+                    })
 
         # Summary
         success_count = sum(1 for d in deployed if d['status'] == 'DEPLOYED')

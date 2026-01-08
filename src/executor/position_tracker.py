@@ -438,9 +438,9 @@ class PositionTracker:
         discrepancies = 0
 
         # Get positions from exchange for all subaccounts
-        for subaccount_id in range(1, self.total_subaccounts + 1):
-            self.client.switch_subaccount(subaccount_id)
-            exchange_positions = self.client.get_positions()
+        subaccount_count = getattr(self.client, 'subaccount_count', self.total_subaccounts)
+        for subaccount_id in range(1, subaccount_count + 1):
+            exchange_positions = self.client.get_positions(subaccount_id)
 
             # Convert to dict for easy lookup
             exchange_symbols = {pos.symbol for pos in exchange_positions}

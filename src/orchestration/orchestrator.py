@@ -26,7 +26,6 @@ from src.orchestration.adaptive_scheduler import AdaptiveScheduler
 from src.executor.hyperliquid_client import HyperliquidClient
 from src.executor.risk_manager import RiskManager
 from src.executor.position_tracker import PositionTracker
-from src.executor.subaccount_manager import SubaccountManager
 from src.strategies.base import StrategyCore, Signal
 from src.database.connection import get_session
 from src.database.models import Strategy
@@ -72,18 +71,9 @@ class Orchestrator:
         self.shutdown_requested = False
 
         # Components
-        # Extract credentials from config (if available)
-        private_key = config.get('hyperliquid', {}).get('private_key')
-        vault_address = config.get('hyperliquid', {}).get('vault_address')
-
-        self.client = HyperliquidClient(
-            private_key=private_key,
-            vault_address=vault_address,
-            dry_run=dry_run
-        )
+        self.client = HyperliquidClient(config=config, dry_run=dry_run)
         self.risk_manager = RiskManager(config)
         self.position_tracker = PositionTracker(client=self.client)
-        self.subaccount_manager = SubaccountManager(self.client, config=config, dry_run=dry_run)
         self.scheduler = AdaptiveScheduler(config)
 
         # Data provider (initialized later)
@@ -417,7 +407,8 @@ class Orchestrator:
             return
 
         current_price = df['close'].iloc[-1]
-        account_balance = self.client.get_account_balance()
+        subaccount_id = strategy_inst.subaccount_id
+        account_balance = self.client.get_account_balance(subaccount_id)
 
         # Calculate position size with risk manager
         size, stop_loss, take_profit = self.risk_manager.calculate_position_size(
@@ -427,12 +418,10 @@ class Orchestrator:
             df=df
         )
 
-        # Switch to correct subaccount
-        self.client.switch_subaccount(strategy_inst.subaccount_id)
-
-        # Place order via client
+        # Place order via client (subaccount_id as first parameter)
         if signal.direction in ['long', 'short']:
             order = self.client.place_order(
+                subaccount_id=subaccount_id,
                 symbol=strategy_inst.symbol,
                 side='buy' if signal.direction == 'long' else 'sell',
                 size=size,
@@ -447,6 +436,7 @@ class Orchestrator:
         elif signal.direction == 'close':
             # Close position
             self.client.close_position(
+                subaccount_id=subaccount_id,
                 symbol=strategy_inst.symbol
             )
 
@@ -462,22 +452,26 @@ class Orchestrator:
         """Close all open positions"""
         for strategy_inst in self.strategies:
             try:
-                # Switch to strategy's subaccount
-                self.client.switch_subaccount(strategy_inst.subaccount_id)
-                # Close position for this symbol
-                self.client.close_position(strategy_inst.symbol)
+                self.client.close_position(
+                    subaccount_id=strategy_inst.subaccount_id,
+                    symbol=strategy_inst.symbol
+                )
                 logger.info(f"Closed position for {strategy_inst.symbol} on subaccount {strategy_inst.subaccount_id}")
             except Exception as e:
                 logger.error(f"Error closing position for {strategy_inst.symbol}: {e}")
 
     def _cancel_all_orders(self) -> None:
         """Cancel all pending orders"""
+        # Track already-cancelled subaccounts to avoid duplicates
+        cancelled_subaccounts = set()
+
         for strategy_inst in self.strategies:
+            if strategy_inst.subaccount_id in cancelled_subaccounts:
+                continue
+
             try:
-                # Switch to strategy's subaccount
-                self.client.switch_subaccount(strategy_inst.subaccount_id)
-                # Cancel all orders for this subaccount
-                self.client.cancel_all_orders()
+                self.client.cancel_all_orders(strategy_inst.subaccount_id)
+                cancelled_subaccounts.add(strategy_inst.subaccount_id)
                 logger.info(f"Cancelled orders for subaccount {strategy_inst.subaccount_id}")
             except Exception as e:
                 logger.error(f"Error canceling orders for subaccount {strategy_inst.subaccount_id}: {e}")

@@ -82,84 +82,148 @@ class HyperliquidClient:
     def __init__(
         self,
         config: Optional[Dict] = None,
-        private_key: Optional[str] = None,
-        vault_address: Optional[str] = None,
         dry_run: bool = True
     ):
         """
-        Initialize Hyperliquid client
+        Initialize Hyperliquid client with multi-subaccount support.
+
+        Architecture:
+        - SHARED: Info client, CCXT client, asset cache (one instance)
+        - PER-SUBACCOUNT: Exchange clients (lazy loading, one per subaccount)
 
         Args:
             config: Configuration dict
-            private_key: Hyperliquid private key (or from env/config)
-            vault_address: Hyperliquid wallet address (or from env/config)
             dry_run: If True, log operations without executing
 
         Raises:
             ValueError: If live mode without valid credentials
         """
         # Determine dry_run mode - single source of truth: hyperliquid.dry_run
-        if dry_run is not None:
-            self.dry_run = dry_run
-        elif config is not None:
-            self.dry_run = config.get('hyperliquid', {}).get('dry_run', True)
-        else:
-            self.dry_run = True
-
-        # Get credentials from config, params, or environment
         if config is not None:
-            hl_config = config.get('hyperliquid', {})
-            self.private_key = private_key or hl_config.get('private_key') or os.getenv('HYPERLIQUID_PRIVATE_KEY')
-            self.wallet_address = vault_address or hl_config.get('vault_address') or hl_config.get('wallet_address') or os.getenv('HYPERLIQUID_WALLET_ADDRESS')
-            self.testnet = hl_config.get('testnet', False)
+            self.dry_run = config.get('hyperliquid', {}).get('dry_run', dry_run)
+            self.testnet = config.get('hyperliquid', {}).get('testnet', False)
         else:
-            self.private_key = private_key or os.getenv('HYPERLIQUID_PRIVATE_KEY')
-            self.wallet_address = vault_address or os.getenv('HYPERLIQUID_WALLET_ADDRESS')
+            self.dry_run = dry_run
             self.testnet = False
 
-        self.current_subaccount = 1
+        # Master address for read-only queries (REQUIRED)
+        self.user_address = os.getenv('HL_USER_ADDRESS')
 
-        # Get total subaccounts (auto-detect from .env)
-        from src.config.loader import get_subaccount_count
-        self.total_subaccounts = get_subaccount_count()
+        # API URL
+        self.api_url = constants.TESTNET_API_URL if self.testnet else constants.MAINNET_API_URL
 
-        # Initialize Info client (read-only, always available)
-        api_url = constants.TESTNET_API_URL if self.testnet else constants.MAINNET_API_URL
-        self.info = Info(api_url, skip_ws=True)
+        # SHARED: Info client (read-only, always available)
+        self.info = Info(self.api_url, skip_ws=True)
 
-        # Initialize Exchange client for trading (only if credentials provided)
-        self.exchange_client = None
-        if self.private_key and self.wallet_address:
-            try:
-                account = Account.from_key(self.private_key)
-                self.exchange_client = Exchange(account, api_url)
-                wallet_display = f"{self.wallet_address[:6]}...{self.wallet_address[-4:]}"
-                logger.info(f"Hyperliquid Exchange client initialized: {wallet_display}")
-            except Exception as e:
-                logger.error(f"Failed to initialize Exchange client: {e}")
-                self.exchange_client = None
-
-        # Initialize CCXT client for market data
+        # SHARED: CCXT client for market data
         self.ccxt_client = ccxt.hyperliquid({
             "enableRateLimit": True,
             "timeout": 30000,
             "rateLimit": 200,
         })
 
+        # PER-SUBACCOUNT: Exchange clients (lazy loading)
+        self._exchange_clients: Dict[int, Exchange] = {}
+        self._subaccount_credentials: Dict[int, Dict[str, str]] = {}
+        self._load_subaccount_credentials()
+
         # Cache for asset metadata
         self._asset_meta_cache: Dict[str, Dict] = {}
         self._last_request_time = 0
         self._load_asset_metadata()
 
-        # Validate live mode credentials
+        # Validate configuration
         if not self.dry_run:
-            if not self.private_key or not self.wallet_address:
-                raise ValueError("Live trading requires valid private_key and wallet_address")
-            if not self.exchange_client:
-                raise ValueError("Live trading requires Exchange client initialization")
+            if not self.user_address:
+                raise ValueError("Live trading requires HL_USER_ADDRESS in .env")
+            if not self._subaccount_credentials:
+                raise ValueError(
+                    "Live trading requires at least one subaccount configured. "
+                    "Set HYPERLIQUID_PRIVATE_KEY_1 and HYPERLIQUID_SUBACCOUNT_ADDRESS_1 in .env"
+                )
             logger.warning("LIVE TRADING MODE - Real orders will be placed!")
         else:
             logger.info("Dry-run mode enabled - Operations will be logged only")
+
+        logger.info(
+            f"HyperliquidClient initialized: {self.subaccount_count} subaccounts configured"
+        )
+
+    def _load_subaccount_credentials(self) -> None:
+        """Load all subaccount credentials from .env (lazy - Exchange created on first use)"""
+        from src.config.loader import get_subaccount_count, get_subaccount_credentials
+
+        for i in range(1, 101):  # Support up to 100 subaccounts
+            try:
+                creds = get_subaccount_credentials(i)
+                self._subaccount_credentials[i] = creds
+            except ValueError:
+                break  # Stop at first missing subaccount
+
+        if self._subaccount_credentials:
+            logger.info(f"Loaded credentials for {len(self._subaccount_credentials)} subaccounts")
+        else:
+            logger.warning("No subaccount credentials found in .env")
+
+    def _get_exchange(self, subaccount_id: int) -> Exchange:
+        """
+        Get or create Exchange client for a specific subaccount (lazy loading).
+
+        Each subaccount has its own Exchange client with separate nonce tracking.
+
+        Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
+
+        Returns:
+            Exchange client for the subaccount
+
+        Raises:
+            ValueError: If subaccount not configured
+        """
+        if subaccount_id not in self._subaccount_credentials:
+            raise ValueError(
+                f"Subaccount {subaccount_id} not configured. "
+                f"Available: {list(self._subaccount_credentials.keys())}"
+            )
+
+        # Lazy create Exchange client on first use
+        if subaccount_id not in self._exchange_clients:
+            creds = self._subaccount_credentials[subaccount_id]
+            account = Account.from_key(creds['private_key'])
+            self._exchange_clients[subaccount_id] = Exchange(
+                account,
+                self.api_url,
+                vault_address=creds['address']
+            )
+            addr_display = f"{creds['address'][:6]}...{creds['address'][-4:]}"
+            logger.info(f"Exchange client created for subaccount {subaccount_id}: {addr_display}")
+
+        return self._exchange_clients[subaccount_id]
+
+    def _get_subaccount_address(self, subaccount_id: int) -> str:
+        """
+        Get address for a specific subaccount (for queries).
+
+        Args:
+            subaccount_id: Subaccount number
+
+        Returns:
+            Subaccount wallet address
+
+        Raises:
+            ValueError: If subaccount not configured (live mode only)
+        """
+        if subaccount_id not in self._subaccount_credentials:
+            # In dry_run mode, return a fake address for testing
+            if self.dry_run:
+                return '0x' + '0' * 40
+            raise ValueError(f"Subaccount {subaccount_id} not configured")
+        return self._subaccount_credentials[subaccount_id]['address']
+
+    @property
+    def subaccount_count(self) -> int:
+        """Number of configured subaccounts"""
+        return len(self._subaccount_credentials) or 1  # Minimum 1 for dry_run
 
     def _load_asset_metadata(self):
         """Load asset metadata (sz_decimals, max leverage) from Hyperliquid"""
@@ -216,24 +280,6 @@ class HyperliquidClient:
         else:
             return round(price, 6)
 
-    def switch_subaccount(self, subaccount_id: int) -> bool:
-        """
-        Switch to specified subaccount
-
-        Args:
-            subaccount_id: Target subaccount (1 to configured max)
-
-        Returns:
-            True if switched successfully
-        """
-        if not 1 <= subaccount_id <= self.total_subaccounts:
-            logger.error(f"Invalid subaccount_id: {subaccount_id} (valid: 1-{self.total_subaccounts})")
-            return False
-
-        self.current_subaccount = subaccount_id
-        logger.info(f"Switched to subaccount {subaccount_id}")
-        return True
-
     def get_current_price(self, symbol: str) -> float:
         """
         Get current market price for symbol
@@ -276,30 +322,33 @@ class HyperliquidClient:
             logger.error(f"Failed to get current prices: {e}")
             return {}
 
-    def get_account_balance(self) -> float:
+    def get_account_balance(self, subaccount_id: int) -> float:
         """
-        Get account balance for current subaccount
+        Get account balance for a specific subaccount.
+
+        Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
 
         Returns:
             Available balance in USD
 
         Raises:
-            ValueError: If wallet address not configured
+            ValueError: If subaccount not configured
             RuntimeError: If API call fails (do NOT mask - critical for position sizing)
         """
-        if not self.wallet_address:
-            raise ValueError("No wallet address configured")
-
         try:
+            address = self._get_subaccount_address(subaccount_id)
             self._wait_rate_limit()
-            user_state = self.info.user_state(self.wallet_address)
+            user_state = self.info.user_state(address)
             margin_summary = user_state.get("marginSummary", {})
             account_value = float(margin_summary.get("accountValue", 0))
             return account_value
 
+        except ValueError:
+            raise  # Re-raise config errors
         except Exception as e:
             # Critical error - do NOT mask with return 0.0 (would break position sizing)
-            logger.error(f"Failed to get account balance: {e}")
+            logger.error(f"Failed to get account balance for subaccount {subaccount_id}: {e}")
             raise RuntimeError(f"Failed to get account balance: {e}") from e
 
     def get_account_state(self, address: Optional[str] = None) -> Dict[str, Any]:
@@ -325,20 +374,20 @@ class HyperliquidClient:
             logger.error(f"Failed to get account state: {e}")
             return {}
 
-    def get_positions(self) -> List[Position]:
+    def get_positions(self, subaccount_id: int) -> List[Position]:
         """
-        Get all open positions on current subaccount
+        Get all open positions for a specific subaccount.
+
+        Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
 
         Returns:
             List of Position objects
         """
-        if not self.wallet_address:
-            logger.error("No wallet address configured")
-            return []
-
         try:
+            address = self._get_subaccount_address(subaccount_id)
             self._wait_rate_limit()
-            user_state = self.info.user_state(self.wallet_address)
+            user_state = self.info.user_state(address)
 
             positions = []
             for asset_pos in user_state.get("assetPositions", []):
@@ -375,25 +424,28 @@ class HyperliquidClient:
                     margin_used=margin_used
                 ))
 
-            logger.debug(f"Retrieved {len(positions)} positions")
+            logger.debug(f"Retrieved {len(positions)} positions for subaccount {subaccount_id}")
             return positions
 
+        except ValueError:
+            raise  # Re-raise config errors
         except Exception as e:
-            logger.error(f"Failed to get positions: {e}")
+            logger.error(f"Failed to get positions for subaccount {subaccount_id}: {e}")
             return []
 
-    def get_position(self, symbol: str) -> Optional[Position]:
+    def get_position(self, subaccount_id: int, symbol: str) -> Optional[Position]:
         """
-        Get position for specific symbol
+        Get position for specific symbol on a subaccount.
 
         Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
             symbol: Trading pair
 
         Returns:
             Position object or None if no position
         """
         base_symbol = symbol.split("/")[0].split("-")[0]
-        positions = self.get_positions()
+        positions = self.get_positions(subaccount_id)
 
         for pos in positions:
             if pos.symbol == base_symbol:
@@ -401,17 +453,17 @@ class HyperliquidClient:
 
         return None
 
-    def get_open_positions(self, address: Optional[str] = None) -> List[Dict]:
+    def get_open_positions(self, subaccount_id: int) -> List[Dict]:
         """
-        Get open positions as list of dicts
+        Get open positions as list of dicts for a subaccount.
 
         Args:
-            address: Account address (uses configured wallet if None)
+            subaccount_id: Subaccount number (1, 2, 3, ...)
 
         Returns:
             List of position dicts
         """
-        positions = self.get_positions()
+        positions = self.get_positions(subaccount_id)
         return [
             {
                 'coin': pos.symbol,
@@ -426,6 +478,7 @@ class HyperliquidClient:
 
     def place_market_order(
         self,
+        subaccount_id: int,
         symbol: str,
         side: str,
         size: float,
@@ -433,9 +486,10 @@ class HyperliquidClient:
         take_profit: Optional[float] = None
     ) -> Optional[Order]:
         """
-        Place market order
+        Place market order on a specific subaccount.
 
         Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
             symbol: Trading pair (e.g., 'BTC')
             side: 'long'/'buy' or 'short'/'sell'
             size: Position size
@@ -446,7 +500,7 @@ class HyperliquidClient:
             Order object with execution details, or None if failed
 
         Raises:
-            ValueError: If invalid parameters
+            ValueError: If invalid parameters or subaccount not configured
         """
         # Normalize side
         if side == 'buy':
@@ -483,8 +537,10 @@ class HyperliquidClient:
                 timestamp=time.time()
             )
 
-        if not self.exchange_client:
-            logger.error("Exchange client not initialized - cannot place orders")
+        try:
+            exchange = self._get_exchange(subaccount_id)
+        except ValueError as e:
+            logger.error(str(e))
             return None
 
         try:
@@ -508,11 +564,11 @@ class HyperliquidClient:
             aggressive_price = self.round_price(aggressive_price)
 
             logger.info(
-                f"Placing market order: {base_symbol} {side} {rounded_size} "
+                f"[Subaccount {subaccount_id}] Placing market order: {base_symbol} {side} {rounded_size} "
                 f"(current=${current_price:.2f}, aggressive=${aggressive_price:.2f})"
             )
 
-            result = self.exchange_client.order(
+            result = exchange.order(
                 base_symbol,
                 is_buy,
                 float(rounded_size),
@@ -562,6 +618,7 @@ class HyperliquidClient:
 
     def place_order(
         self,
+        subaccount_id: int,
         symbol: str,
         side: str,
         size: float,
@@ -571,9 +628,10 @@ class HyperliquidClient:
         take_profit: Optional[float] = None
     ) -> Dict:
         """
-        Place order (generic interface)
+        Place order (generic interface) on a specific subaccount.
 
         Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
             symbol: Trading pair
             side: 'long'/'short' or 'buy'/'sell'
             size: Position size
@@ -590,7 +648,7 @@ class HyperliquidClient:
         self.dry_run = effective_dry_run
 
         try:
-            order = self.place_market_order(symbol, side, size, stop_loss, take_profit)
+            order = self.place_market_order(subaccount_id, symbol, side, size, stop_loss, take_profit)
 
             if order:
                 return {
@@ -610,13 +668,15 @@ class HyperliquidClient:
 
     def close_position(
         self,
+        subaccount_id: int,
         symbol: str,
         reason: str = "Manual close"
     ) -> bool:
         """
-        Close position for symbol
+        Close position for symbol on a specific subaccount.
 
         Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
             symbol: Trading pair to close
             reason: Reason for closing
 
@@ -624,21 +684,23 @@ class HyperliquidClient:
             True if closed successfully
         """
         base_symbol = symbol.split("/")[0].split("-")[0]
-        position = self.get_position(base_symbol)
+        position = self.get_position(subaccount_id, base_symbol)
 
         if not position:
-            logger.warning(f"No position to close for {base_symbol}")
+            logger.warning(f"No position to close for {base_symbol} on subaccount {subaccount_id}")
             return False
 
         if self.dry_run:
             logger.info(
                 f"[DRY RUN] Would close position {base_symbol}: {position.side} {position.size} "
-                f"(reason: {reason})"
+                f"(reason: {reason}, subaccount: {subaccount_id})"
             )
             return True
 
-        if not self.exchange_client:
-            logger.error("Exchange client not initialized")
+        try:
+            exchange = self._get_exchange(subaccount_id)
+        except ValueError as e:
+            logger.error(str(e))
             return False
 
         try:
@@ -657,9 +719,9 @@ class HyperliquidClient:
 
             aggressive_price = self.round_price(aggressive_price)
 
-            logger.info(f"Closing position: {base_symbol} {position.size} (reason: {reason})")
+            logger.info(f"[Subaccount {subaccount_id}] Closing position: {base_symbol} {position.size} (reason: {reason})")
 
-            result = self.exchange_client.order(
+            result = exchange.order(
                 base_symbol,
                 is_buy,
                 float(position.size),
@@ -679,49 +741,54 @@ class HyperliquidClient:
             logger.error(f"Error closing position for {base_symbol}: {e}")
             return False
 
-    def close_all_positions(self) -> int:
+    def close_all_positions(self, subaccount_id: int) -> int:
         """
-        Close all positions on current subaccount
+        Close all positions on a specific subaccount.
+
+        Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
 
         Returns:
             Number of positions closed
         """
-        positions = self.get_positions()
+        positions = self.get_positions(subaccount_id)
 
         if not positions:
-            logger.info("No positions to close")
+            logger.info(f"No positions to close on subaccount {subaccount_id}")
             return 0
 
         closed = 0
         for pos in positions:
-            if self.close_position(pos.symbol, "Close all"):
+            if self.close_position(subaccount_id, pos.symbol, "Close all"):
                 closed += 1
 
-        logger.info(f"Closed {closed}/{len(positions)} positions")
+        logger.info(f"[Subaccount {subaccount_id}] Closed {closed}/{len(positions)} positions")
         return closed
 
-    def cancel_all_orders(self) -> int:
+    def cancel_all_orders(self, subaccount_id: int) -> int:
         """
-        Cancel all pending orders on current subaccount
+        Cancel all pending orders on a specific subaccount.
+
+        Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
 
         Returns:
             Number of orders cancelled
         """
-        if not self.wallet_address:
-            logger.error("No wallet address configured")
-            return 0
-
         if self.dry_run:
-            logger.info("[DRY RUN] Would cancel all pending orders")
+            logger.info(f"[DRY RUN] Would cancel all pending orders on subaccount {subaccount_id}")
             return 0
 
-        if not self.exchange_client:
-            logger.error("Exchange client not initialized")
+        try:
+            address = self._get_subaccount_address(subaccount_id)
+            exchange = self._get_exchange(subaccount_id)
+        except ValueError as e:
+            logger.error(str(e))
             return 0
 
         try:
             self._wait_rate_limit()
-            open_orders = self.info.open_orders(self.wallet_address)
+            open_orders = self.info.open_orders(address)
 
             cancelled = 0
             for order in open_orders:
@@ -729,36 +796,34 @@ class HyperliquidClient:
                     coin = order.get("coin")
                     oid = order.get("oid")
                     if coin and oid:
-                        result = self.exchange_client.cancel(coin, int(oid))
+                        result = exchange.cancel(coin, int(oid))
                         if result and result.get("status") == "ok":
                             cancelled += 1
                 except Exception as e:
                     logger.error(f"Failed to cancel order {order.get('oid')}: {e}")
 
-            logger.info(f"Cancelled {cancelled}/{len(open_orders)} orders")
+            logger.info(f"[Subaccount {subaccount_id}] Cancelled {cancelled}/{len(open_orders)} orders")
             return cancelled
 
         except Exception as e:
-            logger.error(f"Failed to cancel all orders: {e}")
+            logger.error(f"Failed to cancel all orders on subaccount {subaccount_id}: {e}")
             return 0
 
-    def get_orders(self, symbol: Optional[str] = None) -> List[Dict]:
+    def get_orders(self, subaccount_id: int, symbol: Optional[str] = None) -> List[Dict]:
         """
-        Get open orders (optionally filtered by symbol)
+        Get open orders for a subaccount (optionally filtered by symbol).
 
         Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
             symbol: Filter by symbol (optional)
 
         Returns:
             List of order dicts
         """
-        if not self.wallet_address:
-            logger.error("No wallet address configured")
-            return []
-
         try:
+            address = self._get_subaccount_address(subaccount_id)
             self._wait_rate_limit()
-            open_orders = self.info.open_orders(self.wallet_address)
+            open_orders = self.info.open_orders(address)
 
             base_symbol = symbol.split("/")[0].split("-")[0] if symbol else None
 
@@ -784,6 +849,7 @@ class HyperliquidClient:
 
     def place_trigger_order(
         self,
+        subaccount_id: int,
         symbol: str,
         side: str,
         size: float,
@@ -793,9 +859,10 @@ class HyperliquidClient:
         reduce_only: bool = True
     ) -> Optional[Dict[str, Any]]:
         """
-        Place a trigger order (Stop Loss or Take Profit)
+        Place a trigger order (Stop Loss or Take Profit) on a subaccount.
 
         Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
             symbol: Trading pair (e.g., 'BTC')
             side: 'buy' or 'sell' (direction when triggered)
             size: Order size
@@ -825,7 +892,7 @@ class HyperliquidClient:
         if self.dry_run:
             logger.info(
                 f"[DRY RUN] Would place {order_type_str}: {base_symbol} {side} {rounded_size} "
-                f"@ trigger ${rounded_trigger:.2f}"
+                f"@ trigger ${rounded_trigger:.2f} (subaccount: {subaccount_id})"
             )
             return {
                 "status": "simulated",
@@ -837,8 +904,10 @@ class HyperliquidClient:
                 "size": rounded_size,
             }
 
-        if not self.exchange_client:
-            logger.error("Exchange client not initialized - cannot place trigger orders")
+        try:
+            exchange = self._get_exchange(subaccount_id)
+        except ValueError as e:
+            logger.error(str(e))
             return None
 
         try:
@@ -857,12 +926,12 @@ class HyperliquidClient:
             limit_price = rounded_trigger
 
             logger.info(
-                f"Placing {order_type_str}: {base_symbol} {side} {rounded_size} "
+                f"[Subaccount {subaccount_id}] Placing {order_type_str}: {base_symbol} {side} {rounded_size} "
                 f"@ trigger ${rounded_trigger:.2f}"
             )
 
             self._wait_rate_limit()
-            result = self.exchange_client.order(
+            result = exchange.order(
                 base_symbol,
                 is_buy,
                 float(rounded_size),
@@ -926,11 +995,12 @@ class HyperliquidClient:
             logger.error(f"Failed to place {order_type_str}: {e}", exc_info=True)
             return None
 
-    def cancel_order(self, symbol: str, order_id: str) -> bool:
+    def cancel_order(self, subaccount_id: int, symbol: str, order_id: str) -> bool:
         """
-        Cancel a specific order
+        Cancel a specific order on a subaccount.
 
         Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
             symbol: Trading pair
             order_id: Order ID to cancel
 
@@ -940,16 +1010,18 @@ class HyperliquidClient:
         base_symbol = symbol.split("/")[0].split("-")[0]
 
         if self.dry_run:
-            logger.info(f"[DRY RUN] Would cancel order {order_id} for {base_symbol}")
+            logger.info(f"[DRY RUN] Would cancel order {order_id} for {base_symbol} on subaccount {subaccount_id}")
             return True
 
-        if not self.exchange_client:
-            logger.error("Exchange client not initialized")
+        try:
+            exchange = self._get_exchange(subaccount_id)
+        except ValueError as e:
+            logger.error(str(e))
             return False
 
         try:
             self._wait_rate_limit()
-            result = self.exchange_client.cancel(base_symbol, int(order_id))
+            result = exchange.cancel(base_symbol, int(order_id))
 
             if result and result.get("status") == "ok":
                 # Check for errors inside response
@@ -970,17 +1042,19 @@ class HyperliquidClient:
 
     def update_stop_loss(
         self,
+        subaccount_id: int,
         symbol: str,
         new_stop_loss: float,
         old_order_id: Optional[str] = None,
         size: Optional[float] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Update stop loss for existing position (cancel old + place new)
+        Update stop loss for existing position (cancel old + place new).
 
         This is the core method for trailing stop implementation.
 
         Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
             symbol: Trading pair
             new_stop_loss: New stop loss price
             old_order_id: Existing SL order to cancel (optional)
@@ -993,21 +1067,21 @@ class HyperliquidClient:
 
         if self.dry_run:
             logger.info(
-                f"[DRY RUN] Would update SL for {base_symbol}: ${new_stop_loss:.2f}"
+                f"[DRY RUN] Would update SL for {base_symbol}: ${new_stop_loss:.2f} (subaccount: {subaccount_id})"
             )
             return {"status": "simulated", "trigger_price": new_stop_loss}
 
         # Cancel existing SL if provided
         if old_order_id:
-            cancelled = self.cancel_order(base_symbol, old_order_id)
+            cancelled = self.cancel_order(subaccount_id, base_symbol, old_order_id)
             if not cancelled:
                 logger.error(f"Failed to cancel old SL order {old_order_id}")
                 return None
 
         # Get position to determine side and size
-        position = self.get_position(base_symbol)
+        position = self.get_position(subaccount_id, base_symbol)
         if not position:
-            logger.error(f"No position found for {base_symbol}")
+            logger.error(f"No position found for {base_symbol} on subaccount {subaccount_id}")
             return None
 
         # Determine SL order side (opposite of position)
@@ -1016,6 +1090,7 @@ class HyperliquidClient:
 
         # Place new SL
         return self.place_trigger_order(
+            subaccount_id=subaccount_id,
             symbol=base_symbol,
             side=sl_side,
             size=order_size,
@@ -1027,15 +1102,17 @@ class HyperliquidClient:
 
     def update_take_profit(
         self,
+        subaccount_id: int,
         symbol: str,
         new_take_profit: float,
         old_order_id: Optional[str] = None,
         size: Optional[float] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Update take profit for existing position (cancel old + place new)
+        Update take profit for existing position (cancel old + place new).
 
         Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
             symbol: Trading pair
             new_take_profit: New take profit price
             old_order_id: Existing TP order to cancel (optional)
@@ -1048,21 +1125,21 @@ class HyperliquidClient:
 
         if self.dry_run:
             logger.info(
-                f"[DRY RUN] Would update TP for {base_symbol}: ${new_take_profit:.2f}"
+                f"[DRY RUN] Would update TP for {base_symbol}: ${new_take_profit:.2f} (subaccount: {subaccount_id})"
             )
             return {"status": "simulated", "trigger_price": new_take_profit}
 
         # Cancel existing TP if provided
         if old_order_id:
-            cancelled = self.cancel_order(base_symbol, old_order_id)
+            cancelled = self.cancel_order(subaccount_id, base_symbol, old_order_id)
             if not cancelled:
                 logger.error(f"Failed to cancel old TP order {old_order_id}")
                 return None
 
         # Get position
-        position = self.get_position(base_symbol)
+        position = self.get_position(subaccount_id, base_symbol)
         if not position:
-            logger.error(f"No position found for {base_symbol}")
+            logger.error(f"No position found for {base_symbol} on subaccount {subaccount_id}")
             return None
 
         # Determine TP order side (opposite of position)
@@ -1071,6 +1148,7 @@ class HyperliquidClient:
 
         # Place new TP
         return self.place_trigger_order(
+            subaccount_id=subaccount_id,
             symbol=base_symbol,
             side=tp_side,
             size=order_size,
@@ -1082,6 +1160,7 @@ class HyperliquidClient:
 
     def update_sl_atomic(
         self,
+        subaccount_id: int,
         symbol: str,
         new_stop_loss: float,
         old_order_id: Optional[str] = None,
@@ -1097,6 +1176,7 @@ class HyperliquidClient:
         - Never leaves position unprotected
 
         Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
             symbol: Trading pair
             new_stop_loss: New stop loss price
             old_order_id: Existing SL order to cancel (optional)
@@ -1110,14 +1190,14 @@ class HyperliquidClient:
 
         if self.dry_run:
             logger.info(
-                f"[DRY RUN] Would atomic update SL for {base_symbol}: ${new_stop_loss:.2f}"
+                f"[DRY RUN] Would atomic update SL for {base_symbol}: ${new_stop_loss:.2f} (subaccount: {subaccount_id})"
             )
             return {"status": "simulated", "trigger_price": new_stop_loss, "order_id": "dry_run"}
 
         # Get position to determine side and size
-        position = self.get_position(base_symbol)
+        position = self.get_position(subaccount_id, base_symbol)
         if not position:
-            logger.error(f"No position found for {base_symbol}")
+            logger.error(f"No position found for {base_symbol} on subaccount {subaccount_id}")
             return None
 
         sl_side = "sell" if position.side == "long" else "buy"
@@ -1126,9 +1206,10 @@ class HyperliquidClient:
         # PHASE 1: Place new SL order FIRST (with retry)
         new_sl_result = None
         for attempt in range(max_retries):
-            logger.info(f"Atomic SL update: placing new SL @ ${new_stop_loss:.2f} (attempt {attempt + 1}/{max_retries})")
+            logger.info(f"[Subaccount {subaccount_id}] Atomic SL update: placing new SL @ ${new_stop_loss:.2f} (attempt {attempt + 1}/{max_retries})")
 
             new_sl_result = self.place_trigger_order(
+                subaccount_id=subaccount_id,
                 symbol=base_symbol,
                 side=sl_side,
                 size=order_size,
@@ -1154,7 +1235,7 @@ class HyperliquidClient:
         # PHASE 2: Cancel old SL order (if provided)
         if old_order_id:
             logger.info(f"Atomic SL update: cancelling old SL order {old_order_id}")
-            cancelled = self.cancel_order(base_symbol, old_order_id)
+            cancelled = self.cancel_order(subaccount_id, base_symbol, old_order_id)
 
             if not cancelled:
                 # Not critical - old SL will trigger if price goes there
@@ -1170,6 +1251,7 @@ class HyperliquidClient:
 
     def place_order_with_sl_tp(
         self,
+        subaccount_id: int,
         symbol: str,
         side: str,
         size: float,
@@ -1177,11 +1259,12 @@ class HyperliquidClient:
         take_profit: Optional[float] = None
     ) -> Dict[str, Any]:
         """
-        Place market order with optional SL and TP orders
+        Place market order with optional SL and TP orders on a subaccount.
 
         This is the main entry point for opening a position with protection.
 
         Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
             symbol: Trading pair
             side: 'long' or 'short'
             size: Position size
@@ -1200,9 +1283,9 @@ class HyperliquidClient:
         }
 
         # 1. Place entry order
-        entry_order = self.place_market_order(base_symbol, side, size)
+        entry_order = self.place_market_order(subaccount_id, base_symbol, side, size)
         if not entry_order:
-            logger.error(f"Failed to place entry order for {base_symbol}")
+            logger.error(f"Failed to place entry order for {base_symbol} on subaccount {subaccount_id}")
             return result
 
         result["entry"] = {
@@ -1218,6 +1301,7 @@ class HyperliquidClient:
         # 2. Place Stop Loss if specified
         if stop_loss:
             sl_order = self.place_trigger_order(
+                subaccount_id=subaccount_id,
                 symbol=base_symbol,
                 side=sl_tp_side,
                 size=size,
@@ -1232,6 +1316,7 @@ class HyperliquidClient:
         # 3. Place Take Profit if specified
         if take_profit:
             tp_order = self.place_trigger_order(
+                subaccount_id=subaccount_id,
                 symbol=base_symbol,
                 side=sl_tp_side,
                 size=size,
@@ -1246,11 +1331,12 @@ class HyperliquidClient:
         result["status"] = "ok"
         return result
 
-    def set_leverage(self, symbol: str, leverage: int) -> bool:
+    def set_leverage(self, subaccount_id: int, symbol: str, leverage: int) -> bool:
         """
-        Set leverage for a symbol
+        Set leverage for a symbol on a subaccount.
 
         Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
             symbol: Trading pair
             leverage: Leverage value (1-50x depending on asset)
 
@@ -1265,15 +1351,17 @@ class HyperliquidClient:
             leverage = max_lev
 
         if self.dry_run:
-            logger.info(f"[DRY RUN] Would set leverage for {base_symbol}: {leverage}x")
+            logger.info(f"[DRY RUN] Would set leverage for {base_symbol}: {leverage}x (subaccount: {subaccount_id})")
             return True
 
-        if not self.exchange_client:
-            logger.error("Exchange client not initialized")
+        try:
+            exchange = self._get_exchange(subaccount_id)
+        except ValueError as e:
+            logger.error(str(e))
             return False
 
         try:
-            result = self.exchange_client.update_leverage(leverage, base_symbol, is_cross=False)
+            result = exchange.update_leverage(leverage, base_symbol, is_cross=False)
 
             if result and result.get("status") == "ok":
                 logger.info(f"Set leverage for {base_symbol}: {leverage}x")
@@ -1303,15 +1391,34 @@ class HyperliquidClient:
         return {
             'status': status,
             'dry_run': self.dry_run,
-            'subaccount': self.current_subaccount,
-            'has_exchange_client': self.exchange_client is not None,
-            'has_wallet': self.wallet_address is not None,
+            'subaccount_count': self.subaccount_count,
+            'configured_subaccounts': list(self._subaccount_credentials.keys()),
+            'has_user_address': self.user_address is not None,
             'timestamp': datetime.now().isoformat()
         }
 
+    def emergency_stop_all(self, reason: str) -> None:
+        """
+        Emergency stop - close all positions and cancel all orders on ALL subaccounts.
+
+        Args:
+            reason: Reason for emergency stop (logged)
+        """
+        logger.critical(f"EMERGENCY STOP: {reason}")
+
+        for subaccount_id in self._subaccount_credentials.keys():
+            try:
+                logger.info(f"Emergency stop: processing subaccount {subaccount_id}")
+                self.cancel_all_orders(subaccount_id)
+                self.close_all_positions(subaccount_id)
+            except Exception as e:
+                logger.error(f"Emergency stop failed for subaccount {subaccount_id}: {e}")
+
+        logger.critical("Emergency stop completed")
+
     def __str__(self) -> str:
         mode = "DRY RUN" if self.dry_run else "LIVE"
-        return f"HyperliquidClient(mode={mode}, subaccount={self.current_subaccount})"
+        return f"HyperliquidClient(mode={mode}, subaccounts={self.subaccount_count})"
 
     def __repr__(self) -> str:
         return self.__str__()
