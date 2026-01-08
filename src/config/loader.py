@@ -123,73 +123,115 @@ def _interpolate_env_vars(config_str: str) -> str:
     return pattern.sub(replacer, config_str)
 
 
-def detect_subaccount_count() -> int:
+def get_master_address() -> str:
     """
-    Auto-detect number of subaccounts from .env credentials.
-
-    Counts sequential HYPERLIQUID_PRIVATE_KEY_N + HYPERLIQUID_SUBACCOUNT_ADDRESS_N pairs.
-    Both variables must be present for a subaccount to be counted.
+    Get Hyperliquid master wallet address from environment.
 
     Returns:
-        Number of fully configured subaccounts (0 if none found)
-    """
-    count = 0
-    for i in range(1, 101):  # Support up to 100 subaccounts
-        private_key = os.getenv(f"HYPERLIQUID_PRIVATE_KEY_{i}")
-        address = os.getenv(f"HYPERLIQUID_SUBACCOUNT_ADDRESS_{i}")
+        Master wallet address (e.g., 0x4dA0047...)
 
-        if private_key and address:
-            count += 1
-        else:
-            break  # Stop at first incomplete pair
-    return count
+    Raises:
+        ValueError: If HL_MASTER_ADDRESS not set (Fast Fail)
+    """
+    address = os.getenv('HL_MASTER_ADDRESS')
+    if not address:
+        raise ValueError(
+            "HL_MASTER_ADDRESS environment variable not set. "
+            "Add your master wallet address to .env"
+        )
+    return address
+
+
+def get_master_private_key() -> str:
+    """
+    Get Hyperliquid master wallet private key from environment.
+
+    WARNING: This returns a sensitive value. Handle with care!
+
+    Returns:
+        Master wallet private key (64 hex chars after 0x)
+
+    Raises:
+        ValueError: If HL_MASTER_PRIVATE_KEY not set (Fast Fail)
+    """
+    private_key = os.getenv('HL_MASTER_PRIVATE_KEY')
+    if not private_key:
+        raise ValueError(
+            "HL_MASTER_PRIVATE_KEY environment variable not set. "
+            "Add your master wallet private key to .env"
+        )
+    return private_key
+
+
+# =============================================================================
+# DEPRECATED FUNCTIONS (kept for backwards compatibility during transition)
+# =============================================================================
+# These functions are deprecated. Subaccount credentials are now stored in the
+# database and managed by AgentManager. Use scripts/setup_hyperliquid.py to
+# initialize credentials.
+# =============================================================================
+
+def detect_subaccount_count() -> int:
+    """
+    DEPRECATED: Subaccount credentials are now in database.
+
+    This function remains for backwards compatibility but always returns 0.
+    Use HyperliquidClient.subaccount_count instead.
+
+    Returns:
+        0 (credentials no longer in .env)
+    """
+    import warnings
+    warnings.warn(
+        "detect_subaccount_count() is deprecated. "
+        "Subaccount credentials are now managed via database. "
+        "Use scripts/setup_hyperliquid.py to initialize.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    return 0
 
 
 def get_subaccount_count() -> int:
     """
-    Get number of subaccounts from .env credentials.
+    DEPRECATED: Subaccount credentials are now in database.
 
-    Counts HYPERLIQUID_PRIVATE_KEY_N + HYPERLIQUID_SUBACCOUNT_ADDRESS_N pairs.
-    Returns minimum 1 to allow system to run in dry_run mode.
+    This function remains for backwards compatibility but always returns 1.
+    Use HyperliquidClient.subaccount_count instead.
 
     Returns:
-        Number of subaccounts (minimum 1)
+        1 (minimum for dry_run mode)
     """
-    return max(1, detect_subaccount_count())
+    import warnings
+    warnings.warn(
+        "get_subaccount_count() is deprecated. "
+        "Subaccount credentials are now managed via database. "
+        "Use scripts/setup_hyperliquid.py to initialize.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    return 1
 
 
 def get_subaccount_credentials(subaccount_id: int) -> Dict[str, str]:
     """
-    Get credentials for a specific subaccount.
+    DEPRECATED: Subaccount credentials are now in database.
+
+    This function remains for backwards compatibility but always raises ValueError.
+    Use AgentManager.get_active_credential() instead.
 
     Args:
         subaccount_id: Subaccount number (1, 2, 3, ...)
 
-    Returns:
-        Dict with 'private_key' and 'address'
-
     Raises:
-        ValueError: If subaccount not configured (Fast Fail)
+        ValueError: Always - credentials no longer in .env
     """
-    private_key = os.getenv(f"HYPERLIQUID_PRIVATE_KEY_{subaccount_id}")
-    address = os.getenv(f"HYPERLIQUID_SUBACCOUNT_ADDRESS_{subaccount_id}")
-
-    if not private_key:
-        raise ValueError(
-            f"Subaccount {subaccount_id} not configured: "
-            f"HYPERLIQUID_PRIVATE_KEY_{subaccount_id} missing in .env"
-        )
-
-    if not address:
-        raise ValueError(
-            f"Subaccount {subaccount_id} not configured: "
-            f"HYPERLIQUID_SUBACCOUNT_ADDRESS_{subaccount_id} missing in .env"
-        )
-
-    return {
-        'private_key': private_key,
-        'address': address
-    }
+    raise ValueError(
+        f"get_subaccount_credentials() is deprecated. "
+        f"Subaccount credentials are now stored in database. "
+        f"Run 'python scripts/setup_hyperliquid.py' to initialize credentials, "
+        f"then use HyperliquidClient which loads from database automatically."
+    )
 
 
 # Global config cache to avoid duplicate loads and prints

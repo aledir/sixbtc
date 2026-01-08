@@ -45,6 +45,7 @@ class StrategySelector:
         # min_score comes from active_pool (single source of truth)
         self.min_score = config['active_pool']['min_score']
         self.max_live_strategies = rotator_config['max_live_strategies']
+        self.min_pool_size = rotator_config.get('min_pool_size', 0)
 
         # Diversification constraints
         selection_config = rotator_config['selection']
@@ -53,8 +54,8 @@ class StrategySelector:
 
         logger.info(
             f"StrategySelector initialized: min_score={self.min_score}, "
-            f"max_live={self.max_live_strategies}, max_per_type={self.max_per_type}, "
-            f"max_per_timeframe={self.max_per_timeframe}"
+            f"max_live={self.max_live_strategies}, min_pool={self.min_pool_size}, "
+            f"max_per_type={self.max_per_type}, max_per_timeframe={self.max_per_timeframe}"
         )
 
     def get_candidates(self, slots_available: int) -> List[Dict]:
@@ -170,6 +171,26 @@ class StrategySelector:
         live_count = self.get_live_count()
         return max(0, self.max_live_strategies - live_count)
 
+    def get_active_count(self) -> int:
+        """Get current count of ACTIVE strategies in pool."""
+        with get_session() as session:
+            return (
+                session.query(func.count(Strategy.id))
+                .filter(Strategy.status == 'ACTIVE')
+                .scalar()
+            ) or 0
+
+    def is_pool_ready(self) -> bool:
+        """
+        Check if ACTIVE pool has minimum required strategies.
+
+        Returns:
+            True if pool has >= min_pool_size strategies
+        """
+        if self.min_pool_size <= 0:
+            return True
+        return self.get_active_count() >= self.min_pool_size
+
     def get_selection_stats(self) -> Dict:
         """
         Get current selection statistics.
@@ -209,6 +230,8 @@ class StrategySelector:
                 'active_count': active_count,
                 'live_count': live_count,
                 'max_live': self.max_live_strategies,
+                'min_pool_size': self.min_pool_size,
+                'pool_ready': active_count >= self.min_pool_size if self.min_pool_size > 0 else True,
                 'free_slots': max(0, self.max_live_strategies - live_count),
                 'type_distribution': dict(type_dist),
                 'timeframe_distribution': dict(tf_dist),

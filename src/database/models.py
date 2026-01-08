@@ -749,6 +749,77 @@ class ValidationCache(Base):
 
 
 # ==============================================================================
+# CREDENTIALS (Agent Wallet Management)
+# ==============================================================================
+
+class Credential(Base):
+    """
+    Agent wallet credentials for Hyperliquid subaccounts.
+
+    Stores API wallet (agent) private keys created via approve_agent().
+    Used for automated trading on subaccounts without exposing master private key.
+
+    Lifecycle:
+    - Created by AgentManager.create_agent() or bootstrap script
+    - Renewed automatically by scheduler before expiry (180 days max)
+    - Revoked when replaced or manually deactivated
+    """
+    __tablename__ = 'credentials'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # Credential type (for future extensibility)
+    credential_type = Column(String(20), nullable=False, default='agent_wallet')
+    # Currently only 'agent_wallet', future: 'api_key', etc.
+
+    # Target account
+    target_type = Column(String(20), nullable=False, index=True)
+    # 'master' or 'subaccount'
+
+    target_address = Column(String(42), nullable=False)
+    # Wallet address of the target (master or subaccount)
+
+    subaccount_id = Column(Integer, nullable=True, index=True)
+    # 1, 2, 3, ... for subaccounts, NULL for master
+
+    subaccount_name = Column(String(100), nullable=True)
+    # Name from Hyperliquid (e.g., "Bot-001")
+
+    # Agent wallet details
+    agent_name = Column(String(100), nullable=True)
+    # Name used in approve_agent() call
+
+    agent_address = Column(String(42), nullable=False)
+    # Address of the created agent wallet
+
+    private_key = Column(String(66), nullable=False)
+    # Private key of agent wallet (0x + 64 hex chars)
+    # NOTE: Stored in plaintext - same security level as .env
+
+    # Lifecycle
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(UTC))
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    # Hyperliquid max: 180 days from creation
+
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    # False when revoked or replaced by newer credential
+
+    # Indexes for fast lookups
+    __table_args__ = (
+        Index('idx_credential_target', 'target_type', 'target_address'),
+        Index('idx_credential_expiry', 'expires_at', 'is_active'),
+        Index('idx_credential_active_subaccount', 'is_active', 'subaccount_id'),
+    )
+
+    def __repr__(self):
+        return (
+            f"<Credential(id={self.id}, type={self.target_type}, "
+            f"subaccount={self.subaccount_id}, active={self.is_active})>"
+        )
+
+
+# ==============================================================================
 # STRATEGY EVENTS (Pipeline Tracking)
 # ==============================================================================
 

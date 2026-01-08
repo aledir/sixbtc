@@ -89,10 +89,18 @@ class ContinuousRotatorProcess:
         free_slots = stats['free_slots']
 
         logger.info(
-            f"Rotation check: ACTIVE={stats['active_count']}, "
+            f"Rotation check: ACTIVE={stats['active_count']}/{self.selector.min_pool_size}, "
             f"LIVE={stats['live_count']}/{stats['max_live']}, "
             f"free_slots={free_slots}"
         )
+
+        # Check if pool has minimum required strategies
+        if not self.selector.is_pool_ready():
+            logger.info(
+                f"Pool not ready: {stats['active_count']} ACTIVE, "
+                f"need {self.selector.min_pool_size} before deployment"
+            )
+            return
 
         if free_slots <= 0:
             logger.debug("No free slots available")

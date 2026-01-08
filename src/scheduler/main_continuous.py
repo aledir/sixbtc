@@ -69,6 +69,18 @@ class ContinuousSchedulerProcess:
             self.tasks['daily_restart_services'] = restart_config['interval_hours']
             self.restart_hour = restart_config['restart_hour']
 
+        # Agent wallet renewal (renew expiring credentials)
+        renew_config = scheduler_config.get('renew_agent_wallets', {})
+        if renew_config.get('enabled', False):
+            self.tasks['renew_agent_wallets'] = renew_config['interval_hours']
+            self.renew_agent_hour = renew_config.get('run_hour', 3)
+
+        # Subaccount fund check (topup from master if low)
+        funds_config = scheduler_config.get('check_subaccount_funds', {})
+        if funds_config.get('enabled', False):
+            self.tasks['check_subaccount_funds'] = funds_config['interval_hours']
+            self.check_funds_hour = funds_config.get('run_hour', 4)
+
         # Initialize last run times (use timezone-aware datetime)
         for task in self.tasks:
             self.last_run[task] = datetime.min.replace(tzinfo=UTC)
@@ -127,6 +139,16 @@ class ContinuousSchedulerProcess:
             elif task_name == 'daily_restart_services':
                 result = await self._daily_restart_services()
                 tracker.add_metadata('restarted', result.get('restarted', False))
+
+            elif task_name == 'renew_agent_wallets':
+                result = await self._renew_agent_wallets()
+                tracker.add_metadata('renewed', result.get('renewed', 0))
+                tracker.add_metadata('failed', result.get('failed', 0))
+
+            elif task_name == 'check_subaccount_funds':
+                result = await self._check_subaccount_funds()
+                tracker.add_metadata('checked', result.get('checked', 0))
+                tracker.add_metadata('topped_up', result.get('topped_up', 0))
 
             else:
                 logger.warning(f"Unknown task: {task_name}")
@@ -381,6 +403,104 @@ class ContinuousSchedulerProcess:
         except Exception as e:
             logger.error(f"Daily restart failed: {e}")
             return {'restarted': False, 'reason': str(e)}
+
+    async def _renew_agent_wallets(self) -> dict:
+        """
+        Renew expiring agent wallet credentials.
+
+        Checks for credentials expiring within the renewal window (default 30 days)
+        and creates new agent wallets to replace them.
+
+        Only runs at the configured run_hour. No default - config required.
+        """
+        # Check if it's the right hour
+        current_hour = datetime.now(UTC).hour
+        target_hour = getattr(self, 'renew_agent_hour', 3)
+
+        if current_hour != target_hour:
+            logger.debug(
+                f"Skipping agent renewal: current hour {current_hour}, target {target_hour}"
+            )
+            return {'renewed': 0, 'failed': 0, 'reason': 'wrong_hour'}
+
+        try:
+            from src.credentials.agent_manager import AgentManager
+
+            manager = AgentManager(self.config._raw_config)
+            result = manager.renew_all_expiring()
+
+            if result['renewed'] > 0:
+                logger.info(
+                    f"Agent wallet renewal complete: renewed={result['renewed']}, "
+                    f"failed={result['failed']}"
+                )
+
+                # Notify executor to reload credentials
+                # (it will pick up new credentials on next cycle)
+                if result['renewed'] > 0:
+                    logger.info("Executor should call client.reload_credentials() to use new wallets")
+
+            return result
+
+        except ImportError as e:
+            logger.error(f"AgentManager not available: {e}")
+            return {'renewed': 0, 'failed': 0, 'reason': 'import_error'}
+        except Exception as e:
+            logger.error(f"Agent wallet renewal failed: {e}")
+            return {'renewed': 0, 'failed': 0, 'reason': str(e)}
+
+    async def _check_subaccount_funds(self) -> dict:
+        """
+        Check subaccount balances and execute topup from master if needed.
+
+        Policy:
+        - Topup only from master, NEVER between subaccounts
+        - Respect master reserve (never drain below threshold)
+        - Alert on low/insufficient funds
+
+        Only runs at the configured run_hour. No default - config required.
+        """
+        # Check if it's the right hour
+        current_hour = datetime.now(UTC).hour
+        target_hour = getattr(self, 'check_funds_hour', 4)
+
+        if current_hour != target_hour:
+            logger.debug(
+                f"Skipping fund check: current hour {current_hour}, target {target_hour}"
+            )
+            return {'checked': 0, 'topped_up': 0, 'reason': 'wrong_hour'}
+
+        try:
+            from src.funds.manager import FundManager
+
+            manager = FundManager(self.config._raw_config)
+            result = manager.check_all_subaccounts()
+
+            logger.info(
+                f"Fund check complete: checked={result['checked']}, "
+                f"healthy={result['healthy']}, topped_up={result['topped_up']}, "
+                f"partial={result['partial_topup']}, skipped={result['skipped']}"
+            )
+
+            # Log alerts
+            for alert in result.get('alerts', []):
+                if alert['level'] == 'critical':
+                    logger.critical(
+                        f"FUND ALERT [{alert['name']}]: {alert['message']}"
+                    )
+                elif alert['level'] == 'warning':
+                    logger.warning(
+                        f"Fund warning [{alert['name']}]: {alert['message']}"
+                    )
+
+            return result
+
+        except ImportError as e:
+            logger.error(f"FundManager not available: {e}")
+            return {'checked': 0, 'topped_up': 0, 'reason': 'import_error'}
+        except Exception as e:
+            logger.error(f"Fund check failed: {e}")
+            return {'checked': 0, 'topped_up': 0, 'reason': str(e)}
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""

@@ -7,12 +7,16 @@ Based on sevenbtc's production-tested implementation.
 CRITICAL:
 - dry_run=True: Log operations without executing (NO fake state)
 - dry_run=False: Real orders (production)
+
+Credentials:
+- Agent wallet credentials are loaded from database (Credential table)
+- Run scripts/setup_hyperliquid.py to initialize credentials
 """
 
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, UTC
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -22,6 +26,8 @@ from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
+from src.database.connection import get_session
+from src.database.models import Credential
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -107,7 +113,7 @@ class HyperliquidClient:
             self.testnet = False
 
         # Master address for read-only queries (REQUIRED)
-        self.user_address = os.getenv('HL_USER_ADDRESS')
+        self.user_address = os.getenv('HL_MASTER_ADDRESS')
 
         # API URL
         self.api_url = constants.TESTNET_API_URL if self.testnet else constants.MAINNET_API_URL
@@ -125,7 +131,7 @@ class HyperliquidClient:
         # PER-SUBACCOUNT: Exchange clients (lazy loading)
         self._exchange_clients: Dict[int, Exchange] = {}
         self._subaccount_credentials: Dict[int, Dict[str, str]] = {}
-        self._load_subaccount_credentials()
+        self._load_credentials_from_db()
 
         # Cache for asset metadata
         self._asset_meta_cache: Dict[str, Dict] = {}
@@ -135,11 +141,11 @@ class HyperliquidClient:
         # Validate configuration
         if not self.dry_run:
             if not self.user_address:
-                raise ValueError("Live trading requires HL_USER_ADDRESS in .env")
+                raise ValueError("Live trading requires HL_MASTER_ADDRESS in .env")
             if not self._subaccount_credentials:
                 raise ValueError(
-                    "Live trading requires at least one subaccount configured. "
-                    "Set HYPERLIQUID_PRIVATE_KEY_1 and HYPERLIQUID_SUBACCOUNT_ADDRESS_1 in .env"
+                    "Live trading requires at least one subaccount with agent wallet. "
+                    "Run 'python scripts/setup_hyperliquid.py' to initialize credentials."
                 )
             logger.warning("LIVE TRADING MODE - Real orders will be placed!")
         else:
@@ -149,21 +155,65 @@ class HyperliquidClient:
             f"HyperliquidClient initialized: {self.subaccount_count} subaccounts configured"
         )
 
-    def _load_subaccount_credentials(self) -> None:
-        """Load all subaccount credentials from .env (lazy - Exchange created on first use)"""
-        from src.config.loader import get_subaccount_count, get_subaccount_credentials
+    def _load_credentials_from_db(self) -> None:
+        """
+        Load agent wallet credentials from database.
 
-        for i in range(1, 101):  # Support up to 100 subaccounts
-            try:
-                creds = get_subaccount_credentials(i)
-                self._subaccount_credentials[i] = creds
-            except ValueError:
-                break  # Stop at first missing subaccount
+        Queries the Credential table for active, non-expired agent wallets.
+        Each subaccount has one active agent wallet credential.
+        """
+        try:
+            with get_session() as session:
+                credentials = session.query(Credential).filter(
+                    Credential.is_active == True,
+                    Credential.target_type == 'subaccount',
+                    Credential.expires_at > datetime.now(UTC)
+                ).all()
 
-        if self._subaccount_credentials:
-            logger.info(f"Loaded credentials for {len(self._subaccount_credentials)} subaccounts")
-        else:
-            logger.warning("No subaccount credentials found in .env")
+                for cred in credentials:
+                    if cred.subaccount_id is not None:
+                        self._subaccount_credentials[cred.subaccount_id] = {
+                            'private_key': cred.private_key,
+                            'address': cred.target_address,
+                            'agent_address': cred.agent_address,
+                        }
+
+            if self._subaccount_credentials:
+                logger.info(f"Loaded credentials for {len(self._subaccount_credentials)} subaccounts from DB")
+            else:
+                logger.warning(
+                    "No subaccount credentials found in database. "
+                    "Run 'python scripts/setup_hyperliquid.py' to initialize."
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to load credentials from database: {e}")
+
+    def reload_credentials(self) -> int:
+        """
+        Reload credentials from database.
+
+        Call this after credentials are renewed by the scheduler
+        to pick up new agent wallets without restarting.
+
+        Returns:
+            Number of credentials loaded
+        """
+        # Clear existing Exchange clients (they use old credentials)
+        old_count = len(self._exchange_clients)
+        self._exchange_clients.clear()
+        self._subaccount_credentials.clear()
+
+        # Reload from database
+        self._load_credentials_from_db()
+
+        if old_count > 0:
+            logger.info(
+                f"Credentials reloaded: {old_count} Exchange clients cleared, "
+                f"{len(self._subaccount_credentials)} credentials loaded"
+            )
+
+        return len(self._subaccount_credentials)
 
     def _get_exchange(self, subaccount_id: int) -> Exchange:
         """

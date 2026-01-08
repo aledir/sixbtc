@@ -44,17 +44,52 @@ database:
 # HYPERLIQUID EXCHANGE
 # ==============================================================================
 hyperliquid:
-  # Master address for read-only queries (from .env)
-  # Required for WebSocket private channels (webData2, userFills) and trade sync
-  user_address: "${HL_USER_ADDRESS}"
+  # Master address for all operations (from .env: HL_MASTER_ADDRESS)
+  # Used for read-only queries, WebSocket, and as reference for subaccount operations
+  user_address: "${HL_MASTER_ADDRESS}"
 
-  # SUBACCOUNT CREDENTIALS:
-  # Credentials for each subaccount are loaded from .env:
-  # - HYPERLIQUID_PRIVATE_KEY_1, HYPERLIQUID_SUBACCOUNT_ADDRESS_1
-  # - HYPERLIQUID_PRIVATE_KEY_2, HYPERLIQUID_SUBACCOUNT_ADDRESS_2
-  # - ... up to 100 subaccounts
-  # Number of active subaccounts is auto-detected from .env
+  # MASTER dry_run flag - controls ALL trading behavior
+  # true = no real orders (safe testing)
+  # false = real orders (live trading)
+  dry_run: true
 
+  # Testnet mode (if true, uses testnet API)
+  testnet: false
+
+  # --------------------------------------------------------------------------
+  # SUBACCOUNTS
+  # --------------------------------------------------------------------------
+  # Subaccounts are managed via scripts/setup_hyperliquid.py
+  # Master wallet credentials are in .env: HL_MASTER_ADDRESS, HL_MASTER_PRIVATE_KEY
+  subaccounts:
+    count: 3                       # Target number of subaccounts (max 10 per HL)
+    naming_pattern: "Bot-{:03d}"   # Pattern for names: Bot-001, Bot-002, etc.
+
+  # --------------------------------------------------------------------------
+  # AGENT WALLETS
+  # --------------------------------------------------------------------------
+  # Agent wallets are API keys for trading (no withdrawal permissions)
+  # Created automatically by scripts/setup_hyperliquid.py
+  # Credentials stored in database (Credential table)
+  agent_wallet:
+    validity_days: 180             # Max validity (Hyperliquid limit)
+    renewal_days_before_expiry: 30 # Renew 30 days before expiration
+
+  # --------------------------------------------------------------------------
+  # FUND MANAGEMENT
+  # --------------------------------------------------------------------------
+  # Automatic topup from master to subaccounts when balance falls below threshold
+  # Policy: topup only from master, NEVER between subaccounts
+  funds:
+    min_operational_usd: 50        # Below this → trigger topup
+    topup_target_usd: 100          # Target balance after topup
+    master_reserve_usd: 100        # Never drain master below this
+    min_tradeable_usd: 15          # Below this → subaccount cannot trade
+    check_interval_hours: 24       # How often to check balances
+
+  # --------------------------------------------------------------------------
+  # FEES AND EXECUTION
+  # --------------------------------------------------------------------------
   # Fees for backtesting (taker fee = market orders)
   fee_rate: 0.00045  # 0.045% taker fee
   slippage: 0.0005   # 0.05% estimated slippage
@@ -69,14 +104,6 @@ hyperliquid:
   trade_sync:
     enabled: true
     fills_lookback_days: 7  # How far back to look for fills
-
-  # MASTER dry_run flag - controls ALL trading behavior
-  # true = no real orders (safe testing)
-  # false = real orders (live trading)
-  dry_run: true
-
-  # Number of subaccounts is AUTO-DETECTED from .env
-  # Count of HYPERLIQUID_PRIVATE_KEY_1, _2, _3... variables
 
 # ==============================================================================
 # RISK MANAGEMENT
@@ -258,7 +285,7 @@ backtesting:
     enabled: true              # Enable multi-window validation
     windows: 4                 # Number of validation windows (divides training period)
     min_avg_sharpe: 0.2        # Avg Sharpe across windows must be >= 0.2
-    max_cv: 0.5                # Max coefficient of variation (std/avg) = 0.5
+    max_cv: 1.5                # Max coefficient of variation (std/avg) = 1.5
 
   # Minimum thresholds (gate check - classifier does the real ranking)
   thresholds:
@@ -299,6 +326,7 @@ scorer:
 rotator:
   check_interval_minutes: 15     # Check every 15 min for deployment opportunities
   max_live_strategies: 10        # Max strategies in LIVE at once
+  min_pool_size: 100             # Don't deploy until ACTIVE pool has >= 100 strategies
   # NOTE: min_score for LIVE eligibility uses active_pool.min_score (single threshold)
 
   # Diversification rules
@@ -314,9 +342,9 @@ monitor:
 
   # Retirement criteria (any triggers retirement)
   retirement:
-    min_score: 30                # Score < 30 = retire
-    max_degradation: 0.50        # 50% worse than backtest = retire
-    max_drawdown: 0.30           # 30% live drawdown = retire
+    min_score: 35                # Score < 35 = retire (closer to entry threshold)
+    max_degradation: 0.40        # 40% worse than backtest = retire
+    max_drawdown: 0.25           # 25% live drawdown = retire ($25 max loss on $100)
     min_trades: 10               # Min trades before evaluating
 
   # Live scoring (for calculating score_live)
@@ -453,6 +481,18 @@ scheduler:
       enabled: true
       interval_hours: 24          # Once per day
       restart_hour: 2             # Run at 2 AM (low activity)
+
+    # Agent wallet credential renewal (checks daily, renews if expiring within 30 days)
+    renew_agent_wallets:
+      enabled: true
+      interval_hours: 24          # Check once per day
+      run_hour: 3                 # Run at 3 AM
+
+    # Subaccount fund management (topup from master if balance low)
+    check_subaccount_funds:
+      enabled: true
+      interval_hours: 24          # Check once per day
+      run_hour: 4                 # Run at 4 AM (after agent renewal)
 
 # ==============================================================================
 # DATA SCHEDULER

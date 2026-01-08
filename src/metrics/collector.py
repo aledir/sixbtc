@@ -4,18 +4,18 @@ Pipeline Metrics Collector (Event-Based)
 Collects pipeline metrics from the strategy_events table.
 Events persist even when strategies are deleted, enabling accurate metrics.
 
-Log format (11 lines per snapshot):
-- status: overall health + issue
-- state: current counts by DB status
-- funnel_24h: conversion rates through pipeline
-- timing_avg: average processing times
-- throughput_1min: recent processing rates
-- failures_24h: failure breakdown by type
-- backpressure: queue status and bottlenecks
-- pool_stats: ACTIVE pool statistics
-- pool_quality: quality metrics (edge, sharpe, winrate, dd)
-- retest_24h: re-backtest statistics
-- live_rotation: LIVE deployment statistics
+Log format (verbose, self-explanatory):
+Each section has a header line explaining the category, followed by
+individual metrics with clear descriptions. Sections:
+
+- [QUEUE]: Current strategy counts by status (waiting at each stage)
+- [FUNNEL 24H]: Conversion rates through pipeline in last 24h
+- [TIMING]: Average processing time per strategy at each stage
+- [FAILURES 24H]: Rejection counts by stage with reasons
+- [BACKPRESSURE]: Queue saturation levels (OK/OVERFLOW)
+- [POOL]: ACTIVE pool statistics (strategies ready for live)
+- [RETEST 24H]: Pool freshness (re-backtest results)
+- [LIVE]: Strategies currently trading real money
 """
 
 import time
@@ -694,7 +694,7 @@ class MetricsCollector:
         retest_stats: Dict[str, Any],
         live_stats: Dict[str, Any],
     ) -> None:
-        """Log metrics in Unix standard format (11 lines)."""
+        """Log metrics in verbose, self-explanatory format."""
 
         # Helper functions
         def fmt_pct(val: Optional[int]) -> str:
@@ -717,23 +717,28 @@ class MetricsCollector:
                 return "--"
             return f"{val*100:.0f}%"
 
-        # 1. status
+        # === STATUS ===
         if issue:
-            logger.info(f'status={status} issue="{issue}"')
+            logger.info(f'=== PIPELINE STATUS: {status} ({issue}) ===')
         else:
-            logger.info(f'status={status}')
+            logger.info(f'=== PIPELINE STATUS: {status} ===')
 
-        # 2. state
+        # === QUEUE ===
         g = queue_depths.get('GENERATED', 0)
         v = queue_depths.get('VALIDATED', 0)
         a = queue_depths.get('ACTIVE', 0)
-        l = queue_depths.get('LIVE', 0)
+        lv = queue_depths.get('LIVE', 0)
         r = queue_depths.get('RETIRED', 0)
         f = queue_depths.get('FAILED', 0)
-        logger.info(f'state generated={g} validated={v} active={a} live={l} retired={r} failed={f}')
+        logger.info('[QUEUE] strategies waiting at each stage')
+        logger.info(f'[QUEUE] generated: {g} (waiting for validation)')
+        logger.info(f'[QUEUE] validated: {v} (waiting for backtest)')
+        logger.info(f'[QUEUE] active: {a} (in pool, ready to deploy)')
+        logger.info(f'[QUEUE] live: {lv} (trading now)')
+        logger.info(f'[QUEUE] retired: {r} (removed from live)')
+        logger.info(f'[QUEUE] failed: {f} (rejected at any stage)')
 
-        # 3. funnel_24h (format: count/base(pct%) where base is previous stage)
-        # gen→val→bt→score→shuf→mw→pool
+        # === FUNNEL 24H ===
         gen = funnel["generated"]
         val = funnel["validated"]
         bt = funnel["backtested"]
@@ -741,94 +746,79 @@ class MetricsCollector:
         shuf = funnel["shuffle_ok"]
         mw = funnel["mw_ok"]
         pool = funnel["pool"]
-        logger.info(
-            f'funnel_24h '
-            f'generated={gen} '
-            f'validated={val}/{gen}({fmt_pct(funnel["validated_pct"])}) '
-            f'backtested={bt}/{val}({fmt_pct(funnel["backtested_pct"])}) '
-            f'score_ok={score}/{bt}({fmt_pct(funnel["score_ok_pct"])}) '
-            f'shuffle_ok={shuf}/{score}({fmt_pct(funnel["shuffle_ok_pct"])}) '
-            f'mw_ok={mw}/{shuf}({fmt_pct(funnel["mw_ok_pct"])}) '
-            f'pool={pool}/{mw}({fmt_pct(funnel["pool_pct"])})'
-        )
 
-        # 4. timing_avg
-        logger.info(
-            f'timing_avg '
-            f'validation={fmt_time(timing.get("validation"))} '
-            f'backtest={fmt_time(timing.get("backtest"))} '
-            f'shuffle={fmt_time(timing.get("shuffle"))} '
-            f'multiwindow={fmt_time(timing.get("multiwindow"))}'
-        )
+        # Calculate expansion ratio for parametric
+        expansion = f"{bt/val:.1f}x" if val > 0 else "--"
 
-        # 5. throughput_1min
-        logger.info(
-            f'throughput_1min '
-            f'gen=+{throughput["gen"]} '
-            f'val=+{throughput["val"]} '
-            f'bt=+{throughput["bt"]} '
-            f'score=+{throughput["score"]} '
-            f'shuf=+{throughput["shuf"]} '
-            f'mw=+{throughput["mw"]} '
-            f'pool=+{throughput["pool"]}'
-        )
+        # Find bottleneck (lowest non-100% pass rate after validation)
+        bottleneck = ""
+        if shuf > 0 and mw == 0:
+            bottleneck = " <-- BOTTLENECK"
+        elif score > 0 and shuf == 0:
+            bottleneck = " <-- BOTTLENECK"
 
-        # 6. failures_24h
-        logger.info(
-            f'failures_24h '
-            f'validation={failures["validation"]} '
-            f'score_reject={failures["score_reject"]} '
-            f'shuffle_fail={failures["shuffle_fail"]} '
-            f'mw_fail={failures["mw_fail"]} '
-            f'pool_reject={failures["pool_reject"]}'
-        )
+        logger.info('[FUNNEL 24H] strategies processed in last 24 hours')
+        logger.info(f'[FUNNEL 24H] generated: {gen} base strategies created by AI/patterns')
+        logger.info(f'[FUNNEL 24H] validated: {val} of {gen} passed syntax/AST/execution ({fmt_pct(funnel["validated_pct"])})')
+        logger.info(f'[FUNNEL 24H] backtested_base: {val} base strategies entered backtest')
+        logger.info(f'[FUNNEL 24H] backtested_parametric: {bt} parameter combinations tested ({expansion} expansion)')
+        logger.info(f'[FUNNEL 24H] backtested_score_ok: {score} of {bt} passed min_score {self.pool_min_score} ({fmt_pct(funnel["score_ok_pct"])})')
+        logger.info(f'[FUNNEL 24H] shuffle_ok: {shuf} of {score} passed lookahead test ({fmt_pct(funnel["shuffle_ok_pct"])})')
+        mw_bottleneck = bottleneck if "BOTTLENECK" in bottleneck else ""
+        logger.info(f'[FUNNEL 24H] multiwindow_ok: {mw} of {shuf} passed consistency test ({fmt_pct(funnel["mw_ok_pct"])}){mw_bottleneck}')
+        logger.info(f'[FUNNEL 24H] pool_added: {pool} entered ACTIVE pool')
 
-        # 7. backpressure
-        gen_status = "(full)" if backpressure["gen_full"] else ""
-        logger.info(
-            f'backpressure '
-            f'gen_queue={backpressure["gen_queue"]}/{backpressure["gen_limit"]}{gen_status} '
-            f'val_queue={backpressure["val_queue"]}/{backpressure["val_limit"]} '
-            f'bt_waiting={backpressure["bt_waiting"]} '
-            f'bt_processing={backpressure["bt_processing"]}'
-        )
+        # === TIMING ===
+        logger.info('[TIMING] average time per strategy')
+        logger.info(f'[TIMING] validation_total: {fmt_time(timing.get("validation"))}')
+        logger.info(f'[TIMING] backtest_total: {fmt_time(timing.get("backtest"))} (includes parametric optimization)')
+        logger.info(f'[TIMING] shuffle_test: {fmt_time(timing.get("shuffle"))}')
+        logger.info(f'[TIMING] multiwindow_test: {fmt_time(timing.get("multiwindow"))} (4 time windows)')
 
-        # 8. pool_stats
-        logger.info(
-            f'pool_stats '
-            f'size={pool_stats["size"]}/{pool_stats["limit"]} '
-            f'score_min={fmt_float(pool_stats["score_min"])} '
-            f'score_max={fmt_float(pool_stats["score_max"])} '
-            f'score_avg={fmt_float(pool_stats["score_avg"])}'
-        )
+        # === FAILURES 24H ===
+        logger.info('[FAILURES 24H] rejection counts by stage')
+        logger.info(f'[FAILURES 24H] validation: {failures["validation"]} (code errors)')
+        logger.info(f'[FAILURES 24H] backtest_score: {failures["score_reject"]} (score < {self.pool_min_score} threshold)')
+        logger.info(f'[FAILURES 24H] shuffle: {failures["shuffle_fail"]} (lookahead bias detected)')
+        logger.info(f'[FAILURES 24H] multiwindow: {failures["mw_fail"]} (inconsistent across time periods)')
+        logger.info(f'[FAILURES 24H] pool_full: {failures["pool_reject"]} (pool at {self.limit_active} max, score < worst in pool)')
 
-        # 9. pool_quality
+        # === BACKPRESSURE ===
+        gen_pct = int(100 * backpressure["gen_queue"] / backpressure["gen_limit"]) if backpressure["gen_limit"] > 0 else 0
+        val_pct = int(100 * backpressure["val_queue"] / backpressure["val_limit"]) if backpressure["val_limit"] > 0 else 0
+        gen_status = "OVERFLOW" if backpressure["gen_full"] else "OK"
+        val_status = "OVERFLOW" if val_pct > 100 else "OK"
+        logger.info('[BACKPRESSURE] queue saturation')
+        logger.info(f'[BACKPRESSURE] generator_queue: {backpressure["gen_queue"]}/{backpressure["gen_limit"]} ({gen_pct}%) {gen_status}')
+        logger.info(f'[BACKPRESSURE] validator_queue: {backpressure["val_queue"]}/{backpressure["val_limit"]} ({val_pct}%) {val_status}')
+        logger.info(f'[BACKPRESSURE] backtest_queue: {backpressure["bt_waiting"]} waiting')
+        logger.info(f'[BACKPRESSURE] backtest_active: {backpressure["bt_processing"]} running now')
+
+        # === POOL ===
+        logger.info('[POOL] strategies ready for live trading')
+        logger.info(f'[POOL] size: {pool_stats["size"]} of {pool_stats["limit"]} max')
+        logger.info(f'[POOL] score_min: {fmt_float(pool_stats["score_min"])}')
+        logger.info(f'[POOL] score_max: {fmt_float(pool_stats["score_max"])}')
+        logger.info(f'[POOL] score_avg: {fmt_float(pool_stats["score_avg"])}')
         expectancy_str = f'{pool_quality["expectancy_avg"]*100:.1f}%' if pool_quality["expectancy_avg"] else "--"
-        logger.info(
-            f'pool_quality '
-            f'expectancy_avg={expectancy_str} '
-            f'sharpe_avg={fmt_float(pool_quality["sharpe_avg"])} '
-            f'winrate_avg={fmt_pct_float(pool_quality["winrate_avg"])} '
-            f'dd_avg={fmt_pct_float(pool_quality["dd_avg"])}'
-        )
+        logger.info(f'[POOL] expectancy_avg: {expectancy_str}')
+        logger.info(f'[POOL] sharpe_avg: {fmt_float(pool_quality["sharpe_avg"])}')
+        logger.info(f'[POOL] winrate_avg: {fmt_pct_float(pool_quality["winrate_avg"])}')
+        logger.info(f'[POOL] drawdown_avg: {fmt_pct_float(pool_quality["dd_avg"])}')
 
-        # 10. retest_24h (tested=re-backtested strategies, retired=all retirements including pool eviction)
-        logger.info(
-            f'retest_24h '
-            f'tested={retest_stats["tested"]} '
-            f'passed={retest_stats["passed"]} '
-            f'evicted_24h={retest_stats["retired"]}'
-        )
+        # === RETEST 24H ===
+        logger.info(f'[RETEST 24H] pool freshness (re-backtest every {self.retest_interval_days} days)')
+        logger.info(f'[RETEST 24H] tested: {retest_stats["tested"]} re-evaluated')
+        logger.info(f'[RETEST 24H] passed: {retest_stats["passed"]} still valid')
+        logger.info(f'[RETEST 24H] evicted: {retest_stats["retired"]} removed (performance degraded)')
 
-        # 11. live_rotation
-        avg_age_str = f'{live_stats["avg_age_days"]:.1f}d' if live_stats["avg_age_days"] else "--"
-        logger.info(
-            f'live_rotation '
-            f'live={live_stats["live"]}/{live_stats["limit"]} '
-            f'deployed_24h={live_stats["deployed_24h"]} '
-            f'retired_24h={live_stats["retired_24h"]} '
-            f'avg_live_age={avg_age_str}'
-        )
+        # === LIVE ===
+        avg_age_str = f'{live_stats["avg_age_days"]:.1f} days' if live_stats["avg_age_days"] else "--"
+        logger.info('[LIVE] strategies trading real money')
+        logger.info(f'[LIVE] active: {live_stats["live"]} of {live_stats["limit"]} max')
+        logger.info(f'[LIVE] deployed_24h: {live_stats["deployed_24h"]} started trading')
+        logger.info(f'[LIVE] retired_24h: {live_stats["retired_24h"]} stopped trading')
+        logger.info(f'[LIVE] avg_age: {avg_age_str}')
 
     # =========================================================================
     # PUBLIC API METHODS (for external use)

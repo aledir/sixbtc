@@ -533,19 +533,18 @@ class TestDryRunFullCycle:
             assert client.health_check()['status'] == 'healthy'
 
     def test_live_mode_requires_credentials(self):
-        """Test that live mode requires HL_USER_ADDRESS in .env"""
+        """Test that live mode requires HL_MASTER_ADDRESS in .env"""
         from unittest.mock import patch, MagicMock
 
-        # Without HL_USER_ADDRESS, live mode should fail at initialization
-        with patch.dict('os.environ', {'HL_USER_ADDRESS': ''}, clear=False), \
-             patch('src.config.loader.detect_subaccount_count', return_value=0), \
+        # Without HL_MASTER_ADDRESS, live mode should fail at initialization
+        with patch.dict('os.environ', {'HL_MASTER_ADDRESS': ''}, clear=False), \
              patch('src.executor.hyperliquid_client.Info') as mock_info:
             mock_info_instance = MagicMock()
             mock_info_instance.meta.return_value = {'universe': []}
             mock_info.return_value = mock_info_instance
 
-            # Live mode requires HL_USER_ADDRESS to be set
-            with pytest.raises(ValueError, match="Live trading requires HL_USER_ADDRESS"):
+            # Live mode requires HL_MASTER_ADDRESS to be set
+            with pytest.raises(ValueError, match="Live trading requires HL_MASTER_ADDRESS"):
                 HyperliquidClient(dry_run=False)
 
 
