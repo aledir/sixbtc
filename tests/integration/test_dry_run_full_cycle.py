@@ -162,14 +162,20 @@ class TestDryRunFullCycle:
             assert signal.direction == 'long'
             assert signal.atr_stop_multiplier == 2.0
 
-            # 3. Calculate position size (ATR-based)
+            # 3. Calculate position size (fixed fractional mode requires stop_loss)
             current_price = sample_ohlcv['close'].iloc[-1]
             account_balance = client.get_account_balance(1)
+
+            # Calculate ATR-based stop loss (RiskManager uses fixed mode internally)
+            high_low = sample_ohlcv['high'] - sample_ohlcv['low']
+            atr_value = high_low.rolling(14).mean().iloc[-1]
+            calculated_stop_loss = current_price - (atr_value * signal.atr_stop_multiplier)
 
             position_size, stop_loss, take_profit = risk_manager.calculate_position_size(
                 account_balance=account_balance,
                 current_price=current_price,
                 df=sample_ohlcv,
+                signal_stop_loss=calculated_stop_loss,
                 signal_atr_stop_mult=signal.atr_stop_multiplier,
                 signal_atr_take_mult=signal.atr_take_multiplier
             )
@@ -210,9 +216,8 @@ class TestDryRunFullCycle:
         """Test trading across multiple subaccounts (dry-run)"""
         from unittest.mock import patch, MagicMock
 
-        # Mock get_subaccount_count to return 3 (simulate 3 credentials in .env)
-        with patch('src.config.loader.get_subaccount_count', return_value=3), \
-             patch('src.executor.hyperliquid_client.Info') as mock_info:
+        # Mock Info to avoid real API calls (credentials from DB not needed in dry_run)
+        with patch('src.executor.hyperliquid_client.Info') as mock_info:
             mock_info_instance = MagicMock()
             mock_info_instance.meta.return_value = {'universe': [
                 {'name': 'BTC', 'szDecimals': 4, 'maxLeverage': 50},
@@ -355,11 +360,17 @@ class TestDryRunFullCycle:
             current_price = sample_ohlcv['close'].iloc[-1]
             account_balance = client.get_account_balance(1)
 
+            # Calculate ATR-based stop loss (RiskManager uses fixed mode internally)
+            high_low = sample_ohlcv['high'] - sample_ohlcv['low']
+            atr_value = high_low.rolling(14).mean().iloc[-1]
+            calculated_stop_loss = current_price - (atr_value * 2.0)  # 2x ATR
+
             # Calculate position size for short
             position_size, stop_loss, take_profit = risk_manager.calculate_position_size(
                 account_balance=account_balance,
                 current_price=current_price,
-                df=sample_ohlcv
+                df=sample_ohlcv,
+                signal_stop_loss=calculated_stop_loss
             )
 
             # Adjust for short position
@@ -481,11 +492,17 @@ class TestDryRunFullCycle:
             current_price = sample_ohlcv['close'].iloc[-1]
             account_balance = client.get_account_balance(1)
 
+            # Calculate ATR-based stop loss (RiskManager uses fixed mode internally)
+            high_low = sample_ohlcv['high'] - sample_ohlcv['low']
+            atr_value = high_low.rolling(14).mean().iloc[-1]
+            calculated_stop_loss = current_price - (atr_value * 2.0)  # 2x ATR
+
             # Calculate position size
             position_size, stop_loss, take_profit = risk_manager.calculate_position_size(
                 account_balance=account_balance,
                 current_price=current_price,
-                df=sample_ohlcv
+                df=sample_ohlcv,
+                signal_stop_loss=calculated_stop_loss
             )
 
             # Place order

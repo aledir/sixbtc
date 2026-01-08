@@ -41,12 +41,10 @@ class StrategyDeployer:
         Raises:
             KeyError: If required config sections are missing (Fast Fail)
         """
-        from src.config.loader import get_subaccount_count
-
         trading_config = config['trading']
 
-        # Auto-detect N subaccounts from .env
-        self.n_subaccounts = get_subaccount_count()
+        # Get subaccount count from config (managed via setup_hyperliquid.py)
+        self.n_subaccounts = config['hyperliquid']['subaccounts']['count']
         self.dry_run = config.get('hyperliquid', {}).get('dry_run', True)
 
         # Capital allocation

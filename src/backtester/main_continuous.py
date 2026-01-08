@@ -1194,6 +1194,9 @@ class ContinuousBacktesterProcess:
             (results_df['total_trades'] >= self.min_trades)
         ].copy()
 
+        # Track total combinations tested (for metrics)
+        combinations_tested = len(results_df)
+
         # Convert to list of dicts matching expected format
         # Use float() to convert np.float64 to native Python float (required for DB)
         results = []
@@ -1213,6 +1216,8 @@ class ContinuousBacktesterProcess:
                     'leverage': int(row['leverage']),
                     'exit_bars': int(row['exit_bars']),
                 },
+                # Track combinations tested (same for all results from this base strategy)
+                'combinations_tested': combinations_tested,
             }
             results.append(result)
 
@@ -2317,7 +2322,8 @@ class ContinuousBacktesterProcess:
         strategy_id: UUID,
         backtest_result: BacktestResult,
         backtest_start_time: Optional[float] = None,
-        degradation: float = 0.0
+        degradation: float = 0.0,
+        combinations_tested: Optional[int] = None
     ) -> Tuple[bool, str]:
         """
         Attempt to promote a strategy to the ACTIVE pool after backtest.
@@ -2336,6 +2342,7 @@ class ContinuousBacktesterProcess:
             backtest_result: BacktestResult with training period metrics
             backtest_start_time: Start time for duration calculation
             degradation: Holdout degradation for recency bonus (-degradation x 50, capped +-15)
+            combinations_tested: Number of parametric combinations tested (for metrics)
 
         Returns:
             (success, reason) tuple
@@ -2361,7 +2368,8 @@ class ContinuousBacktesterProcess:
                 expectancy=backtest_result.expectancy or 0,
                 consistency=backtest_result.win_rate or 0,  # Consistency = win rate
                 drawdown=backtest_result.max_drawdown or 0,
-                duration_ms=duration_ms
+                duration_ms=duration_ms,
+                combinations_tested=combinations_tested
             )
 
             # Check minimum score threshold first (avoid unnecessary shuffle test)
@@ -2369,7 +2377,8 @@ class ContinuousBacktesterProcess:
                 logger.debug(f"[{strategy_id}] Score {score:.1f} < {self.pool_min_score}, skipping shuffle test")
                 EventTracker.backtest_score_rejected(
                     strategy_id, strategy_name, score, self.pool_min_score,
-                    duration_ms=duration_ms
+                    duration_ms=duration_ms,
+                    combinations_tested=combinations_tested
                 )
                 return (False, f"score_below_threshold:{score:.1f}")
 

@@ -19,9 +19,9 @@ router = APIRouter()
 
 
 def get_total_subaccounts() -> int:
-    """Get total subaccounts - auto-detect from .env."""
-    from src.config.loader import get_subaccount_count
-    return get_subaccount_count()
+    """Get total subaccounts from config."""
+    config = load_config()
+    return config.get_required('hyperliquid.subaccounts.count')
 
 
 def get_subaccount_data(session, subaccount: Subaccount) -> SubaccountInfo:

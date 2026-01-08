@@ -683,7 +683,6 @@ def deploy(ctx, dry_run, live):
     try:
         from src.executor.hyperliquid_client import HyperliquidClient
         from src.database import get_session, Strategy, Subaccount
-        from src.config.loader import get_subaccount_count
 
         # Load selected strategies
         if not SELECTED_DIR.exists():
@@ -701,8 +700,8 @@ def deploy(ctx, dry_run, live):
         # Initialize client for health check
         client = HyperliquidClient(config._raw_config, dry_run=dry_run)
 
-        # Get subaccount count from .env credentials
-        max_subaccounts = get_subaccount_count()
+        # Get subaccount count from config
+        max_subaccounts = config.get_required('hyperliquid.subaccounts.count')
         console.print(f"Available subaccounts: {max_subaccounts}\n")
 
         strategies_to_deploy = selected_files[:max_subaccounts]

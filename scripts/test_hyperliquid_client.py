@@ -377,13 +377,9 @@ def test_level_5_microtrade():
 
     from src.executor.hyperliquid_client import HyperliquidClient
 
-    # Initialize in LIVE mode
-    config = load_config()
-    # Override dry_run to False for this test
-    config['hyperliquid']['dry_run'] = False
-
+    # Initialize in LIVE mode (dry_run=False)
     try:
-        client = HyperliquidClient(config=config, dry_run=False)
+        client = HyperliquidClient(dry_run=False)
     except ValueError as e:
         print(f"ERROR: Cannot initialize live client: {e}")
         print("Ensure HL_MASTER_ADDRESS is set and credentials exist in database.")

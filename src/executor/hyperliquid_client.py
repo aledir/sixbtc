@@ -316,19 +316,25 @@ class HyperliquidClient:
         return round(size, sz_decimals)
 
     def round_price(self, price: float) -> float:
-        """Round price to appropriate tick size based on price level"""
-        if price >= 10000:
-            return round(price, 1)
+        """Round price to appropriate tick size based on price level.
+
+        Hyperliquid tick sizes (as of 2024):
+        - >= $20,000: tick = 1.0 (integers only)
+        - >= $1,000: tick = 0.1
+        - >= $100: tick = 0.01
+        - >= $1: tick = 0.0001
+        - < $1: tick = 0.00001
+        """
+        if price >= 20000:
+            return round(price, 0)  # Integer prices for BTC, etc.
         elif price >= 1000:
-            return round(price, 2)
+            return round(price, 1)
         elif price >= 100:
-            return round(price, 3)
-        elif price >= 10:
-            return round(price, 4)
+            return round(price, 2)
         elif price >= 1:
-            return round(price, 5)
+            return round(price, 4)
         else:
-            return round(price, 6)
+            return round(price, 5)
 
     def get_current_price(self, symbol: str) -> float:
         """
