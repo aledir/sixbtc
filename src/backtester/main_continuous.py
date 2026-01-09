@@ -36,7 +36,7 @@ from src.database.models import ValidationCache
 from src.backtester.backtest_engine import BacktestEngine
 from src.backtester.data_loader import BacktestDataLoader
 from src.backtester.parametric_backtest import ParametricBacktester
-from src.backtester.multi_window_validator import MultiWindowValidator
+# NOTE: MultiWindowValidator removed - replaced by WFA with parameter re-optimization
 from src.data.coin_registry import get_registry, get_active_pairs
 from src.scorer import BacktestScorer, PoolManager
 from src.validator.lookahead_test import LookaheadTester
@@ -150,25 +150,29 @@ class ContinuousBacktesterProcess:
         # Pairs count (from backtesting section)
         self.max_coins = self.config.get_required('backtesting.max_coins')
 
-        # Training/Holdout configuration
-        self.training_days = self.config.get_required('backtesting.training_days')
-        self.holdout_days = self.config.get_required('backtesting.holdout_days')
+        # In-sample/Out-of-sample configuration
+        self.is_days = self.config.get_required('backtesting.is_days')
+        self.oos_days = self.config.get_required('backtesting.oos_days')
         self.min_coverage_pct = self.config.get_required('backtesting.min_coverage_pct')
 
-        # Holdout validation thresholds
-        self.holdout_max_degradation = self.config.get_required('backtesting.holdout.max_degradation')
-        self.holdout_min_sharpe = self.config.get_required('backtesting.holdout.min_sharpe')
-        self.holdout_recency_weight = self.config.get_required('backtesting.holdout.recency_weight')
+        # Out-of-sample validation thresholds
+        self.oos_max_degradation = self.config.get_required('backtesting.out_of_sample.max_degradation')
+        self.oos_min_sharpe = self.config.get_required('backtesting.out_of_sample.min_sharpe')
+        self.oos_recency_weight = self.config.get_required('backtesting.out_of_sample.recency_weight')
 
         # Min trades per timeframe (parallel arrays)
         timeframes = self.config.get_required('timeframes')
-        min_training = self.config.get_required('backtesting.min_trades.training')
-        min_holdout = self.config.get_required('backtesting.min_trades.holdout')
-        self.min_trades_training = dict(zip(timeframes, min_training))
-        self.min_trades_holdout = dict(zip(timeframes, min_holdout))
+        min_is = self.config.get_required('backtesting.min_trades.in_sample')
+        min_oos = self.config.get_required('backtesting.min_trades.out_of_sample')
+        self.min_trades_is = dict(zip(timeframes, min_is))
+        self.min_trades_oos = dict(zip(timeframes, min_oos))
 
         # Initial capital for expectancy normalization
         self.initial_capital = self.config.get_required('backtesting.initial_capital')
+
+        # Robustness validation (parameter stability check)
+        self.robustness_enabled = self.config.get_required('backtesting.robustness.enabled')
+        self.robustness_min_threshold = self.config.get_required('backtesting.robustness.min_threshold')
 
         # SCORER and PoolManager for post-backtest scoring and pool management
         self.scorer = BacktestScorer(self.config._raw_config)
@@ -178,8 +182,7 @@ class ContinuousBacktesterProcess:
         self.lookahead_tester = LookaheadTester()
         self._test_data: Optional[pd.DataFrame] = None  # Lazy loaded
 
-        # Multi-window validator for consistency check (post-shuffle)
-        self.multi_window_validator = MultiWindowValidator(self.config._raw_config)
+        # NOTE: multi_window_validator removed - replaced by WFA with parameter re-optimization
 
         # Preloaded data cache: {(symbols_hash, timeframe): data}
         self._data_cache: Dict[str, Dict[str, any]] = {}
@@ -222,7 +225,7 @@ class ContinuousBacktesterProcess:
         cache_reader = BacktestCacheReader(self.data_loader.cache_dir)
 
         # Check coverage for ALL coins (scroll-down logic)
-        total_days = self.training_days + self.holdout_days
+        total_days = self.is_days + self.oos_days
         min_days_required = total_days * self.min_coverage_pct
 
         validated_coins = []
@@ -353,58 +356,58 @@ class ContinuousBacktesterProcess:
 
         return validated_coins, "validated"
 
-    def _get_training_holdout_data(
+    def _get_is_oos_data(
         self,
         pairs: List[str],
         timeframe: str
     ) -> Tuple[Dict[str, any], Dict[str, any]]:
         """
-        Get training/holdout data for multi-symbol backtesting
+        Get in-sample/out-of-sample data for multi-symbol backtesting
 
         Data is split into NON-OVERLAPPING periods:
-        - Training: older data for backtest metrics (365 days)
-        - Holdout: recent data for validation (30 days) - NEVER seen during training
+        - In-sample (IS): older data for backtest metrics (120 days)
+        - Out-of-sample (OOS): recent data for validation (30 days) - NEVER seen during IS
 
         Args:
             pairs: List of symbol names
             timeframe: Timeframe to load
 
         Returns:
-            Tuple of (training_data_dict, holdout_data_dict)
+            Tuple of (is_data_dict, oos_data_dict)
         """
         # Cache key includes pairs hash - different strategies have different pairs
         pairs_hash = hash(tuple(sorted(pairs)))
-        training_cache_key = f"{timeframe}_{pairs_hash}_training"
-        holdout_cache_key = f"{timeframe}_{pairs_hash}_holdout"
+        is_cache_key = f"{timeframe}_{pairs_hash}_is"
+        oos_cache_key = f"{timeframe}_{pairs_hash}_oos"
 
         # Check if both are cached
-        if training_cache_key in self._data_cache and holdout_cache_key in self._data_cache:
+        if is_cache_key in self._data_cache and oos_cache_key in self._data_cache:
             return (
-                self._data_cache[training_cache_key],
-                self._data_cache[holdout_cache_key]
+                self._data_cache[is_cache_key],
+                self._data_cache[oos_cache_key]
             )
 
         try:
-            training_data, holdout_data = self.data_loader.load_multi_symbol_training_holdout(
+            is_data, oos_data = self.data_loader.load_multi_symbol_is_oos(
                 symbols=pairs,
                 timeframe=timeframe,
-                training_days=self.training_days,
-                holdout_days=self.holdout_days,
+                is_days=self.is_days,
+                oos_days=self.oos_days,
                 target_count=self.max_coins  # Scroll through pairs to find 30 with valid data
             )
 
-            self._data_cache[training_cache_key] = training_data
-            self._data_cache[holdout_cache_key] = holdout_data
+            self._data_cache[is_cache_key] = is_data
+            self._data_cache[oos_cache_key] = oos_data
 
             logger.info(
-                f"Loaded training/holdout data for {timeframe}: "
-                f"{len(training_data)} symbols ({self.training_days}d training, {self.holdout_days}d holdout)"
+                f"Loaded IS/OOS data for {timeframe}: "
+                f"{len(is_data)} symbols ({self.is_days}d IS, {self.oos_days}d OOS)"
             )
 
-            return training_data, holdout_data
+            return is_data, oos_data
 
         except Exception as e:
-            logger.error(f"Failed to load training/holdout data for {timeframe}: {e}")
+            logger.error(f"Failed to load IS/OOS data for {timeframe}: {e}")
             return {}, {}
 
     def _log_pipeline_status(self):
@@ -537,18 +540,19 @@ class ContinuousBacktesterProcess:
         base_code_hash: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
-        Run training/holdout backtest on strategy.
+        Run training/holdout backtest on strategy's assigned timeframe.
 
-        If base_code_hash is present, the strategy was pre-parametrized by the Generator.
-        In this case, we skip parametric optimization and test only the assigned timeframe.
+        No multi-TF optimization: each strategy tests ONLY its assigned timeframe
+        (original_tf). Parametric optimization explores SL/TP/leverage parameter
+        space to find optimal settings.
 
-        Training/Holdout backtesting (unified approach):
-        1. Backtest on TRAINING period (365 days) - for edge detection
-        2. Backtest on HOLDOUT period (30 days) - NEVER seen during training
-        3. Holdout serves TWO purposes:
-           a) Anti-overfitting: if holdout crashes, strategy is overfitted
-           b) Recency score: good holdout = strategy "in form" now
-        4. Final score weighted: training metrics + holdout performance
+        In-sample/Out-of-sample backtesting flow:
+        1. Backtest on IN-SAMPLE period (config: is_days) - for edge detection
+        2. Backtest on OUT-OF-SAMPLE period (config: oos_days) - NEVER seen during IS
+        3. OOS serves TWO purposes:
+           a) Anti-overfitting: if OOS crashes, strategy is overfitted
+           b) Recency score: good OOS = strategy "in form" now
+        4. Final score weighted: IS metrics + OOS performance
 
         Returns:
             (passed, reason) tuple
@@ -573,367 +577,218 @@ class ContinuousBacktesterProcess:
                 self._delete_strategy(strategy_id, "Could not load strategy instance")
                 return (False, "Could not load strategy instance")
 
-            # Test all timeframes with training/holdout backtesting
-            # Each TF validates its own coins (pattern-specific, no fallback)
-            tf_results = {}
-            tf_backtest_ids = {}
-            tf_validated_coins = {}  # Track which coins were used per TF
-            tf_optimal_params = {}  # Track optimal params per TF (from parametric)
-            tf_all_parametric_results = {}  # Track ALL valid parametric results per TF
-            tf_holdout_data = {}  # Track holdout data per TF (for additional parametric validation)
+            # Single-TF backtest results (no multi-TF optimization)
+            backtest_result = None
+            backtest_id = None
+            validated_coins_list = []  # Coins used for backtest
+            optimal_params = None  # Optimal params from parametric optimization
+            all_parametric_results = []  # ALL valid parametric results
+            oos_data_stored = None  # OOS data for additional validation
 
-            # All strategies test ONLY their assigned timeframe
-            # All strategies need parametric optimization (params are defaults, not optimized)
+            # Strategy tests ONLY its assigned timeframe (no multi-TF optimization)
+            assigned_tf = original_tf
             use_parametric = True
 
-            for tf in [original_tf]:
-                # Validate pattern coins for this timeframe (3-level validation)
-                if pattern_coins:
-                    validated_coins, validation_reason = self._validate_pattern_coins(
-                        pattern_coins, tf
-                    )
-                    if validated_coins is None:
-                        logger.info(
-                            f"[{strategy_name}] {tf}: SKIPPED - {validation_reason}"
-                        )
-                        continue
-                    pairs = validated_coins
-                    logger.info(
-                        f"[{strategy_name}] {tf}: Using {len(pairs)} validated pattern coins"
-                    )
-                else:
-                    # Non-pattern strategy: use volume-based pairs with UNIFIED scroll-down
-                    pairs, status = self._get_backtest_pairs(tf)
-                    if not pairs:
-                        logger.info(
-                            f"[{strategy_name}] {tf}: SKIPPED - {status}"
-                        )
-                        continue
-
-                logger.info(f"[{strategy_name}] Testing {tf} on {len(pairs)} pairs (training/holdout)...")
-
-                # Load training/holdout data (NON-OVERLAPPING)
-                training_data, holdout_data = self._get_training_holdout_data(pairs, tf)
-
-                if not training_data:
-                    logger.warning(f"No training data loaded for {tf}, skipping")
-                    continue
-
-                # Store validated coins for this TF
-                tf_validated_coins[tf] = list(training_data.keys())
-
-                # Run TRAINING period backtest
-                try:
-                    if use_parametric:
-                        # Parametric: generate strategies with different SL/TP/leverage parameters
-                        # Pass is_pattern_based to select appropriate parameter space
-                        is_pattern_based = pattern_coins is not None and len(pattern_coins) > 0
-                        parametric_results = self._run_parametric_backtest(
-                            strategy_instance, training_data, tf, is_pattern_based,
-                            strategy_id=strategy_id, strategy_name=strategy_name
-                        )
-                        if not parametric_results:
-                            # Details already logged by _run_parametric_backtest
-                            logger.info(f"[{strategy_name}] {tf}: Skipped (no params passed thresholds)")
-                            continue
-                        # Use best result (first in sorted list)
-                        training_result = parametric_results[0]
-                        # Store optimal params for later update
-                        optimal_params = training_result.get('params', {})
-                        logger.info(
-                            f"[{strategy_name}] {tf}: Parametric found optimal params: "
-                            f"SL={optimal_params.get('sl_pct', 0):.1%}, "
-                            f"TP={optimal_params.get('tp_pct', 0):.1%}, "
-                            f"leverage={optimal_params.get('leverage', 1)}, "
-                            f"exit_bars={optimal_params.get('exit_bars', 0)}"
-                        )
-                    else:
-                        # Standard: use strategy's original parameters
-                        training_result = self._run_multi_symbol_backtest(
-                            strategy_instance, training_data, tf
-                        )
-                        optimal_params = None
-                except Exception as e:
-                    logger.error(f"Training backtest failed for {tf}: {e}")
-                    continue
-
-                if training_result is None or training_result.get('total_trades', 0) == 0:
-                    logger.warning(f"No trades in training period for {tf}")
-                    continue
-
-                # Run HOLDOUT period backtest (validation)
-                # Use min_bars=20 for holdout (30 days on 1d = only 30 bars)
-                holdout_result = None
-                try:
-                    if holdout_data and len(holdout_data) >= 5:
-                        holdout_result = self._run_multi_symbol_backtest(
-                            strategy_instance, holdout_data, tf,
-                            min_bars=20  # Lower threshold for holdout period
-                        )
-                except Exception as e:
-                    logger.warning(f"Holdout backtest failed for {tf}: {e}")
-                    holdout_result = None
-
-                # Validate holdout and calculate final metrics
-                validation = self._validate_holdout(training_result, holdout_result, tf)
-
-                if not validation['passed']:
-                    logger.info(
-                        f"[{strategy_name}] {tf}: REJECTED - {validation['reason']}"
-                    )
-                    continue
-
-                # Combine training + holdout into final result
-                final_result = self._calculate_final_metrics(
-                    training_result, holdout_result, validation
+            # Begin single-timeframe backtest (previously a loop over [original_tf])
+            # Validate pattern coins for this timeframe (3-level validation)
+            if pattern_coins:
+                validated_coins, validation_reason = self._validate_pattern_coins(
+                    pattern_coins, assigned_tf
                 )
-
-                tf_results[tf] = final_result
-
-                # Store optimal params if parametric was used
-                if optimal_params:
-                    tf_optimal_params[tf] = optimal_params
-                    # Also store ALL parametric results for this TF (for holdout validation)
-                    tf_all_parametric_results[tf] = parametric_results
-
-                # Store holdout data for this TF (needed for additional parametric validation)
-                tf_holdout_data[tf] = holdout_data
-
-                # Save training backtest result
-                training_backtest_id = self._save_backtest_result(
-                    strategy_id, training_result, pairs, tf,
-                    period_type='training',
-                    period_days=self.training_days
-                )
-
-                # Save holdout backtest result (ALWAYS save, even with 0 trades)
-                # 0 trades is DATA (pattern dormant in recent period), not failure
-                holdout_backtest_id = None
-                if holdout_result:
-                    holdout_backtest_id = self._save_backtest_result(
-                        strategy_id, holdout_result, pairs, tf,
-                        period_type='holdout',
-                        period_days=self.holdout_days
-                    )
-
-                    # Link training result to holdout and add validation metrics
-                    self._update_training_with_holdout(
-                        training_backtest_id,
-                        holdout_backtest_id,
-                        final_result
-                    )
-
-                tf_backtest_ids[tf] = training_backtest_id
-
-                holdout_trades = holdout_result.get('total_trades', 0) if holdout_result else 0
-                holdout_sharpe = holdout_result.get('sharpe_ratio', 0) if holdout_result else 0
+                if validated_coins is None:
+                    self._delete_strategy(strategy_id, validation_reason)
+                    return (False, f"Pattern coin validation failed: {validation_reason}")
+                pairs = validated_coins
                 logger.info(
-                    f"[{strategy_name}] {tf}: "
-                    f"Training: {training_result['total_trades']} trades, Sharpe {training_result.get('sharpe_ratio', 0):.2f} | "
-                    f"Holdout: {holdout_trades} trades, Sharpe {holdout_sharpe:.2f} | "
-                    f"Final Score: {final_result.get('final_score', 0):.2f}"
+                    f"[{strategy_name}] {assigned_tf}: Using {len(pairs)} validated pattern coins"
                 )
+            else:
+                # Non-pattern strategy: use volume-based pairs with UNIFIED scroll-down
+                pairs, status = self._get_backtest_pairs(assigned_tf)
+                if not pairs:
+                    self._delete_strategy(strategy_id, status)
+                    return (False, f"No backtest pairs: {status}")
 
-            # Find optimal timeframe using final scores
-            optimal_tf = self._find_optimal_timeframe(tf_results)
+            logger.info(f"[{strategy_name}] Testing {assigned_tf} on {len(pairs)} pairs (IS/OOS)...")
 
-            if optimal_tf is None:
-                self._delete_strategy(strategy_id, "Backtest failed thresholds")
-                return (False, "Backtest failed thresholds")
+            # Load in-sample/out-of-sample data (NON-OVERLAPPING)
+            is_data, oos_data = self._get_is_oos_data(pairs, assigned_tf)
 
-            # Get validated coins for optimal TF (these are the coins to use in live trading)
-            optimal_tf_coins = tf_validated_coins.get(optimal_tf, [])
+            if not is_data:
+                self._delete_strategy(strategy_id, "No IS data")
+                return (False, f"No IS data loaded for {assigned_tf}")
 
-            # Get optimal params for optimal TF (from parametric backtest)
-            optimal_params_for_tf = tf_optimal_params.get(optimal_tf)
+            # Store validated coins
+            validated_coins_list = list(is_data.keys())
 
-            # Update strategy with optimal TF, validated coins, and optimal params
-            self._update_strategy_optimal_tf(
-                strategy_id, optimal_tf, optimal_tf_coins, optimal_params_for_tf
+            # STEP 1: PARAMETRIC OPTIMIZATION (screening)
+            # Tests ~1050 combinations, finds best combo, discards #2-1050
+            try:
+                is_pattern_based = pattern_coins is not None and len(pattern_coins) > 0
+
+                if use_parametric:
+                    # Initial parametric to find best combo
+                    parametric_results = self._run_parametric_backtest(
+                        strategy_instance, is_data, assigned_tf, is_pattern_based,
+                        strategy_id=strategy_id, strategy_name=strategy_name
+                    )
+
+                    if not parametric_results:
+                        self._delete_strategy(strategy_id, "No params passed thresholds")
+                        return (False, "No parametric combinations passed thresholds")
+
+                    # Best combo from initial parametric
+                    initial_best = parametric_results[0]
+                    initial_params = initial_best.get('params', {})
+                    logger.info(
+                        f"[{strategy_name}] {assigned_tf}: Parametric found best combo: "
+                        f"SL={initial_params.get('sl_pct', 0):.1%}, "
+                        f"TP={initial_params.get('tp_pct', 0):.1%}, "
+                        f"leverage={initial_params.get('leverage', 1)}, "
+                        f"exit_bars={initial_params.get('exit_bars', 0)}"
+                    )
+
+                    # Store for combinations_tested metric
+                    all_parametric_results = parametric_results
+
+                    # Apply best params from parametric to strategy instance
+                    strategy_instance.sl_pct = initial_params.get('sl_pct', 0.02)
+                    strategy_instance.tp_pct = initial_params.get('tp_pct', 0.03)
+                    strategy_instance.leverage = initial_params.get('leverage', 1)
+                    strategy_instance.exit_after_bars = initial_params.get('exit_bars', 0)
+
+                    # STEP 2: Final IS backtest with best params for metrics
+                    is_result = self._run_multi_symbol_backtest(
+                        strategy_instance, is_data, assigned_tf
+                    )
+
+                else:
+                    # Standard: use strategy's original parameters (no WFA)
+                    is_result = self._run_multi_symbol_backtest(
+                        strategy_instance, is_data, assigned_tf
+                    )
+                    optimal_params = None
+
+            except Exception as e:
+                self._delete_strategy(strategy_id, f"IS backtest failed: {e}")
+                return (False, f"IS backtest failed for {assigned_tf}: {e}")
+
+            if is_result is None or is_result.get('total_trades', 0) == 0:
+                self._delete_strategy(strategy_id, "No trades in IS")
+                return (False, f"No trades in IS period for {assigned_tf}")
+
+            # Run OUT-OF-SAMPLE period backtest (validation)
+            # Use min_bars=20 for OOS (30 days on 1d = only 30 bars)
+            oos_result = None
+            try:
+                if oos_data and len(oos_data) >= 5:
+                    oos_result = self._run_multi_symbol_backtest(
+                        strategy_instance, oos_data, assigned_tf,
+                        min_bars=20  # Lower threshold for OOS period
+                    )
+            except Exception as e:
+                logger.warning(f"OOS backtest failed for {assigned_tf}: {e}")
+                oos_result = None
+
+            # Validate OOS and calculate final metrics
+            validation = self._validate_oos(is_result, oos_result, assigned_tf)
+
+            if not validation['passed']:
+                self._delete_strategy(strategy_id, validation['reason'])
+                return (False, f"OOS validation failed: {validation['reason']}")
+
+            # Combine IS + OOS into final result
+            final_result = self._calculate_final_metrics(
+                is_result, oos_result, validation
             )
 
-            # Run walk-forward analysis for stability validation
-            # Skip for 1d/4h timeframes - windows too small for meaningful walk-forward
-            wf_skipped = False
-            if optimal_tf in ('1d', '4h'):
-                logger.info(f"[{strategy_name}] Walk-forward skipped for {optimal_tf} (insufficient bars per window)")
-                wf_stability = None
-                wf_skipped = True
-            else:
-                logger.info(
-                    f"[{strategy_name}] Running walk-forward analysis on {optimal_tf} "
-                    f"for stability validation"
+            backtest_result = final_result
+
+            # Store parametric results if available (for combinations_tested metric)
+            if parametric_results:
+                all_parametric_results = parametric_results
+
+            # Store OOS data (needed for additional parametric validation)
+            oos_data_stored = oos_data
+
+            # Save in-sample backtest result
+            is_backtest_id = self._save_backtest_result(
+                strategy_id, is_result, pairs, assigned_tf,
+                period_type='in_sample',
+                period_days=self.is_days
+            )
+
+            # Save out-of-sample backtest result (ALWAYS save, even with 0 trades)
+            # 0 trades is DATA (pattern dormant in recent period), not failure
+            oos_backtest_id = None
+            if oos_result:
+                oos_backtest_id = self._save_backtest_result(
+                    strategy_id, oos_result, pairs, assigned_tf,
+                    period_type='out_of_sample',
+                    period_days=self.oos_days
                 )
 
-                wf_stability = self._run_walk_forward_analysis(
-                    strategy_instance=strategy_instance,
-                    optimal_tf=optimal_tf,
-                    validated_coins=optimal_tf_coins,
-                    optimal_params=optimal_params_for_tf
+                # Link IS result to OOS and add validation metrics
+                self._update_is_with_oos(
+                    is_backtest_id,
+                    oos_backtest_id,
+                    final_result
                 )
 
-            if wf_stability is not None:
-                # Update the optimal TF backtest result with walk-forward stability
-                optimal_tf_backtest_id = tf_backtest_ids.get(optimal_tf)
-                if optimal_tf_backtest_id:
-                    self._update_backtest_with_walkforward(
-                        optimal_tf_backtest_id,
-                        wf_stability
-                    )
+            backtest_id = is_backtest_id
 
-                    logger.info(
-                        f"[{strategy_name}] Walk-forward stability: {wf_stability:.3f} "
-                        f"({'stable' if wf_stability < 0.15 else 'unstable'})"
-                    )
-                else:
-                    logger.warning(f"[{strategy_name}] No backtest ID found for optimal TF {optimal_tf}")
-            elif not wf_skipped:
-                # Only warn if walk-forward actually failed (not skipped)
-                logger.warning(f"[{strategy_name}] Walk-forward analysis failed")
+            oos_trades = oos_result.get('total_trades', 0) if oos_result else 0
+            oos_sharpe = oos_result.get('sharpe_ratio', 0) if oos_result else 0
+            logger.info(
+                f"[{strategy_name}] {assigned_tf}: "
+                f"IS: {is_result['total_trades']} trades, Sharpe {is_result.get('sharpe_ratio', 0):.2f} | "
+                f"OOS: {oos_trades} trades, Sharpe {oos_sharpe:.2f} | "
+                f"Final Score: {final_result.get('final_score', 0):.2f}"
+            )
 
-            # Process additional parametric strategies (if any)
-            # Each parameter set generates an independent strategy
-            additional_results = tf_all_parametric_results.get(optimal_tf, [])[1:]  # Skip first
-            if additional_results:
-                logger.info(
-                    f"Validating {len(additional_results)} additional parametric strategies "
-                    f"with holdout testing (anti-overfitting)"
-                )
+            # assigned_tf already set from original_tf (no multi-TF optimization)
+            # All threshold checks done above with early returns
 
-                # Get holdout data for optimal TF
-                holdout_data_for_tf = tf_holdout_data.get(optimal_tf)
-                if not holdout_data_for_tf:
-                    logger.warning(f"No holdout data for {optimal_tf}, skipping additional parametric validation")
-                else:
-                    for i, param_result in enumerate(additional_results, start=2):
-                        # Run holdout validation for this strategy
-                        try:
-                            # Load strategy instance and apply these params
-                            strategy_instance_for_holdout = self._load_strategy_instance(code, class_name)
-                            if not strategy_instance_for_holdout:
-                                continue
+            # Get validated coins (these are the coins to use in live trading)
+            assigned_tf_coins = validated_coins_list
 
-                            # Apply parameters to instance
-                            params = param_result['params']
-                            strategy_instance_for_holdout.sl_pct = params.get('sl_pct', 0.02)
-                            strategy_instance_for_holdout.tp_pct = params.get('tp_pct', 0.03)
-                            strategy_instance_for_holdout.leverage = params.get('leverage', 1)
-                            strategy_instance_for_holdout.exit_after_bars = params.get('exit_bars', 0)
+            # Get optimal params (from parametric backtest)
+            optimal_params_for_tf = optimal_params
 
-                            # Run holdout backtest with these params (min_bars=20 for 1d support)
-                            holdout_result_for_params = self._run_multi_symbol_backtest(
-                                strategy_instance_for_holdout, holdout_data_for_tf, optimal_tf,
-                                min_bars=20  # Lower threshold for holdout period
-                            )
+            # Update strategy with assigned TF, validated coins, and optimal params
+            self._update_strategy_assigned_tf(
+                strategy_id, assigned_tf, assigned_tf_coins, optimal_params_for_tf
+            )
 
-                            # Validate holdout performance
-                            validation_for_params = self._validate_holdout(
-                                param_result, holdout_result_for_params, optimal_tf
-                            )
+            # NOTE: WFA with parameter re-optimization is now done BEFORE OOS validation
+            # (see _run_wfa_with_optimization call above)
+            # Old WFA stability measurement removed - param stability is checked during WFA
 
-                            if not validation_for_params['passed']:
-                                logger.info(
-                                    f"[{strategy_name}/p{i}] REJECTED on holdout: "
-                                    f"{validation_for_params['reason']}"
-                                )
-                                continue  # Skip this strategy (overfitted)
-
-                            # Calculate final metrics (training + holdout)
-                            final_result_for_params = self._calculate_final_metrics(
-                                param_result, holdout_result_for_params, validation_for_params
-                            )
-
-                            # Create independent strategy from parameter set
-                            parametric_strategy_id = self._create_parametric_strategy(
-                                strategy_id,
-                                params,
-                                strategy_num=i,
-                                param_result=param_result,
-                                holdout_result=holdout_result_for_params,
-                                validation=validation_for_params
-                            )
-
-                            if parametric_strategy_id:
-                                # Save training backtest
-                                training_bt_id = self._save_backtest_result(
-                                    parametric_strategy_id,
-                                    param_result,
-                                    optimal_tf_coins,
-                                    optimal_tf,
-                                    period_type='training'
-                                )
-
-                                # Save holdout backtest
-                                if holdout_result_for_params:
-                                    holdout_bt_id = self._save_backtest_result(
-                                        parametric_strategy_id,
-                                        holdout_result_for_params,
-                                        optimal_tf_coins,
-                                        optimal_tf,
-                                        period_type='holdout'
-                                    )
-
-                                    # Link training to holdout
-                                    self._update_training_with_holdout(
-                                        training_bt_id,
-                                        holdout_bt_id,
-                                        final_result_for_params
-                                    )
-
-                                # Update strategy with optimal TF and pairs
-                                self._update_strategy_optimal_tf(
-                                    parametric_strategy_id, optimal_tf, optimal_tf_coins, None
-                                )
-
-                                logger.info(
-                                    f"[{strategy_name}/p{i}] PASSED holdout: "
-                                    f"score={final_result_for_params.get('final_score', 0):.2f}"
-                                )
-
-                                # Direct promotion to ACTIVE pool (skip re-insertion into pipeline)
-                                with get_session() as promo_session:
-                                    backtest_for_promo = promo_session.query(BacktestResult).filter(
-                                        BacktestResult.id == training_bt_id
-                                    ).first()
-                                    if backtest_for_promo:
-                                        # Pass degradation for recency bonus calculation
-                                        param_degradation = final_result_for_params.get('degradation', 0.0)
-                                        entered, promo_reason = self._promote_to_active_pool(
-                                            parametric_strategy_id, backtest_for_promo,
-                                            backtest_start_time, param_degradation
-                                        )
-                                        if entered:
-                                            logger.info(
-                                                f"[{strategy_name}/p{i}] Entered ACTIVE pool: {promo_reason}"
-                                            )
-                                        else:
-                                            logger.info(
-                                                f"[{strategy_name}/p{i}] Rejected from pool: {promo_reason}"
-                                            )
-
-                        except Exception as e:
-                            logger.error(f"[{strategy_name}/p{i}] Validation error: {e}")
-                            continue
-
-            # Promote to ACTIVE pool using leaderboard logic
-            optimal_backtest_id = tf_backtest_ids.get(optimal_tf)
-            if optimal_backtest_id:
+            # Promote best combo to ACTIVE pool using leaderboard logic
+            # NOTE: N-1 additional strategies path removed - only best combo proceeds
+            # This ensures 1 base code → 1 validated strategy (diversified pool)
+            if backtest_id:
                 # Get backtest result for scoring (eager load strategy to avoid detached session issues)
                 with get_session() as session:
-                    backtest_result = session.query(BacktestResult).options(
+                    db_backtest = session.query(BacktestResult).options(
                         joinedload(BacktestResult.strategy)
                     ).filter(
-                        BacktestResult.id == optimal_backtest_id
+                        BacktestResult.id == backtest_id
                     ).first()
 
-                    if backtest_result:
+                    if db_backtest:
                         # Get degradation for recency bonus
-                        optimal_result = tf_results[optimal_tf]
-                        tf_degradation = optimal_result.get('degradation', 0.0)
+                        degradation = backtest_result.get('degradation', 0.0)
+
+                        # Get combinations_tested and robustness from parametric results (if parametric was used)
+                        combinations = all_parametric_results[0].get('combinations_tested') if all_parametric_results else None
+                        robustness = all_parametric_results[0].get('robustness_score', 0.5) if all_parametric_results else 0.5
 
                         # Try to enter ACTIVE pool (handles leaderboard logic)
                         entered, pool_reason = self._promote_to_active_pool(
-                            strategy_id, backtest_result, backtest_start_time, tf_degradation
+                            strategy_id, db_backtest, backtest_start_time, degradation,
+                            combinations_tested=combinations,
+                            robustness_score=robustness
                         )
 
                         if entered:
@@ -945,11 +800,10 @@ class ContinuousBacktesterProcess:
                                 strategy.last_backtested_at = datetime.now(UTC)
                                 session.commit()
 
-                            optimal_result = tf_results[optimal_tf]
                             return (
                                 True,
                                 f"Entered ACTIVE pool: {pool_reason}, "
-                                f"TF={optimal_tf}, Score={optimal_result.get('final_score', 0):.1f}"
+                                f"TF={assigned_tf}, Score={backtest_result.get('final_score', 0):.1f}"
                             )
                         else:
                             # Strategy didn't make it into pool (score too low)
@@ -1057,6 +911,9 @@ class ContinuousBacktesterProcess:
             List of top K results with different parameters
         """
         import numpy as np
+
+        # Track timing for metrics
+        parametric_start_time = time.time()
 
         if not self.parametric_enabled or self.parametric_backtester is None:
             # Fallback to single backtest with strategy's original params
@@ -1197,10 +1054,35 @@ class ContinuousBacktesterProcess:
         # Track total combinations tested (for metrics)
         combinations_tested = len(results_df)
 
+        # Get parameter space for robustness calculation
+        param_space = self.parametric_backtester.parameter_space
+
         # Convert to list of dicts matching expected format
         # Use float() to convert np.float64 to native Python float (required for DB)
+        # Calculate robustness and filter if enabled
         results = []
+        robustness_rejected = 0
         for _, row in valid_results.iterrows():
+            params = {
+                'sl_pct': float(row['sl_pct']),
+                'tp_pct': float(row['tp_pct']),
+                'leverage': int(row['leverage']),
+                'exit_bars': int(row['exit_bars']),
+            }
+
+            # Calculate robustness for this parameter set
+            if self.robustness_enabled:
+                robustness_score = self._calculate_robustness_from_neighbors(
+                    results_df, params, param_space
+                )
+
+                # Filter by robustness threshold
+                if robustness_score < self.robustness_min_threshold:
+                    robustness_rejected += 1
+                    continue
+            else:
+                robustness_score = 0.5  # Neutral default when disabled
+
             result = {
                 'sharpe_ratio': float(row['sharpe']),
                 'max_drawdown': float(row['max_drawdown']),
@@ -1209,23 +1091,27 @@ class ContinuousBacktesterProcess:
                 'total_trades': int(row['total_trades']),
                 'total_return': float(row['total_return']),
                 'parametric_score': float(row['score']),
+                'robustness_score': robustness_score,
                 # Store the parameters used
-                'params': {
-                    'sl_pct': float(row['sl_pct']),
-                    'tp_pct': float(row['tp_pct']),
-                    'leverage': int(row['leverage']),
-                    'exit_bars': int(row['exit_bars']),
-                },
+                'params': params,
                 # Track combinations tested (same for all results from this base strategy)
                 'combinations_tested': combinations_tested,
             }
             results.append(result)
+
+        # Log robustness filtering if any were rejected
+        if robustness_rejected > 0:
+            logger.info(
+                f"[{strategy_name}] Robustness filter: {robustness_rejected} rejected "
+                f"(threshold={self.robustness_min_threshold:.0%}), {len(results)} passed"
+            )
 
         if results:
             best = results[0]
             logger.info(
                 f"[{strategy_name}] Parametric: {len(results)} strategies | "
                 f"Best: Sharpe={best['sharpe_ratio']:.2f}, Trades={best['total_trades']}, "
+                f"Robustness={best['robustness_score']:.2f}, "
                 f"SL={best['params']['sl_pct']:.1%}, TP={best['params']['tp_pct']:.1%}"
             )
         else:
@@ -1285,6 +1171,7 @@ class ContinuousBacktesterProcess:
                 # Emit event for metrics tracking
                 if strategy_id and strategy_name:
                     from src.database.event_tracker import EventTracker
+                    duration_ms = int((time.time() - parametric_start_time) * 1000)
                     EventTracker.backtest_parametric_failed(
                         strategy_id=strategy_id,
                         strategy_name=strategy_name,
@@ -1292,209 +1179,325 @@ class ContinuousBacktesterProcess:
                         reason="no_params_passed_thresholds",
                         best_sharpe=float(best_sharpe),
                         best_win_rate=float(best_wr),
-                        combinations_tested=n_tested
+                        combinations_tested=n_tested,
+                        duration_ms=duration_ms
                     )
 
         return results
 
-    def _validate_holdout(
+    def _calculate_robustness_from_neighbors(
         self,
-        training_result: Dict,
-        holdout_result: Optional[Dict],
+        all_results: pd.DataFrame,
+        best_params: dict,
+        param_space: dict
+    ) -> float:
+        """
+        Calculate robustness as fraction of neighbors that pass min_sharpe threshold.
+
+        Neighbors are parameter combinations with ONE dimension different (adjacent in grid).
+        This approach counts how many neighbors are "good enough" in absolute terms,
+        rather than comparing to the best (which penalizes strategies with high best).
+
+        Example:
+            - Best has Sharpe 3.0, neighbors have [1.5, 1.2, 0.8, 1.4, 0.9, 1.1, 1.3, 0.7]
+            - If min_sharpe = 0.3, then 8/8 neighbors pass → robustness = 1.0
+            - Old method: avg(neighbors)/best = 1.1/3.0 = 0.37 (would barely pass!)
+
+        Args:
+            all_results: DataFrame with ALL parametric results (sorted by score desc)
+            best_params: Dict with best parameter values {sl_pct, tp_pct, leverage, exit_bars}
+            param_space: Dict with parameter grids {sl_pct: [...], tp_pct: [...], ...}
+
+        Returns:
+            Robustness score [0.0, 1.0] = fraction of neighbors passing min_sharpe
+        """
+        # Get best Sharpe
+        best_sharpe = all_results.iloc[0]['sharpe']
+        if best_sharpe <= 0:
+            return 0.0  # No edge = not robust
+
+        # Get grid values
+        sl_values = param_space.get('sl_pct', [])
+        tp_values = param_space.get('tp_pct', [])
+        lev_values = param_space.get('leverage', [])
+        exit_values = param_space.get('exit_bars', [])
+
+        # Find indices of best params in grids
+        try:
+            best_sl_idx = sl_values.index(best_params['sl_pct'])
+            best_tp_idx = tp_values.index(best_params['tp_pct'])
+            best_lev_idx = lev_values.index(best_params['leverage'])
+            best_exit_idx = exit_values.index(best_params['exit_bars'])
+        except (ValueError, KeyError):
+            # Param not in grid (shouldn't happen) - return neutral
+            return 0.5
+
+        # Build neighbor parameter sets (ONE dimension different, adjacent)
+        neighbor_sharpes = []
+
+        # SL neighbors
+        for delta in [-1, 1]:
+            idx = best_sl_idx + delta
+            if 0 <= idx < len(sl_values):
+                match = all_results[
+                    (all_results['sl_pct'] == sl_values[idx]) &
+                    (all_results['tp_pct'] == best_params['tp_pct']) &
+                    (all_results['leverage'] == best_params['leverage']) &
+                    (all_results['exit_bars'] == best_params['exit_bars'])
+                ]
+                if not match.empty:
+                    neighbor_sharpes.append(match.iloc[0]['sharpe'])
+
+        # TP neighbors
+        for delta in [-1, 1]:
+            idx = best_tp_idx + delta
+            if 0 <= idx < len(tp_values):
+                match = all_results[
+                    (all_results['sl_pct'] == best_params['sl_pct']) &
+                    (all_results['tp_pct'] == tp_values[idx]) &
+                    (all_results['leverage'] == best_params['leverage']) &
+                    (all_results['exit_bars'] == best_params['exit_bars'])
+                ]
+                if not match.empty:
+                    neighbor_sharpes.append(match.iloc[0]['sharpe'])
+
+        # Leverage neighbors
+        for delta in [-1, 1]:
+            idx = best_lev_idx + delta
+            if 0 <= idx < len(lev_values):
+                match = all_results[
+                    (all_results['sl_pct'] == best_params['sl_pct']) &
+                    (all_results['tp_pct'] == best_params['tp_pct']) &
+                    (all_results['leverage'] == lev_values[idx]) &
+                    (all_results['exit_bars'] == best_params['exit_bars'])
+                ]
+                if not match.empty:
+                    neighbor_sharpes.append(match.iloc[0]['sharpe'])
+
+        # Exit bars neighbors
+        for delta in [-1, 1]:
+            idx = best_exit_idx + delta
+            if 0 <= idx < len(exit_values):
+                match = all_results[
+                    (all_results['sl_pct'] == best_params['sl_pct']) &
+                    (all_results['tp_pct'] == best_params['tp_pct']) &
+                    (all_results['leverage'] == best_params['leverage']) &
+                    (all_results['exit_bars'] == exit_values[idx])
+                ]
+                if not match.empty:
+                    neighbor_sharpes.append(match.iloc[0]['sharpe'])
+
+        if not neighbor_sharpes:
+            # No neighbors found (edge case) - return neutral
+            return 0.5
+
+        # Count neighbors that pass min_sharpe threshold
+        neighbors_passing = sum(1 for s in neighbor_sharpes if s >= self.min_sharpe)
+        total_neighbors = len(neighbor_sharpes)
+
+        # Robustness = fraction of neighbors that are "good enough"
+        robustness = neighbors_passing / total_neighbors
+
+        return robustness
+
+    def _validate_oos(
+        self,
+        is_result: Dict,
+        oos_result: Optional[Dict],
         timeframe: str
     ) -> Dict:
         """
-        Validate holdout performance for anti-overfitting check
+        Validate out-of-sample performance for anti-overfitting check
 
-        Holdout validation serves TWO purposes:
-        1. Anti-overfitting: reject if holdout crashes vs training
-        2. Recency: good holdout = strategy in form now
+        OOS validation serves TWO purposes:
+        1. Anti-overfitting: reject if OOS crashes vs IS
+        2. Recency: good OOS = strategy in form now
 
-        CRITICAL: Training must have positive Sharpe first - if training Sharpe
-        is negative or below threshold, strategy has no edge regardless of holdout.
+        CRITICAL: IS must have positive Sharpe first - if IS Sharpe
+        is negative or below threshold, strategy has no edge regardless of OOS.
 
         Args:
-            training_result: Training period backtest results
-            holdout_result: Holdout period backtest results
+            is_result: In-sample period backtest results
+            oos_result: Out-of-sample period backtest results
             timeframe: Strategy timeframe for min_trades lookup
 
         Returns:
-            Dict with 'passed', 'reason', 'degradation', 'holdout_bonus'
+            Dict with 'passed', 'reason', 'degradation', 'oos_bonus'
         """
-        training_sharpe = training_result.get('sharpe_ratio', 0)
-        training_trades = training_result.get('total_trades', 0)
+        is_sharpe = is_result.get('sharpe_ratio', 0)
+        is_trades = is_result.get('total_trades', 0)
 
         # Get min trades for this timeframe
-        min_training = self.min_trades_training.get(timeframe, 300)
-        min_holdout = self.min_trades_holdout.get(timeframe, 30)
+        min_is = self.min_trades_is.get(timeframe, 300)
+        min_oos = self.min_trades_oos.get(timeframe, 30)
 
-        # CRITICAL: Training must have enough trades for statistical significance
-        if training_trades < min_training:
+        # CRITICAL: IS must have enough trades for statistical significance
+        if is_trades < min_is:
             return {
                 'passed': False,
-                'reason': f'Training trades insufficient: {training_trades} < {min_training} (for {timeframe})',
+                'reason': f'IS trades insufficient: {is_trades} < {min_is} (for {timeframe})',
                 'degradation': 0.0,
-                'holdout_bonus': 0.0,
+                'oos_bonus': 0.0,
             }
 
-        # CRITICAL: Training must show edge first
-        # If training Sharpe is negative, strategy has no edge - reject early
-        if training_sharpe < self.min_sharpe:
+        # CRITICAL: IS must show edge first
+        # If IS Sharpe is negative, strategy has no edge - reject early
+        if is_sharpe < self.min_sharpe:
             return {
                 'passed': False,
-                'reason': f'Training Sharpe too low: {training_sharpe:.2f} < {self.min_sharpe}',
+                'reason': f'IS Sharpe too low: {is_sharpe:.2f} < {self.min_sharpe}',
                 'degradation': 0.0,
-                'holdout_bonus': 0.0,
+                'oos_bonus': 0.0,
             }
 
-        # Check holdout trades - REJECT if below minimum (no longer just penalty)
-        holdout_trades = holdout_result.get('total_trades', 0) if holdout_result else 0
-        if holdout_trades < min_holdout:
+        # Check OOS trades - REJECT if below minimum (no longer just penalty)
+        oos_trades = oos_result.get('total_trades', 0) if oos_result else 0
+        if oos_trades < min_oos:
             return {
                 'passed': False,
-                'reason': f'Holdout trades insufficient: {holdout_trades} < {min_holdout} (for {timeframe})',
+                'reason': f'OOS trades insufficient: {oos_trades} < {min_oos} (for {timeframe})',
                 'degradation': 0.0,
-                'holdout_bonus': 0.0,
+                'oos_bonus': 0.0,
             }
 
-        holdout_sharpe = holdout_result.get('sharpe_ratio', 0)
+        oos_sharpe = oos_result.get('sharpe_ratio', 0)
 
-        # Calculate degradation (how much worse is holdout vs training)
-        # Guard against division by zero when training_sharpe is exactly 0
-        if training_sharpe == 0:
-            # No edge in training = cannot calculate degradation meaningfully
+        # Calculate degradation (how much worse is OOS vs IS)
+        # Guard against division by zero when is_sharpe is exactly 0
+        if is_sharpe == 0:
+            # No edge in IS = cannot calculate degradation meaningfully
             # Treat as neutral (no degradation, no bonus)
             degradation = 0.0
         else:
-            degradation = (training_sharpe - holdout_sharpe) / training_sharpe
+            degradation = (is_sharpe - oos_sharpe) / is_sharpe
 
-        # Anti-overfitting check: reject if holdout crashes vs training
-        if degradation > self.holdout_max_degradation:
+        # Anti-overfitting check: reject if OOS crashes vs IS
+        if degradation > self.oos_max_degradation:
             return {
                 'passed': False,
-                'reason': f'Overfitted: holdout {degradation:.0%} worse than training',
+                'reason': f'Overfitted: OOS {degradation:.0%} worse than IS',
                 'degradation': degradation,
-                'holdout_bonus': 0.0,
+                'oos_bonus': 0.0,
             }
 
-        # Check minimum holdout Sharpe (must also show edge in recent period)
-        if holdout_sharpe < self.holdout_min_sharpe:
+        # Check minimum OOS Sharpe (must also show edge in recent period)
+        if oos_sharpe < self.oos_min_sharpe:
             return {
                 'passed': False,
-                'reason': f'Holdout Sharpe too low: {holdout_sharpe:.2f} < {self.holdout_min_sharpe}',
+                'reason': f'OOS Sharpe too low: {oos_sharpe:.2f} < {self.oos_min_sharpe}',
                 'degradation': degradation,
-                'holdout_bonus': 0.0,
+                'oos_bonus': 0.0,
             }
 
-        # Calculate holdout bonus (good holdout = higher final score)
-        # Bonus is positive if holdout >= training, zero if worse
+        # Calculate OOS bonus (good OOS = higher final score)
+        # Bonus is positive if OOS >= IS, zero if worse
         if degradation <= 0:
-            # Holdout better than training = big bonus
-            holdout_bonus = min(0.20, abs(degradation) * 0.5)
+            # OOS better than IS = big bonus
+            oos_bonus = min(0.20, abs(degradation) * 0.5)
         else:
-            # Holdout worse but within tolerance = small penalty
-            holdout_bonus = -degradation * 0.10
+            # OOS worse but within tolerance = small penalty
+            oos_bonus = -degradation * 0.10
 
         return {
             'passed': True,
-            'reason': 'Holdout validated',
+            'reason': 'OOS validated',
             'degradation': degradation,
-            'holdout_bonus': holdout_bonus,
+            'oos_bonus': oos_bonus,
         }
 
     def _calculate_final_metrics(
         self,
-        training_result: Dict,
-        holdout_result: Optional[Dict],
+        is_result: Dict,
+        oos_result: Optional[Dict],
         validation: Dict
     ) -> Dict:
         """
-        Calculate final metrics combining training and holdout
+        Calculate final metrics combining in-sample and out-of-sample
 
         Final score formula:
-        - Base score from training metrics
-        - Weighted by holdout performance (recency_weight)
-        - Adjusted by holdout bonus/penalty
+        - Base score from IS metrics
+        - Weighted by OOS performance (recency_weight)
+        - Adjusted by OOS bonus/penalty
 
         Returns:
             Dict with all metrics + final_score
         """
-        training_sharpe = training_result.get('sharpe_ratio', 0)
-        training_win_rate = training_result.get('win_rate', 0)
-        training_expectancy = training_result.get('expectancy', 0)
-        training_max_drawdown = training_result.get('max_drawdown', 0)
+        is_sharpe = is_result.get('sharpe_ratio', 0)
+        is_win_rate = is_result.get('win_rate', 0)
+        is_expectancy = is_result.get('expectancy', 0)
+        is_max_drawdown = is_result.get('max_drawdown', 0)
 
-        # Calculate training base score
+        # Calculate IS base score
         # Bug fix: expectancy is already a percentage from backtest_engine.py
         # No division needed - dividing by initial_capital was corrupting the metric
-        training_expectancy_pct = training_expectancy
+        is_expectancy_pct = is_expectancy
 
-        training_score = (
-            0.5 * training_sharpe +
-            0.3 * training_expectancy_pct +
-            0.2 * training_win_rate
+        is_score = (
+            0.5 * is_sharpe +
+            0.3 * is_expectancy_pct +
+            0.2 * is_win_rate
         )
 
-        # Get holdout metrics
-        if holdout_result and holdout_result.get('total_trades', 0) > 0:
-            holdout_sharpe = holdout_result.get('sharpe_ratio', 0)
-            holdout_win_rate = holdout_result.get('win_rate', 0)
-            holdout_expectancy = holdout_result.get('expectancy', 0)
-            holdout_max_drawdown = holdout_result.get('max_drawdown', 0)
+        # Get OOS metrics
+        if oos_result and oos_result.get('total_trades', 0) > 0:
+            oos_sharpe = oos_result.get('sharpe_ratio', 0)
+            oos_win_rate = oos_result.get('win_rate', 0)
+            oos_expectancy = oos_result.get('expectancy', 0)
+            oos_max_drawdown = oos_result.get('max_drawdown', 0)
 
             # Bug fix: expectancy is already a percentage
-            holdout_expectancy_pct = holdout_expectancy
-            holdout_score = (
-                0.5 * holdout_sharpe +
-                0.3 * holdout_expectancy_pct +
-                0.2 * holdout_win_rate
+            oos_expectancy_pct = oos_expectancy
+            oos_score = (
+                0.5 * oos_sharpe +
+                0.3 * oos_expectancy_pct +
+                0.2 * oos_win_rate
             )
         else:
-            holdout_sharpe = 0
-            holdout_win_rate = 0
-            holdout_expectancy = 0
-            holdout_max_drawdown = training_max_drawdown  # Use training if no holdout
-            holdout_expectancy_pct = 0  # Bug fix: must be defined for weighted calculation
-            holdout_score = training_score  # Neutral if no holdout
+            oos_sharpe = 0
+            oos_win_rate = 0
+            oos_expectancy = 0
+            oos_max_drawdown = is_max_drawdown  # Use IS if no OOS
+            oos_expectancy_pct = 0  # Bug fix: must be defined for weighted calculation
+            oos_score = is_score  # Neutral if no OOS
 
         # Calculate weighted final score
-        # Holdout has higher weight because it represents "now"
-        training_weight = 1 - self.holdout_recency_weight
+        # OOS has higher weight because it represents "now"
+        is_weight = 1 - self.oos_recency_weight
         final_score = (
-            training_score * training_weight +
-            holdout_score * self.holdout_recency_weight
+            is_score * is_weight +
+            oos_score * self.oos_recency_weight
         )
 
-        # Apply holdout bonus/penalty
-        holdout_bonus = validation.get('holdout_bonus', 0)
-        final_score = final_score * (1 + holdout_bonus)
+        # Apply OOS bonus/penalty
+        oos_bonus = validation.get('oos_bonus', 0)
+        final_score = final_score * (1 + oos_bonus)
 
-        # Calculate weighted metrics for classifier (training 40% + holdout 60%)
+        # Calculate weighted metrics for classifier (IS 40% + OOS 60%)
         # Each metric weighted individually (not composite) for accurate classification
-        weighted_sharpe_pure = (training_sharpe * 0.4) + (holdout_sharpe * 0.6) if holdout_sharpe is not None else training_sharpe
-        weighted_expectancy = (training_expectancy_pct * 0.4) + (holdout_expectancy_pct * 0.6) if holdout_expectancy_pct is not None else training_expectancy_pct
-        weighted_win_rate = (training_win_rate * 0.4) + (holdout_win_rate * 0.6) if holdout_win_rate is not None else training_win_rate
-        weighted_max_drawdown = (training_max_drawdown * 0.4) + (holdout_max_drawdown * 0.6)
+        weighted_sharpe_pure = (is_sharpe * 0.4) + (oos_sharpe * 0.6) if oos_sharpe is not None else is_sharpe
+        weighted_expectancy = (is_expectancy_pct * 0.4) + (oos_expectancy_pct * 0.6) if oos_expectancy_pct is not None else is_expectancy_pct
+        weighted_win_rate = (is_win_rate * 0.4) + (oos_win_rate * 0.6) if oos_win_rate is not None else is_win_rate
+        weighted_max_drawdown = (is_max_drawdown * 0.4) + (oos_max_drawdown * 0.6)
 
         # Walk-forward stability: check if available from optimization
-        weighted_walk_forward_stability = training_result.get('walk_forward_stability')
+        weighted_walk_forward_stability = is_result.get('walk_forward_stability')
 
         return {
-            **training_result,
-            # Training metrics
-            'training_sharpe': training_sharpe,
-            'training_win_rate': training_win_rate,
-            'training_expectancy': training_expectancy,
-            'training_score': training_score,
-            # Holdout metrics
-            'holdout_sharpe': holdout_sharpe,
-            'holdout_win_rate': holdout_win_rate,
-            'holdout_expectancy': holdout_expectancy,
-            'holdout_score': holdout_score,
-            'holdout_trades': holdout_result.get('total_trades', 0) if holdout_result else 0,
+            **is_result,
+            # In-sample metrics
+            'is_sharpe': is_sharpe,
+            'is_win_rate': is_win_rate,
+            'is_expectancy': is_expectancy,
+            'is_score': is_score,
+            # Out-of-sample metrics
+            'oos_sharpe': oos_sharpe,
+            'oos_win_rate': oos_win_rate,
+            'oos_expectancy': oos_expectancy,
+            'oos_score': oos_score,
+            'oos_trades': oos_result.get('total_trades', 0) if oos_result else 0,
             # Validation metrics
             'degradation': validation.get('degradation', 0),
-            'holdout_bonus': holdout_bonus,
+            'oos_bonus': oos_bonus,
             # Final score
             'final_score': final_score,
             # Individual weighted metrics for classifier
@@ -1505,36 +1508,36 @@ class ContinuousBacktesterProcess:
             'weighted_max_drawdown': weighted_max_drawdown,
         }
 
-    def _update_training_with_holdout(
+    def _update_is_with_oos(
         self,
-        training_backtest_id: str,
-        holdout_backtest_id: str,
+        is_backtest_id: str,
+        oos_backtest_id: str,
         final_result: Dict
     ):
         """
-        Update training backtest result with holdout reference and final metrics
+        Update in-sample backtest result with OOS reference and final metrics
         """
-        if not training_backtest_id:
+        if not is_backtest_id:
             return
 
         try:
             with get_session() as session:
                 bt = session.query(BacktestResult).filter(
-                    BacktestResult.id == training_backtest_id
+                    BacktestResult.id == is_backtest_id
                 ).first()
 
                 if bt:
-                    # Link to holdout result (even if 0 trades)
-                    if holdout_backtest_id:
-                        bt.recent_result_id = holdout_backtest_id
+                    # Link to OOS result (even if 0 trades)
+                    if oos_backtest_id:
+                        bt.recent_result_id = oos_backtest_id
 
-                    # Store final metrics (ALWAYS - final_result exists even with 0 holdout trades)
+                    # Store final metrics (ALWAYS - final_result exists even with 0 OOS trades)
                     # FAST FAIL: If final_score is None, crash (indicates bug in _calculate_final_metrics)
                     final_score = final_result.get('final_score')
                     if final_score is None:
                         raise ValueError(
-                            f"final_score is None for training backtest {training_backtest_id} "
-                            f"(holdout_id={holdout_backtest_id}). "
+                            f"final_score is None for IS backtest {is_backtest_id} "
+                            f"(oos_id={oos_backtest_id}). "
                             f"This indicates a bug in _calculate_final_metrics(). "
                             f"All strategies must have a final_score calculated."
                         )
@@ -1549,229 +1552,156 @@ class ContinuousBacktesterProcess:
                     bt.weighted_max_drawdown = final_result.get('weighted_max_drawdown')
 
                     bt.recency_ratio = 1 - final_result.get('degradation', 0)
-                    bt.recency_penalty = -final_result.get('holdout_bonus', 0)
+                    bt.recency_penalty = -final_result.get('oos_bonus', 0)
 
                     session.commit()
         except Exception as e:
-            logger.error(f"Failed to update training result with holdout: {e}")
+            logger.error(f"Failed to update IS result with OOS: {e}")
 
-    def _find_optimal_timeframe(self, tf_results: Dict[str, Dict]) -> Optional[str]:
-        """
-        Find TF with best performance that passes all thresholds.
+    # NOTE: _run_walk_forward_analysis and _update_backtest_with_walkforward removed
+    # Replaced by _run_wfa_with_optimization which does parameter re-optimization
+    # and checks parameter stability across windows (not just edge stability)
 
-        Uses final_score which combines training + holdout performance.
-
-        Returns:
-            Optimal timeframe string or None if none pass
-        """
-        best_tf = None
-        best_score = -float('inf')
-
-        for tf, results in tf_results.items():
-            # Check thresholds (based on training metrics)
-            total_trades = results.get('total_trades', 0)
-            training_sharpe = results.get('training_sharpe', results.get('sharpe_ratio', 0))
-            training_win_rate = results.get('training_win_rate', results.get('win_rate', 0))
-            max_dd = results.get('max_drawdown', 1)
-            training_expectancy = results.get('training_expectancy', results.get('expectancy', 0))
-
-            # Must pass all thresholds
-            if total_trades < self.min_trades:
-                logger.debug(f"{tf}: Failed trades threshold ({total_trades} < {self.min_trades})")
-                continue
-            if training_sharpe < self.min_sharpe:
-                logger.debug(f"{tf}: Failed sharpe threshold ({training_sharpe:.2f} < {self.min_sharpe})")
-                continue
-            if training_win_rate < self.min_win_rate:
-                logger.debug(f"{tf}: Failed win_rate threshold ({training_win_rate:.2%} < {self.min_win_rate:.2%})")
-                continue
-            if max_dd > self.max_drawdown:
-                logger.debug(f"{tf}: Failed drawdown threshold ({max_dd:.2%} > {self.max_drawdown:.2%})")
-                continue
-            if training_expectancy < self.min_expectancy:
-                logger.debug(f"{tf}: Failed expectancy threshold ({training_expectancy:.4f} < {self.min_expectancy})")
-                continue
-
-            # Use final_score (combines training + holdout)
-            score = results.get('final_score', 0)
-
-            logger.debug(
-                f"{tf}: Final Score {score:.2f} "
-                f"(training={results.get('training_score', 0):.2f}, "
-                f"holdout={results.get('holdout_score', 0):.2f}, "
-                f"bonus={results.get('holdout_bonus', 0):.1%})"
-            )
-
-            if score > best_score:
-                best_score = score
-                best_tf = tf
-
-        if best_tf:
-            logger.info(f"Optimal TF: {best_tf} with final score {best_score:.2f}")
-
-        return best_tf
-
-    def _run_walk_forward_analysis(
+    def _slice_data_by_percentage(
         self,
-        strategy_instance,
-        optimal_tf: str,
-        validated_coins: List[str],
-        optimal_params: Optional[Dict]
-    ) -> Optional[float]:
+        data: Dict[str, pd.DataFrame],
+        percentage: float
+    ) -> Dict[str, pd.DataFrame]:
         """
-        Run walk-forward analysis to calculate strategy stability.
-
-        Creates 4 expanding windows to test consistency across time:
-        - Window 1: Train 75%, Test 6.25%
-        - Window 2: Train 81.25%, Test 6.25%
-        - Window 3: Train 87.5%, Test 6.25%
-        - Window 4: Train 93.75%, Test 6.25%
-
-        Stability = std_dev(edge across windows) - lower is better
+        Slice data from beginning up to percentage of total length.
 
         Args:
-            strategy_instance: Strategy to test
-            optimal_tf: Optimal timeframe
-            validated_coins: Coins that passed validation
-            optimal_params: Optimal parameters from parametric backtest
+            data: Dict mapping symbol -> DataFrame
+            percentage: Fraction of data to include (0.25, 0.50, 0.75, 1.0)
 
         Returns:
-            Stability score (std dev of edge) or None if failed
+            Dict with sliced DataFrames
+        """
+        sliced = {}
+        for symbol, df in data.items():
+            n_rows = int(len(df) * percentage)
+            if n_rows > 0:
+                sliced[symbol] = df.iloc[:n_rows].copy()
+        return sliced
+
+    def _run_wfa_fixed_params(
+        self,
+        strategy: 'Strategy',
+        timeframe: str
+    ) -> Tuple[bool, str]:
+        """
+        Walk-Forward Validation with FIXED parameters.
+
+        Tests if the best combo (already embedded in strategy code after parametric)
+        performs consistently across 4 expanding time windows.
+
+        This is different from the old WFA which re-optimized parameters per window.
+        Here we test if the SAME parameters work across different historical periods.
+
+        Args:
+            strategy: Strategy model with embedded parameters
+            timeframe: Timeframe to test
+
+        Returns:
+            (passed: bool, reason: str)
         """
         try:
-            import numpy as np
-            from src.backtester.cache_reader import BacktestCacheReader
+            # Get WFA validation config
+            wfa_config = self.config._raw_config['backtesting'].get('wfa_validation', {})
+            if not wfa_config.get('enabled', True):
+                logger.debug(f"[{strategy.name}] WFA validation disabled, skipping")
+                return (True, "wfa_disabled")
 
-            # Create cache reader for loading training data
-            cache_reader = BacktestCacheReader(self.data_loader.cache_dir)
+            window_percentages = wfa_config.get('window_percentages', [0.25, 0.50, 0.75, 1.0])
+            min_profitable_windows = wfa_config.get('min_profitable_windows', 4)
 
-            # Load full training data for all validated coins
-            training_data = {}
-            for symbol in validated_coins:
-                df = cache_reader.read(
-                    symbol=symbol,
-                    timeframe=optimal_tf,
-                    days=self.training_days
-                )
-                if not df.empty:
-                    training_data[symbol] = df
+            # Load strategy instance (has fixed params embedded)
+            strategy_instance = self._load_strategy(strategy)
+            if strategy_instance is None:
+                return (False, "failed_to_load_strategy")
 
-            if not training_data:
-                logger.warning(f"Walk-forward: no symbols loaded")
-                return None
+            # Load IS data for this timeframe
+            is_data = self.data_loader.load_multi_symbol(
+                symbols=self.symbols,
+                timeframe=timeframe,
+                days=self.is_days
+            )
 
-            # Apply optimal params to strategy if available
-            if optimal_params:
-                strategy_instance.sl_pct = optimal_params.get('sl_pct', 0.02)
-                strategy_instance.tp_pct = optimal_params.get('tp_pct', 0.03)
-                strategy_instance.leverage = optimal_params.get('leverage', 1)
-                strategy_instance.exit_after_bars = optimal_params.get('exit_bars', 0)
+            if not is_data:
+                return (False, "no_is_data")
 
-            # OPTIMIZED: Run walk-forward on ALL symbols together (4 backtests total, not 120)
-            # Pick a reference symbol to split the time windows
-            reference_symbol = list(training_data.keys())[0]
-            reference_df = training_data[reference_symbol]
+            # Get min_expectancy threshold from config
+            min_expectancy = self.config._raw_config['backtesting']['thresholds'].get(
+                'min_expectancy', 0.002
+            )
 
-            # Create 4 expanding windows based on time
-            windows_splits = self.data_loader.walk_forward_split(reference_df, n_windows=4)
-
-            # Extract timestamps for each window
-            window_timestamps = []
-            for train_df, test_df in windows_splits:
-                if len(test_df) > 0:
-                    test_start = test_df['timestamp'].min()
-                    test_end = test_df['timestamp'].max()
-                    window_timestamps.append((test_start, test_end))
-
-            if len(window_timestamps) < 4:
-                logger.warning("Walk-forward: insufficient time windows")
-                return None
-
-            # Run 4 backtests (one per window, all symbols together)
-            edge_per_window = []
-            valid_windows = 0
-
-            for window_idx, (test_start, test_end) in enumerate(window_timestamps):
-                # Filter all symbols to this time window
-                window_data = {}
-                for symbol, df in training_data.items():
-                    window_df = df[(df['timestamp'] >= test_start) & (df['timestamp'] <= test_end)]
-                    if not window_df.empty:
-                        window_data[symbol] = window_df
-
-                if not window_data:
-                    logger.info(f"Walk-forward window {window_idx+1}: skipped (no symbols with data)")
-                    continue
-
-                # Log window size for debugging
-                window_bars = min(len(df) for df in window_data.values())
-                logger.info(f"Walk-forward window {window_idx+1}: {len(window_data)} symbols, {window_bars} bars")
-
-                # Backtest this window on all symbols (min_bars=20 for small WF windows)
-                result = self._run_multi_symbol_backtest(
-                    strategy_instance,
-                    window_data,
-                    optimal_tf,
-                    min_bars=20  # Relaxed for walk-forward windows
-                )
-
-                # Accept if we have at least 1 trade (relaxed from 3)
-                trades = result.get('total_trades', 0) if result else 0
-                if trades >= 1:
-                    edge = result.get('expectancy', 0)
-                    edge_per_window.append(edge)
-                    valid_windows += 1
-                    logger.info(f"Walk-forward window {window_idx+1}: PASSED edge={edge:.3f}, trades={trades}")
-                else:
-                    logger.info(f"Walk-forward window {window_idx+1}: FAILED trades={trades}")
-
-            # Need at least 3 valid windows (relaxed from 4)
-            if valid_windows < 3:
-                logger.warning(f"Walk-forward: only {valid_windows}/4 windows completed (need >= 3)")
-                return None
-
-            # Stability = standard deviation of edge across windows
-            # Lower is better (consistent performance across time)
-            stability = float(np.std(edge_per_window))
+            profitable_windows = 0
+            window_results = []
 
             logger.info(
-                f"Walk-forward edges: {[f'{e:.2%}' for e in edge_per_window]}, "
-                f"stability: {stability:.3f} ({valid_windows}/4 windows)"
+                f"[{strategy.name}] WFA validation: testing fixed params on "
+                f"{len(window_percentages)} windows"
             )
 
-            return stability
+            for window_idx, window_pct in enumerate(window_percentages):
+                # Slice data for this window
+                window_data = self._slice_data_by_percentage(is_data, window_pct)
+
+                if not window_data:
+                    logger.warning(
+                        f"[{strategy.name}] WFA window {window_idx+1}: no data at {window_pct:.0%}"
+                    )
+                    continue
+
+                # Run backtest with FIXED params (no re-optimization)
+                result = self._run_multi_symbol_backtest(
+                    strategy_instance, window_data, timeframe, min_bars=20
+                )
+
+                if result is None:
+                    logger.warning(
+                        f"[{strategy.name}] WFA window {window_idx+1}: backtest failed"
+                    )
+                    continue
+
+                window_expectancy = result.get('expectancy', 0)
+                is_profitable = window_expectancy >= min_expectancy
+
+                if is_profitable:
+                    profitable_windows += 1
+
+                window_results.append({
+                    'window': window_idx + 1,
+                    'pct': window_pct,
+                    'expectancy': window_expectancy,
+                    'profitable': is_profitable
+                })
+
+                logger.info(
+                    f"[{strategy.name}] WFA window {window_idx+1}/{len(window_percentages)}: "
+                    f"{window_pct:.0%} data, expectancy={window_expectancy:.4f}, "
+                    f"profitable={'YES' if is_profitable else 'NO'}"
+                )
+
+            # Check if enough windows are profitable
+            n_windows = len(window_percentages)
+            if profitable_windows < min_profitable_windows:
+                logger.info(
+                    f"[{strategy.name}] WFA FAILED: only {profitable_windows}/{n_windows} "
+                    f"windows profitable (need {min_profitable_windows})"
+                )
+                return (False, f"insufficient_profitable_windows:{profitable_windows}/{n_windows}")
+
+            logger.info(
+                f"[{strategy.name}] WFA PASSED: {profitable_windows}/{n_windows} windows profitable"
+            )
+            return (True, f"wfa_passed:{profitable_windows}/{n_windows}")
 
         except Exception as e:
-            logger.error(f"Walk-forward analysis failed: {e}")
-            return None
-
-    def _update_backtest_with_walkforward(
-        self,
-        backtest_id: str,
-        wf_stability: float
-    ):
-        """
-        Update backtest result with walk-forward stability.
-
-        Args:
-            backtest_id: BacktestResult UUID
-            wf_stability: Walk-forward stability score
-        """
-        try:
-            from src.database.models import BacktestResult
-            with get_session() as session:
-                bt = session.query(BacktestResult).filter(
-                    BacktestResult.id == backtest_id
-                ).first()
-
-                if bt:
-                    bt.walk_forward_stability = wf_stability
-                    bt.weighted_walk_forward_stability = wf_stability
-                    session.commit()
-                    logger.debug(f"Updated backtest {backtest_id} with walk-forward stability: {wf_stability:.3f}")
-
-        except Exception as e:
-            logger.error(f"Failed to update walk-forward stability: {e}")
+            logger.error(f"[{strategy.name}] WFA validation error: {e}")
+            import traceback
+            traceback.print_exc()
+            return (False, f"error:{str(e)}")
 
     def _to_python_type(self, value):
         """
@@ -1803,7 +1733,7 @@ class ContinuousBacktesterProcess:
         """
         Save backtest results to database.
 
-        Note: is_optimal_tf is always True because each strategy has exactly
+        Note: is_assigned_tf is always True because each strategy has exactly
         one assigned timeframe (no TF optimization).
 
         Args:
@@ -1825,7 +1755,7 @@ class ContinuousBacktesterProcess:
 
                 # Determine period_days if not provided
                 if period_days is None:
-                    period_days = self.training_days if period_type == 'training' else self.holdout_days
+                    period_days = self.is_days if period_type == 'in_sample' else self.oos_days
 
                 # Convert numpy types to Python native (PostgreSQL doesn't understand np.float64)
                 bt_result = BacktestResult(
@@ -1847,7 +1777,7 @@ class ContinuousBacktesterProcess:
                     # Multi-pair/TF fields
                     symbols_tested=pairs,
                     timeframe_tested=timeframe,
-                    is_optimal_tf=True,  # Always True - each strategy has one assigned TF
+                    is_assigned_tf=True,  # Always True - each strategy has one assigned TF
                     per_symbol_results=result.get('symbol_breakdown', {}),
 
                     # Dual-period fields
@@ -1867,22 +1797,22 @@ class ContinuousBacktesterProcess:
             logger.error(f"Failed to save backtest result: {e}")
             return None
 
-    def _update_strategy_optimal_tf(
+    def _update_strategy_assigned_tf(
         self,
         strategy_id,
-        optimal_tf: str,
+        assigned_tf: str,
         pairs: List[str],
         optimal_params: Optional[Dict] = None
     ):
         """
-        Update strategy with optimal TF, pairs, and parameters from parametric backtest.
+        Update strategy with assigned TF, pairs, and parameters from parametric backtest.
 
         If optimal_params is provided (from parametric backtest), updates the strategy's
         sl_pct, tp_pct, leverage, and exit_after_bars in the code.
 
         Args:
             strategy_id: Strategy UUID
-            optimal_tf: Best performing timeframe
+            assigned_tf: Best performing timeframe
             pairs: Validated coins for this timeframe
             optimal_params: Dict with sl_pct, tp_pct, leverage, exit_bars (from parametric)
         """
@@ -1893,7 +1823,7 @@ class ContinuousBacktesterProcess:
                 ).first()
 
                 if strategy:
-                    strategy.optimal_timeframe = optimal_tf
+                    strategy.optimal_timeframe = assigned_tf
                     strategy.backtest_pairs = pairs
                     strategy.backtest_date = datetime.now(UTC)
                     strategy.tested_at = datetime.now(UTC)
@@ -1920,108 +1850,13 @@ class ContinuousBacktesterProcess:
 
                     logger.info(
                         f"[{strategy.name}] Updated: "
-                        f"optimal_tf={optimal_tf}, pairs={len(pairs)}{params_str}"
+                        f"assigned_tf={assigned_tf}, pairs={len(pairs)}{params_str}"
                     )
         except Exception as e:
             logger.error(f"Failed to update strategy: {e}")
 
-    def _create_parametric_strategy(
-        self,
-        template_strategy_id: UUID,
-        params: Dict,
-        strategy_num: int,
-        param_result: Optional[Dict] = None,
-        holdout_result: Optional[Dict] = None,
-        validation: Optional[Dict] = None
-    ) -> Optional[UUID]:
-        """
-        Create an independent strategy from a parameter set.
-
-        Each parameter set generates a unique, independent strategy.
-        Name is generated using hash of parameters for uniqueness.
-
-        Args:
-            template_strategy_id: UUID of template strategy (code source)
-            params: Dict with sl_pct, tp_pct, leverage, exit_bars
-            strategy_num: Sequence number (for logging only)
-            param_result: Training backtest metrics (optional)
-            holdout_result: Holdout backtest metrics (optional)
-            validation: Holdout validation results (optional)
-
-        Returns:
-            UUID of new strategy, or None if failed
-        """
-        try:
-            import hashlib
-            from src.database.models import Strategy
-
-            with get_session() as session:
-                # Get template strategy (source of code)
-                template = session.query(Strategy).filter(
-                    Strategy.id == template_strategy_id
-                ).first()
-
-                if not template:
-                    logger.error(f"Template strategy {template_strategy_id} not found")
-                    return None
-
-                # Generate unique name using new strategy UUID
-                # This guarantees uniqueness even with race conditions
-                new_id = uuid4()
-
-                # Create independent strategy
-                strategy = Strategy()
-                strategy.id = new_id
-                # Use first 8 chars of UUID for guaranteed uniqueness
-                strategy.name = f"Strategy_{template.strategy_type}_{str(new_id)[:8]}"
-                strategy.strategy_type = template.strategy_type
-                strategy.ai_provider = template.ai_provider
-                strategy.timeframe = template.timeframe  # Will be updated with optimal TF
-                strategy.status = "VALIDATED"  # Ready for direct promotion (skip validator/backtester)
-
-                # Update code with these parameters AND rename class to match strategy name
-                updated_code = self._update_strategy_params(
-                    template.code, params, new_class_name=strategy.name
-                )
-                if not updated_code:
-                    logger.warning(f"Failed to update code for strategy {strategy.name}")
-                    return None
-
-                strategy.code = updated_code
-
-                # Store parametric backtest metrics as metadata (for comparison with official backtest)
-                if param_result and validation:
-                    strategy.parametric_backtest_metrics = {
-                        'training_sharpe': param_result.get('sharpe'),
-                        'training_win_rate': param_result.get('win_rate'),
-                        'training_expectancy': param_result.get('expectancy'),
-                        'holdout_sharpe': holdout_result.get('sharpe') if holdout_result else None,
-                        'holdout_degradation': validation.get('degradation_pct'),
-                        'tested_at': datetime.now(UTC).isoformat()
-                    }
-
-                strategy.template_id = template.template_id
-                strategy.pattern_ids = template.pattern_ids
-                strategy.generation_mode = 'optimized'  # Parametric optimization output
-                strategy.parameters = params  # Optimized parameters
-                strategy.created_at = datetime.now(UTC)
-                strategy.tested_at = datetime.now(UTC)  # Already tested via parametric backtest
-
-                session.add(strategy)
-                session.commit()
-
-                logger.info(
-                    f"[{strategy.name}] Created: "
-                    f"SL={params.get('sl_pct', 0):.1%}, "
-                    f"TP={params.get('tp_pct', 0):.1%}, "
-                    f"lev={params.get('leverage', 1)}"
-                )
-
-                return strategy.id
-
-        except Exception as e:
-            logger.error(f"Failed to create parametric strategy: {e}")
-            return None
+    # NOTE: _create_parametric_strategy removed - N-1 strategies path eliminated
+    # Now only best combo proceeds, no creation of additional strategies
 
     def _update_strategy_params(
         self, code: str, params: Dict, new_class_name: str = None
@@ -2193,14 +2028,14 @@ class ContinuousBacktesterProcess:
         strategy_id: UUID,
         strategy_name: str,
         code: str,
-        optimal_tf: str,
+        assigned_tf: str,
         pairs: List[str]
     ) -> Tuple[bool, str]:
         """
-        Re-backtest an ACTIVE strategy on its optimal TF only.
+        Re-backtest an ACTIVE strategy on its assigned TF only.
 
         Simplified version of _backtest_strategy:
-        - Only tests optimal TF (not all 6 TFs)
+        - Only tests assigned TF (not all 6 TFs)
         - Uses same parameters (no parametric)
         - Training + holdout (365 + 30 days)
         - All 30 coins
@@ -2216,7 +2051,7 @@ class ContinuousBacktesterProcess:
             (success, reason) tuple
         """
         try:
-            logger.info(f"[{strategy_name}] RETEST: Starting on {optimal_tf}")
+            logger.info(f"[{strategy_name}] RETEST: Starting on {assigned_tf}")
 
             # Load strategy instance
             class_name = self._extract_class_name(code)
@@ -2230,7 +2065,7 @@ class ContinuousBacktesterProcess:
             # Validate pairs (same 3-level validation as initial backtest)
             validated_pairs, status = self._scroll_down_coverage(
                 coins=pairs,
-                timeframe=optimal_tf,
+                timeframe=assigned_tf,
                 target_count=self.max_coins
             )
 
@@ -2243,50 +2078,50 @@ class ContinuousBacktesterProcess:
                 )
                 return (False, f"Pair validation failed: {status}")
 
-            # Load training/holdout data
-            training_data, holdout_data = self._get_training_holdout_data(
-                validated_pairs, optimal_tf
+            # Load IS/OOS data
+            is_data, oos_data = self._get_is_oos_data(
+                validated_pairs, assigned_tf
             )
 
-            if not training_data:
-                logger.warning(f"[{strategy_name}] RETEST: no training data loaded")
-                return (False, "No training data")
+            if not is_data:
+                logger.warning(f"[{strategy_name}] RETEST: no IS data loaded")
+                return (False, "No IS data")
 
-            # Run training backtest (no parametric - use existing params)
-            training_result = self._run_multi_symbol_backtest(
-                strategy_instance, training_data, optimal_tf
+            # Run IS backtest (no parametric - use existing params)
+            is_result = self._run_multi_symbol_backtest(
+                strategy_instance, is_data, assigned_tf
             )
 
-            if training_result is None or training_result.get('total_trades', 0) == 0:
-                logger.warning(f"[{strategy_name}] RETEST: no trades in training")
-                return (False, "No trades in training period")
+            if is_result is None or is_result.get('total_trades', 0) == 0:
+                logger.warning(f"[{strategy_name}] RETEST: no trades in IS")
+                return (False, "No trades in IS period")
 
-            # Run holdout backtest (min_bars=20 for 1d timeframe support)
-            holdout_result = None
-            if holdout_data and len(holdout_data) >= 5:
-                holdout_result = self._run_multi_symbol_backtest(
-                    strategy_instance, holdout_data, optimal_tf,
-                    min_bars=20  # Lower threshold for holdout period
+            # Run OOS backtest (min_bars=20 for 1d timeframe support)
+            oos_result = None
+            if oos_data and len(oos_data) >= 5:
+                oos_result = self._run_multi_symbol_backtest(
+                    strategy_instance, oos_data, assigned_tf,
+                    min_bars=20  # Lower threshold for OOS period
                 )
 
-            # Validate holdout
-            validation = self._validate_holdout(training_result, holdout_result, optimal_tf)
+            # Validate OOS
+            validation = self._validate_oos(is_result, oos_result, assigned_tf)
 
             if not validation['passed']:
-                logger.info(f"[{strategy_name}] RETEST: holdout failed ({validation['reason']})")
-                self.pool_manager._retire_strategy(strategy_id, f"Re-test holdout: {validation['reason']}")
-                return (False, f"Holdout validation failed: {validation['reason']}")
+                logger.info(f"[{strategy_name}] RETEST: OOS failed ({validation['reason']})")
+                self.pool_manager._retire_strategy(strategy_id, f"Re-test OOS: {validation['reason']}")
+                return (False, f"OOS validation failed: {validation['reason']}")
 
             # Calculate final metrics
             final_result = self._calculate_final_metrics(
-                training_result, holdout_result, validation
+                is_result, oos_result, validation
             )
 
             # Calculate new score using SCORER
             new_score = self.scorer.score({
                 'expectancy': final_result.get('weighted_expectancy', 0),
                 'sharpe_ratio': final_result.get('weighted_sharpe_pure', 0),
-                'consistency': final_result.get('weighted_win_rate', 0),
+                'win_rate': final_result.get('weighted_win_rate', 0),
                 'wf_stability': final_result.get('weighted_walk_forward_stability', 1.0),
             })
 
@@ -2297,8 +2132,8 @@ class ContinuousBacktesterProcess:
 
             # Update backtest result (save new metrics)
             self._save_backtest_result(
-                strategy_id, training_result, validated_pairs, optimal_tf,
-                period_type='training', period_days=self.training_days
+                strategy_id, is_result, validated_pairs, assigned_tf,
+                period_type='in_sample', period_days=self.is_days
             )
 
             # Revalidate pool membership with new score
@@ -2323,26 +2158,28 @@ class ContinuousBacktesterProcess:
         backtest_result: BacktestResult,
         backtest_start_time: Optional[float] = None,
         degradation: float = 0.0,
-        combinations_tested: Optional[int] = None
+        combinations_tested: Optional[int] = None,
+        robustness_score: float = 0.5
     ) -> Tuple[bool, str]:
         """
         Attempt to promote a strategy to the ACTIVE pool after backtest.
 
         Flow:
-        1. Calculate score from backtest result (training metrics + recency bonus)
+        1. Calculate score from backtest result (6-component formula)
         2. If score < min_score -> reject (no shuffle test needed)
         3. Run shuffle test (cached by base_code_hash)
         4. If shuffle fails -> reject
-        5. Run multi-window validation (cached by base_code_hash)
-        6. If multi-window fails -> reject
+        5. Run WFA validation with fixed params (NOT cached - per-strategy)
+        6. If WFA fails -> reject
         7. Try to enter pool (leaderboard logic)
 
         Args:
             strategy_id: Strategy UUID
             backtest_result: BacktestResult with training period metrics
             backtest_start_time: Start time for duration calculation
-            degradation: Holdout degradation for recency bonus (-degradation x 50, capped +-15)
+            degradation: Holdout degradation [-0.5, +0.5] for recency component
             combinations_tested: Number of parametric combinations tested (for metrics)
+            robustness_score: Parameter stability score [0, 1] (default 0.5 = neutral)
 
         Returns:
             (success, reason) tuple
@@ -2355,12 +2192,16 @@ class ContinuousBacktesterProcess:
             if backtest_start_time is not None:
                 duration_ms = int((time.time() - backtest_start_time) * 1000)
 
-            # Calculate score from training metrics + recency bonus
-            score = self.scorer.score_from_backtest_result(backtest_result, degradation)
+            # Calculate score using 6-component formula
+            score = self.scorer.score_from_backtest_result(
+                backtest_result, degradation, robustness_score
+            )
             strategy = backtest_result.strategy
             strategy_name = strategy.name if strategy else str(strategy_id)
 
             # Emit scoring event with duration (using training metrics, not weighted)
+            # Include base_code_hash for metrics tracking (unique base count)
+            base_hash = strategy.base_code_hash if strategy else None
             EventTracker.backtest_scored(
                 strategy_id, strategy_name, score,
                 sharpe=backtest_result.sharpe_ratio or 0,
@@ -2369,7 +2210,8 @@ class ContinuousBacktesterProcess:
                 consistency=backtest_result.win_rate or 0,  # Consistency = win rate
                 drawdown=backtest_result.max_drawdown or 0,
                 duration_ms=duration_ms,
-                combinations_tested=combinations_tested
+                combinations_tested=combinations_tested,
+                base_code_hash=base_hash
             )
 
             # Check minimum score threshold first (avoid unnecessary shuffle test)
@@ -2378,7 +2220,8 @@ class ContinuousBacktesterProcess:
                 EventTracker.backtest_score_rejected(
                     strategy_id, strategy_name, score, self.pool_min_score,
                     duration_ms=duration_ms,
-                    combinations_tested=combinations_tested
+                    combinations_tested=combinations_tested,
+                    base_code_hash=base_hash
                 )
                 return (False, f"score_below_threshold:{score:.1f}")
 
@@ -2386,13 +2229,14 @@ class ContinuousBacktesterProcess:
             if not self._run_shuffle_test(strategy_id, strategy):
                 return (False, "shuffle_test_failed")
 
-            # Run multi-window validation (consistency across time periods)
-            if self.multi_window_validator.enabled:
-                mw_passed, mw_reason = self._run_multi_window_validation(
-                    strategy, backtest_result
-                )
-                if not mw_passed:
-                    return (False, f"multi_window_failed:{mw_reason}")
+            # Run WFA validation with fixed params
+            # Tests if the best combo performs consistently across 4 time windows
+            wfa_passed, wfa_reason = self._run_wfa_fixed_params(
+                strategy, strategy.assigned_timeframe
+            )
+            if not wfa_passed:
+                logger.info(f"[{strategy_name}] WFA validation failed: {wfa_reason}")
+                return (False, f"wfa_validation_failed:{wfa_reason}")
 
             # Try to enter pool (handles leaderboard logic)
             EventTracker.pool_attempted(
@@ -2594,92 +2438,9 @@ class ContinuousBacktesterProcess:
         except Exception as e:
             logger.warning(f"Error writing validation cache: {e}")
 
-    def _run_multi_window_validation(
-        self,
-        strategy: Strategy,
-        backtest_result: BacktestResult
-    ) -> Tuple[bool, str]:
-        """
-        Run multi-window validation to check strategy consistency.
-
-        Validates that the strategy performs consistently across multiple
-        time periods, not just the training window. Detects overfitting.
-
-        Args:
-            strategy: Strategy model instance
-            backtest_result: BacktestResult with symbols and timeframe
-
-        Returns:
-            (passed, reason) tuple
-        """
-        import time
-        from src.database.event_tracker import EventTracker
-
-        start_time = time.time()
-        windows_count = self.multi_window_validator.n_windows
-        base_code_hash = strategy.base_code_hash
-
-        EventTracker.multi_window_started(
-            strategy.id, strategy.name, windows_count,
-            cached=False, base_code_hash=base_code_hash
-        )
-
-        try:
-            # Extract actual class name from code (may differ from strategy.name)
-            class_name = self._extract_class_name(strategy.code)
-            if not class_name:
-                logger.warning(f"[{strategy.name}] Cannot extract class name for multi-window")
-                return (True, "class_name_not_found_skip")
-
-            # Load strategy instance
-            strategy_instance = self._load_strategy_instance(strategy.code, class_name)
-            if strategy_instance is None:
-                logger.warning(f"[{strategy.name}] Cannot load instance for multi-window (class: {class_name})")
-                return (True, "instance_load_failed_skip")
-
-            # Get pairs and timeframe from backtest result
-            pairs = backtest_result.symbols_tested or []
-            timeframe = backtest_result.timeframe_tested
-
-            if not pairs or not timeframe:
-                logger.warning(f"[{strategy.name}] Missing symbols/timeframe for multi-window")
-                return (True, "missing_data_skip")
-
-            # Run validation (no cache - each strategy tested independently)
-            passed, reason, metrics = self.multi_window_validator.validate(
-                strategy=strategy_instance,
-                pairs=pairs,
-                timeframe=timeframe
-            )
-            duration_ms = int((time.time() - start_time) * 1000)
-
-            if passed:
-                logger.debug(f"[{strategy.name}] Multi-window PASSED ({reason})")
-                avg_sharpe = metrics.get('avg_sharpe', 0) if metrics else 0
-                cv = metrics.get('cv', 0) if metrics else 0
-                EventTracker.multi_window_passed(
-                    strategy.id, strategy.name, avg_sharpe, cv,
-                    duration_ms=duration_ms, base_code_hash=base_code_hash
-                )
-            else:
-                logger.info(f"[{strategy.name}] Multi-window FAILED ({reason})")
-                EventTracker.multi_window_failed(
-                    strategy.id, strategy.name, reason,
-                    duration_ms=duration_ms, base_code_hash=base_code_hash,
-                    metrics=metrics
-                )
-
-            return (passed, reason)
-
-        except Exception as e:
-            duration_ms = int((time.time() - start_time) * 1000)
-            logger.warning(f"Multi-window validation error for {strategy.name}: {e}")
-            EventTracker.multi_window_failed(
-                strategy.id, strategy.name, f"error:{e}",
-                duration_ms=duration_ms, base_code_hash=base_code_hash
-            )
-            # On error, skip validation (don't block promotion)
-            return (True, f"error_skip:{e}")
+    # NOTE: _run_multi_window_validation removed - replaced by WFA with parameter
+    # re-optimization (see _run_wfa_with_optimization). WFA checks param stability
+    # across 4 expanding windows, which is more rigorous than multi-window.
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""
@@ -2698,6 +2459,15 @@ class ContinuousBacktesterProcess:
 
     def run(self):
         """Main entry point"""
+        # STEP 1: Validate backtester before starting
+        logger.info("Running backtester validation...")
+        from src.backtester.validate import validate_backtester
+        if not validate_backtester():
+            logger.critical("BACKTESTER VALIDATION FAILED - BLOCKING STARTUP")
+            logger.critical("Fix the backtester bugs before running the daemon.")
+            sys.exit(1)
+        logger.info("Backtester validation passed - starting daemon")
+
         signal.signal(signal.SIGINT, self.handle_shutdown)
         signal.signal(signal.SIGTERM, self.handle_shutdown)
 

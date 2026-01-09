@@ -209,7 +209,7 @@ class Strategy(Base):
     # Generation source: "pattern", "ai_free", "ai_assigned", "optimized"
     generation_mode = Column(String(20), default="ai_free")
     parameters = Column(JSON)  # Parameters used if template-based
-    parametric_backtest_metrics = Column(JSONB, nullable=True)  # Stores training/holdout metrics from parametric optimization
+    parametric_backtest_metrics = Column(JSONB, nullable=True)  # Stores IS/OOS metrics from parametric optimization
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -328,7 +328,7 @@ class BacktestResult(Base):
     weighted_win_rate = Column(Float)
     weighted_expectancy = Column(Float)
 
-    # Individual weighted metrics (training 40% + holdout 60%) - for accurate classifier ranking
+    # Individual weighted metrics (IS 40% + OOS 60%) - for accurate classifier ranking
     weighted_sharpe_pure = Column(Float, nullable=True)  # Sharpe only (no composite)
     weighted_walk_forward_stability = Column(Float, nullable=True)  # Stability metric
     weighted_max_drawdown = Column(Float, nullable=True)  # Max drawdown weighted
@@ -337,7 +337,7 @@ class BacktestResult(Base):
     recency_penalty = Column(Float)       # 0-20% penalty for poor recent performance
 
     # Link to corresponding recent period result
-    recent_result_id = Column(UUID(as_uuid=True), ForeignKey("backtest_results.id"), nullable=True)
+    recent_result_id = Column(UUID(as_uuid=True), ForeignKey("backtest_results.id", ondelete="SET NULL"), nullable=True)
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

@@ -20,10 +20,10 @@ individual metrics with clear descriptions. Sections:
 
 import time
 import logging
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, UTC, date
 from typing import Dict, List, Optional, Any, Tuple
 
-from sqlalchemy import select, func, and_, or_, desc
+from sqlalchemy import select, func, and_, or_, desc, cast, Integer, text
 
 from src.config import load_config
 from src.database import get_session, PipelineMetricsSnapshot, Strategy
@@ -73,9 +73,11 @@ class MetricsCollector:
         rotator_config = self.config.get('rotator', {})
         self.limit_live = rotator_config.get('max_live_strategies', 10)
 
-        # Backtesting config for retest
+        # Backtesting config for retest and periods
         backtesting_config = self.config.get('backtesting', {})
         self.retest_interval_days = backtesting_config.get('retest', {}).get('interval_days', 3)
+        self.is_days = backtesting_config.get('is_days', 120)
+        self.oos_days = backtesting_config.get('oos_days', 30)
 
         logger.info(f"MetricsCollector initialized (interval: {self.interval_seconds}s)")
 
@@ -90,6 +92,10 @@ class MetricsCollector:
 
                 # Collect all metrics
                 queue_depths = self._get_queue_depths(session)
+                generation_by_source = self._get_generation_by_source(session, window_24h)
+                generator_stats = self._get_generator_stats_24h(session, window_24h)
+                ai_calls_today = self._get_ai_calls_today()
+                unused_patterns = self._get_unused_patterns(session)
                 funnel = self._get_funnel_24h(session, window_24h)
                 timing = self._get_timing_avg_24h(session, window_24h)
                 throughput = self._get_throughput_interval(session, window_1min)
@@ -97,6 +103,7 @@ class MetricsCollector:
                 backpressure = self._get_backpressure_status(session, queue_depths)
                 pool_stats = self._get_pool_stats(session)
                 pool_quality = self._get_pool_quality(session)
+                pool_by_source = self._get_pool_by_source(session)
                 retest_stats = self._get_retest_stats_24h(session, window_24h)
                 live_stats = self._get_live_rotation_stats(session, window_24h)
 
@@ -115,6 +122,10 @@ class MetricsCollector:
                     status=status,
                     issue=issue,
                     queue_depths=queue_depths,
+                    generation_by_source=generation_by_source,
+                    generator_stats=generator_stats,
+                    ai_calls_today=ai_calls_today,
+                    unused_patterns=unused_patterns,
                     funnel=funnel,
                     timing=timing,
                     throughput=throughput,
@@ -122,6 +133,7 @@ class MetricsCollector:
                     backpressure=backpressure,
                     pool_stats=pool_stats,
                     pool_quality=pool_quality,
+                    pool_by_source=pool_by_source,
                     retest_stats=retest_stats,
                     live_stats=live_stats,
                 )
@@ -137,6 +149,367 @@ class MetricsCollector:
         ).all()
 
         return {status: count for status, count in result}
+
+    def _get_generation_by_source(self, session, since: datetime) -> Dict[str, int]:
+        """
+        Get generation counts by source type (pattern, ai_free, ai_assigned).
+
+        Uses the pattern_based and ai_provider fields in event_data.
+        - pattern_based=true → 'pattern'
+        - pattern_based=false with ai_provider → 'ai' (can't distinguish free vs assigned from events)
+        """
+        # Query generation events with breakdown by pattern_based
+        result = session.execute(
+            text("""
+                SELECT
+                    CASE
+                        WHEN (event_data->>'pattern_based')::boolean = true THEN 'pattern'
+                        WHEN event_data->>'ai_provider' IS NOT NULL THEN 'ai'
+                        ELSE 'unknown'
+                    END as source_type,
+                    COUNT(*) as count
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'generation'
+                  AND event_type = 'created'
+                GROUP BY
+                    CASE
+                        WHEN (event_data->>'pattern_based')::boolean = true THEN 'pattern'
+                        WHEN event_data->>'ai_provider' IS NOT NULL THEN 'ai'
+                        ELSE 'unknown'
+                    END
+            """),
+            {'since': since}
+        ).all()
+
+        # Build dict with defaults
+        sources = {'pattern': 0, 'ai': 0, 'unknown': 0}
+        for source_type, count in result:
+            sources[source_type] = count
+
+        return sources
+
+    def _get_generator_stats_24h(self, session, since: datetime) -> Dict[str, Any]:
+        """
+        Get detailed generator statistics for last 24h.
+
+        Returns:
+            Dict with:
+            - total: Total strategies generated
+            - by_source: Count by generation_mode (pattern, ai_free, ai_assigned)
+            - by_type: Count by strategy_type (MOM, REV, TRN, etc.)
+            - by_direction: Count by direction (LONG, SHORT, BIDIR)
+            - by_timeframe: Count by timeframe (15m, 30m, 1h, 4h, 1d)
+            - timing_by_source: Average generation time (ms) by source
+            - leverage: Dict with min, max, avg leverage
+        """
+        # Total generated
+        total = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'generation',
+                StrategyEvent.event_type == 'created',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        # By source (generation_mode) - uses new field in event_data
+        by_source_result = session.execute(
+            text("""
+                SELECT
+                    COALESCE(event_data->>'generation_mode',
+                        CASE
+                            WHEN (event_data->>'pattern_based')::boolean = true THEN 'pattern'
+                            ELSE 'ai_free'
+                        END
+                    ) as source,
+                    COUNT(*) as count
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'generation'
+                  AND event_type = 'created'
+                GROUP BY 1
+            """),
+            {'since': since}
+        ).all()
+
+        by_source = {'pattern': 0, 'ai_free': 0, 'ai_assigned': 0}
+        for source, count in by_source_result:
+            if source in by_source:
+                by_source[source] = count
+
+        # By strategy type (MOM, REV, TRN, etc.)
+        by_type_result = session.execute(
+            text("""
+                SELECT
+                    event_data->>'strategy_type' as stype,
+                    COUNT(*) as count
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'generation'
+                  AND event_type = 'created'
+                  AND event_data->>'strategy_type' IS NOT NULL
+                GROUP BY 1
+                ORDER BY count DESC
+            """),
+            {'since': since}
+        ).all()
+
+        by_type = {}
+        for stype, count in by_type_result:
+            if stype:
+                by_type[stype] = count
+
+        # By direction (LONG, SHORT, BIDIR)
+        by_direction_result = session.execute(
+            text("""
+                SELECT
+                    COALESCE(event_data->>'direction', 'UNKNOWN') as direction,
+                    COUNT(*) as count
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'generation'
+                  AND event_type = 'created'
+                GROUP BY 1
+            """),
+            {'since': since}
+        ).all()
+
+        by_direction = {'LONG': 0, 'SHORT': 0, 'BIDIR': 0}
+        for direction, count in by_direction_result:
+            if direction in by_direction:
+                by_direction[direction] = count
+
+        # By timeframe (15m, 30m, 1h, 4h, 1d)
+        by_timeframe_result = session.execute(
+            text("""
+                SELECT
+                    event_data->>'timeframe' as tf,
+                    COUNT(*) as count
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'generation'
+                  AND event_type = 'created'
+                  AND event_data->>'timeframe' IS NOT NULL
+                GROUP BY 1
+                ORDER BY count DESC
+            """),
+            {'since': since}
+        ).all()
+
+        by_timeframe = {}
+        for tf, count in by_timeframe_result:
+            if tf:
+                by_timeframe[tf] = count
+
+        # Average timing by source
+        timing_result = session.execute(
+            text("""
+                SELECT
+                    COALESCE(event_data->>'generation_mode',
+                        CASE
+                            WHEN (event_data->>'pattern_based')::boolean = true THEN 'pattern'
+                            ELSE 'ai_free'
+                        END
+                    ) as source,
+                    AVG(duration_ms) as avg_ms
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'generation'
+                  AND event_type = 'created'
+                  AND duration_ms IS NOT NULL
+                GROUP BY 1
+            """),
+            {'since': since}
+        ).all()
+
+        timing_by_source = {'pattern': None, 'ai_free': None, 'ai_assigned': None}
+        for source, avg_ms in timing_result:
+            if source in timing_by_source and avg_ms is not None:
+                timing_by_source[source] = float(avg_ms)
+
+        # Leverage stats (min, max, avg)
+        leverage_result = session.execute(
+            text("""
+                SELECT
+                    MIN((event_data->>'leverage')::int) as min_lev,
+                    MAX((event_data->>'leverage')::int) as max_lev,
+                    AVG((event_data->>'leverage')::int) as avg_lev
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'generation'
+                  AND event_type = 'created'
+                  AND event_data->>'leverage' IS NOT NULL
+            """),
+            {'since': since}
+        ).first()
+
+        leverage = {
+            'min': int(leverage_result[0]) if leverage_result and leverage_result[0] else None,
+            'max': int(leverage_result[1]) if leverage_result and leverage_result[1] else None,
+            'avg': float(leverage_result[2]) if leverage_result and leverage_result[2] else None
+        }
+
+        # By AI provider (claude, gemini, etc.) - excludes pattern-based (direct)
+        by_provider_result = session.execute(
+            text("""
+                SELECT
+                    COALESCE(event_data->>'ai_provider', 'unknown') as provider,
+                    COUNT(*) as count
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'generation'
+                  AND event_type = 'created'
+                  AND COALESCE(event_data->>'ai_provider', 'direct') != 'direct'
+                GROUP BY 1
+                ORDER BY count DESC
+            """),
+            {'since': since}
+        ).all()
+
+        by_provider = {}
+        for provider, count in by_provider_result:
+            by_provider[provider] = count
+
+        # Generation failures (validation failed before DB save)
+        gen_failures = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'generation',
+                StrategyEvent.event_type == 'failed',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        return {
+            'total': total,
+            'by_source': by_source,
+            'by_type': by_type,
+            'by_direction': by_direction,
+            'by_timeframe': by_timeframe,
+            'timing_by_source': timing_by_source,
+            'leverage': leverage,
+            'by_provider': by_provider,
+            'gen_failures': gen_failures
+        }
+
+    def _get_ai_calls_today(self) -> Dict[str, Any]:
+        """
+        Get AI call usage for today from ai_calls.json file.
+
+        Returns:
+            Dict with count, max_calls, remaining, or None values if file not found
+        """
+        import json
+        from pathlib import Path
+
+        state_file = Path("data/ai_calls.json")
+        today = date.today().isoformat()
+
+        if not state_file.exists():
+            return {'count': None, 'max_calls': None, 'remaining': None}
+
+        try:
+            with open(state_file, 'r') as f:
+                state = json.load(f)
+
+            # Check if same day
+            if state.get('date') == today:
+                count = state.get('count', 0)
+                max_calls = state.get('max_calls', 0)
+                return {
+                    'count': count,
+                    'max_calls': max_calls,
+                    'remaining': max(0, max_calls - count)
+                }
+            else:
+                # New day, counter would reset
+                return {
+                    'count': 0,
+                    'max_calls': state.get('max_calls', 0),
+                    'remaining': state.get('max_calls', 0)
+                }
+        except Exception:
+            return {'count': None, 'max_calls': None, 'remaining': None}
+
+    def _get_unused_patterns(self, session) -> Dict[str, Any]:
+        """
+        Get pattern statistics (all time, not 24h).
+
+        Returns:
+            Dict with unique patterns used, total available, remaining, strategies count
+        """
+        # Get unique BASE pattern IDs used (extract UUID before '__' suffix)
+        # Pattern IDs can be: "uuid" or "uuid__target_name"
+        unique_used = session.execute(
+            text("""
+                SELECT COUNT(DISTINCT split_part(elem, '__', 1))
+                FROM strategies s,
+                     json_array_elements_text(s.pattern_ids) AS elem
+                WHERE s.pattern_based = true
+                  AND s.pattern_ids IS NOT NULL
+            """)
+        ).scalar() or 0
+
+        # Get total strategies generated from patterns (all time, currently in DB)
+        strategies_in_db = session.execute(
+            text("""
+                SELECT COUNT(*)
+                FROM strategies
+                WHERE pattern_based = true
+            """)
+        ).scalar() or 0
+
+        # Try to get total patterns from pattern-discovery API (suppress logs)
+        total_available = None
+        try:
+            pattern_api_url = self.config.get('pattern_discovery', {}).get('api_url')
+            if pattern_api_url:
+                import logging
+                from src.generator.pattern_fetcher import PatternFetcher
+                # Temporarily suppress pattern_fetcher logs
+                pf_logger = logging.getLogger('src.generator.pattern_fetcher')
+                old_level = pf_logger.level
+                pf_logger.setLevel(logging.WARNING)
+                try:
+                    fetcher = PatternFetcher(api_url=pattern_api_url)
+                    patterns = fetcher.get_tier_1_patterns(limit=500)
+                    total_available = len(patterns) if patterns else None
+                finally:
+                    pf_logger.setLevel(old_level)
+        except Exception:
+            pass
+
+        remaining = None
+        if total_available is not None:
+            remaining = max(0, total_available - unique_used)
+
+        return {
+            'unique_used': unique_used,
+            'total_available': total_available,
+            'remaining': remaining,
+            'strategies_in_db': strategies_in_db
+        }
+
+    def _get_pool_by_source(self, session) -> Dict[str, int]:
+        """
+        Get ACTIVE pool composition by generation_mode.
+        """
+        result = session.execute(
+            select(Strategy.generation_mode, func.count(Strategy.id))
+            .where(Strategy.status == 'ACTIVE')
+            .group_by(Strategy.generation_mode)
+        ).all()
+
+        # Build dict with defaults
+        sources = {'pattern': 0, 'ai_free': 0, 'ai_assigned': 0, 'optimized': 0, 'unknown': 0}
+        for mode, count in result:
+            if mode in sources:
+                sources[mode] = count
+            elif mode:
+                sources['unknown'] += count
+
+        return sources
 
     def _get_funnel_24h(self, session, since: datetime) -> Dict[str, Any]:
         """
@@ -164,12 +537,32 @@ class MetricsCollector:
             ))
         ).scalar() or 0
 
-        # Backtested (completed backtest: scored OR parametric_failed)
-        backtested = session.execute(
+        # Validation failed (for funnel clarity)
+        validation_failed = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'validation',
+                StrategyEvent.status == 'failed',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        # Parametric passed (strategies saved with score)
+        parametric_passed = session.execute(
             select(func.count(StrategyEvent.id))
             .where(and_(
                 StrategyEvent.stage == 'backtest',
-                StrategyEvent.event_type.in_(['scored', 'parametric_failed']),
+                StrategyEvent.event_type == 'scored',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        # Parametric failed (no valid combinations found)
+        parametric_failed = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'backtest',
+                StrategyEvent.event_type == 'parametric_failed',
                 StrategyEvent.timestamp >= since
             ))
         ).scalar() or 0
@@ -194,12 +587,32 @@ class MetricsCollector:
             ))
         ).scalar() or 0
 
+        # Multi-window started (for in_progress tracking)
+        mw_started = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'multi_window',
+                StrategyEvent.event_type == 'started',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
         # Multi-window OK
         mw_ok = session.execute(
             select(func.count(StrategyEvent.id))
             .where(and_(
                 StrategyEvent.stage == 'multi_window',
                 StrategyEvent.status == 'passed',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        # Multi-window failed (for in_progress calculation)
+        mw_failed = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'multi_window',
+                StrategyEvent.status == 'failed',
                 StrategyEvent.timestamp >= since
             ))
         ).scalar() or 0
@@ -214,6 +627,54 @@ class MetricsCollector:
             ))
         ).scalar() or 0
 
+        # Sum combinations_tested per UNIQUE base (not per strategy output)
+        # Each base tests ~1015 combos, but multiple strategies may pass from same base
+        # We use DISTINCT strategy_name to count each base only once
+        # Note: Only parametric_failed events have combinations_tested populated reliably
+        combo_result = session.execute(
+            text("""
+                SELECT COUNT(*), COALESCE(SUM(combos), 0) FROM (
+                    SELECT DISTINCT ON (strategy_name)
+                        (event_data->>'combinations_tested')::int as combos
+                    FROM strategy_events
+                    WHERE timestamp >= :since
+                      AND stage = 'backtest'
+                      AND event_type IN ('scored', 'score_rejected', 'parametric_failed')
+                      AND event_data->>'combinations_tested' IS NOT NULL
+                    ORDER BY strategy_name, timestamp DESC
+                ) sub
+            """),
+            {'since': since}
+        ).first()
+        bases_with_combos = combo_result[0] if combo_result else 0
+        combinations_tested = combo_result[1] if combo_result else 0
+
+        # Count unique bases that completed parametric backtest (all, for reference)
+        bases_completed = session.execute(
+            text("""
+                SELECT COUNT(DISTINCT strategy_name)
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'backtest'
+                  AND event_type IN ('scored', 'score_rejected', 'parametric_failed')
+            """),
+            {'since': since}
+        ).scalar() or 0
+
+        # Count unique bases that produced at least one strategy (using base_code_hash)
+        # base_code_hash links parametric output strategies back to their base template
+        bases_with_output = session.execute(
+            text("""
+                SELECT COUNT(DISTINCT base_code_hash)
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'backtest'
+                  AND event_type = 'scored'
+                  AND base_code_hash IS NOT NULL
+            """),
+            {'since': since}
+        ).scalar() or 0
+
         # Calculate pass rates
         def pct(num: int, denom: int) -> Optional[int]:
             if denom == 0:
@@ -223,14 +684,22 @@ class MetricsCollector:
         return {
             'generated': generated,
             'validated': validated,
+            'validation_failed': validation_failed,
             'validated_pct': pct(validated, generated),
-            'backtested': backtested,
-            'backtested_pct': pct(backtested, validated),
+            'bases_completed': bases_completed,
+            'bases_with_combos': bases_with_combos,
+            'bases_with_output': bases_with_output,
+            'combinations_tested': combinations_tested,
+            'parametric_passed': parametric_passed,
+            'parametric_failed': parametric_failed,
+            'parametric_completed': parametric_passed + parametric_failed,
             'score_ok': score_ok,
-            'score_ok_pct': pct(score_ok, backtested),
+            'score_ok_pct': pct(score_ok, parametric_passed),
             'shuffle_ok': shuffle_ok,
             'shuffle_ok_pct': pct(shuffle_ok, score_ok),
+            'mw_started': mw_started,
             'mw_ok': mw_ok,
+            'mw_failed': mw_failed,
             'mw_ok_pct': pct(mw_ok, shuffle_ok),
             'pool': pool_entered,
             'pool_pct': pct(pool_entered, mw_ok if mw_ok > 0 else shuffle_ok),
@@ -358,6 +827,16 @@ class MetricsCollector:
             ))
         ).scalar() or 0
 
+        # Parametric failed (no valid combinations)
+        parametric_fail = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'backtest',
+                StrategyEvent.event_type == 'parametric_failed',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
         # Score rejected
         score_reject = session.execute(
             select(func.count(StrategyEvent.id))
@@ -376,6 +855,18 @@ class MetricsCollector:
                 StrategyEvent.status == 'failed',
                 StrategyEvent.timestamp >= since
             ))
+        ).scalar() or 0
+
+        # Shuffle cached count (for info)
+        shuffle_cached = session.execute(
+            text("""
+                SELECT COUNT(*)
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'shuffle_test'
+                  AND (event_data->>'cached')::boolean = true
+            """),
+            {'since': since}
         ).scalar() or 0
 
         # Multi-window failed
@@ -400,8 +891,10 @@ class MetricsCollector:
 
         return {
             'validation': validation_fail,
+            'parametric_fail': parametric_fail,
             'score_reject': score_reject,
             'shuffle_fail': shuffle_fail,
+            'shuffle_cached': shuffle_cached,
             'mw_fail': mw_fail,
             'pool_reject': pool_reject,
         }
@@ -466,19 +959,19 @@ class MetricsCollector:
 
     def _get_pool_quality(self, session) -> Dict[str, Any]:
         """Get quality metrics for ACTIVE pool strategies."""
-        # Note: Use training backtest metrics (more stable than holdout)
-        # weighted_sharpe_pure is inflated by short holdout period
+        # Note: Use in-sample backtest metrics (more stable than OOS)
+        # weighted_sharpe_pure is inflated by short OOS period
         result = session.execute(
             select(
-                func.avg(BacktestResult.expectancy),      # Training expectancy
-                func.avg(BacktestResult.sharpe_ratio),    # Training sharpe (not inflated)
-                func.avg(BacktestResult.win_rate),        # Training win rate
-                func.avg(BacktestResult.max_drawdown),    # Training drawdown
+                func.avg(BacktestResult.expectancy),      # IS expectancy
+                func.avg(BacktestResult.sharpe_ratio),    # IS sharpe (not inflated)
+                func.avg(BacktestResult.win_rate),        # IS win rate
+                func.avg(BacktestResult.max_drawdown),    # IS drawdown
             )
             .join(Strategy, BacktestResult.strategy_id == Strategy.id)
             .where(and_(
                 Strategy.status == 'ACTIVE',
-                BacktestResult.period_type == 'training'
+                BacktestResult.period_type == 'in_sample'
             ))
         ).first()
 
@@ -621,8 +1114,8 @@ class MetricsCollector:
 
         # Determine status
         if issues:
-            # Real problems
-            return 'DEGRADED', issues[0]
+            # Real problems (backpressure or stall)
+            return 'BACKPRESSURE', issues[0]
         elif active == 0 and live == 0:
             # Pool empty but check if pipeline is working
             if pipeline_has_work or pipeline_throughput > 0:
@@ -684,6 +1177,10 @@ class MetricsCollector:
         status: str,
         issue: Optional[str],
         queue_depths: Dict[str, int],
+        generation_by_source: Dict[str, int],
+        generator_stats: Dict[str, Any],
+        ai_calls_today: Dict[str, Any],
+        unused_patterns: Dict[str, Any],
         funnel: Dict[str, Any],
         timing: Dict[str, Optional[float]],
         throughput: Dict[str, int],
@@ -691,10 +1188,20 @@ class MetricsCollector:
         backpressure: Dict[str, Any],
         pool_stats: Dict[str, Any],
         pool_quality: Dict[str, Any],
+        pool_by_source: Dict[str, int],
         retest_stats: Dict[str, Any],
         live_stats: Dict[str, Any],
     ) -> None:
-        """Log metrics in verbose, self-explanatory format."""
+        """
+        Log metrics in verbose, self-explanatory format.
+
+        Key design principles:
+        - Strategy types (pattern, ai_free, ai_assigned) are tracked separately
+        - TIMING section clearly distinguishes:
+          * parametric_full = time for ALL ~1015 combinations per base strategy
+          * multiwindow_test = time for ONE strategy on 4 windows
+        - Visual separators make backtester phases crystal clear
+        """
 
         # Helper functions
         def fmt_pct(val: Optional[int]) -> str:
@@ -703,6 +1210,8 @@ class MetricsCollector:
         def fmt_time(ms: Optional[float]) -> str:
             if ms is None:
                 return "--"
+            if ms >= 60000:
+                return f"{ms/60000:.1f}min"
             if ms >= 1000:
                 return f"{ms/1000:.1f}s"
             return f"{int(ms)}ms"
@@ -723,65 +1232,187 @@ class MetricsCollector:
         else:
             logger.info(f'=== PIPELINE STATUS: {status} ===')
 
+        # === GENERATOR 24H ===
+        gen_total = generator_stats['total']
+        gen_by_source = generator_stats['by_source']
+        gen_by_type = generator_stats['by_type']
+        gen_by_dir = generator_stats['by_direction']
+        gen_by_tf = generator_stats['by_timeframe']
+        gen_timing = generator_stats['timing_by_source']
+        gen_leverage = generator_stats['leverage']
+
+        logger.info(f'[GENERATOR 24H] total strategies generated in last 24 hours: {gen_total}')
+
+        # By source
+        src_pattern = gen_by_source.get('pattern', 0)
+        src_ai_free = gen_by_source.get('ai_free', 0)
+        src_ai_assigned = gen_by_source.get('ai_assigned', 0)
+        logger.info(f'[GENERATOR 24H] by_source: pattern={src_pattern}, ai_free={src_ai_free}, ai_assigned={src_ai_assigned}')
+
+        # By type (show all types that have count > 0)
+        type_parts = [f'{t}={c}' for t, c in sorted(gen_by_type.items()) if c > 0]
+        type_str = ', '.join(type_parts) if type_parts else '--'
+        logger.info(f'[GENERATOR 24H] by_type: {type_str}')
+
+        # By direction
+        dir_long = gen_by_dir.get('LONG', 0)
+        dir_short = gen_by_dir.get('SHORT', 0)
+        dir_bidir = gen_by_dir.get('BIDIR', 0)
+        logger.info(f'[GENERATOR 24H] by_direction: LONG={dir_long}, SHORT={dir_short}, BIDIR={dir_bidir}')
+
+        # By timeframe (ordered by timeframe duration)
+        tf_order = ['5m', '15m', '30m', '1h', '2h']
+        tf_parts = [f'{tf}={gen_by_tf.get(tf, 0)}' for tf in tf_order if gen_by_tf.get(tf, 0) > 0]
+        # Add any other timeframes not in the standard order
+        for tf, count in gen_by_tf.items():
+            if tf not in tf_order and count > 0:
+                tf_parts.append(f'{tf}={count}')
+        tf_str = ', '.join(tf_parts) if tf_parts else '--'
+        logger.info(f'[GENERATOR 24H] by_timeframe: {tf_str}')
+
+        # Leverage stats
+        lev_min = gen_leverage.get('min')
+        lev_max = gen_leverage.get('max')
+        lev_avg = gen_leverage.get('avg')
+        lev_str = f"min={lev_min or '--'}, max={lev_max or '--'}, avg={fmt_float(lev_avg)}"
+        logger.info(f'[GENERATOR 24H] leverage: {lev_str}')
+
+        # AI calls today
+        ai_count = ai_calls_today.get('count')
+        ai_max = ai_calls_today.get('max_calls')
+        ai_remaining = ai_calls_today.get('remaining')
+        if ai_count is not None and ai_max is not None:
+            logger.info(f'[GENERATOR 24H] ai_calls_today: {ai_count}/{ai_max} ({ai_remaining} remaining)')
+        else:
+            logger.info('[GENERATOR 24H] ai_calls_today: --')
+
+        # Timing by source
+        time_pattern = fmt_time(gen_timing.get('pattern'))
+        time_ai_free = fmt_time(gen_timing.get('ai_free'))
+        time_ai_assigned = fmt_time(gen_timing.get('ai_assigned'))
+        logger.info(f'[GENERATOR 24H] avg_time: pattern={time_pattern}, ai_free={time_ai_free}, ai_assigned={time_ai_assigned}')
+
+        # Generation failures (validation failed before DB save)
+        gen_failures = generator_stats.get('gen_failures', 0)
+        logger.info(f'[GENERATOR 24H] gen_validation_failed: {gen_failures}')
+
+        # Patterns (all time stats, not 24h)
+        pat_unique = unused_patterns.get('unique_used', 0)
+        pat_total = unused_patterns.get('total_available')
+        pat_remaining = unused_patterns.get('remaining')
+        pat_in_db = unused_patterns.get('strategies_in_db', 0)
+        if pat_total is not None:
+            logger.info(f'[GENERATOR] patterns: {pat_unique}/{pat_total} used ({pat_remaining} remaining) -> {pat_in_db} strategies in DB')
+        else:
+            logger.info(f'[GENERATOR] patterns: {pat_unique} used (total unknown) -> {pat_in_db} strategies in DB')
+
         # === QUEUE ===
         g = queue_depths.get('GENERATED', 0)
         v = queue_depths.get('VALIDATED', 0)
         a = queue_depths.get('ACTIVE', 0)
         lv = queue_depths.get('LIVE', 0)
         r = queue_depths.get('RETIRED', 0)
-        f = queue_depths.get('FAILED', 0)
+        # Calculate failed from events (DB count is always 0 because failed strategies are deleted)
+        failed_24h = (
+            failures["validation"] +
+            failures["parametric_fail"] +
+            failures["score_reject"] +
+            failures["shuffle_fail"] +
+            failures["mw_fail"]
+        )
         logger.info('[QUEUE] strategies waiting at each stage')
         logger.info(f'[QUEUE] generated: {g} (waiting for validation)')
         logger.info(f'[QUEUE] validated: {v} (waiting for backtest)')
         logger.info(f'[QUEUE] active: {a} (in pool, ready to deploy)')
         logger.info(f'[QUEUE] live: {lv} (trading now)')
         logger.info(f'[QUEUE] retired: {r} (removed from live)')
-        logger.info(f'[QUEUE] failed: {f} (rejected at any stage)')
+        # Total processed = strategies that completed any stage (use generated as proxy)
+        total_processed = funnel["generated"]
+        failed_pct = f"{100 * failed_24h // total_processed}%" if total_processed > 0 else "--"
+        logger.info(f'[QUEUE] failed_24h: {failed_24h} of {total_processed} ({failed_pct}) rejected in last 24h')
 
         # === FUNNEL 24H ===
         gen = funnel["generated"]
         val = funnel["validated"]
-        bt = funnel["backtested"]
+        val_failed = funnel["validation_failed"]
+        bases_done = funnel["bases_completed"]
+        bases_with_combos = funnel["bases_with_combos"]
+        bases_with_output = funnel["bases_with_output"]
+        combinations = funnel["combinations_tested"]
+        param_passed = funnel["parametric_passed"]
+        param_failed = funnel["parametric_failed"]
         score = funnel["score_ok"]
         shuf = funnel["shuffle_ok"]
+        mw_started = funnel["mw_started"]
         mw = funnel["mw_ok"]
+        mw_failed = funnel["mw_failed"]
+        mw_in_progress = max(0, mw_started - mw - mw_failed)
         pool = funnel["pool"]
 
-        # Calculate expansion ratio for parametric
-        expansion = f"{bt/val:.1f}x" if val > 0 else "--"
+        # Calculate rates - use bases_with_combos for accurate average
+        avg_combos_per_base = f"{combinations // bases_with_combos}" if bases_with_combos > 0 else "1015"
+
+        # bases_with_output uses base_code_hash (0 for legacy events without hash)
+        # When base_code_hash not available, estimate from param_passed / avg_per_base
+        if bases_with_output > 0:
+            bases_producing = bases_with_output
+            strategies_per_base = f"{param_passed / bases_with_output:.1f}"
+        elif param_passed > 0:
+            # Fallback: estimate ~6 strategies per successful base (empirical average)
+            estimated_bases = max(1, param_passed // 6)
+            bases_producing = estimated_bases
+            strategies_per_base = f"~{param_passed / estimated_bases:.1f}"
+        else:
+            bases_producing = 0
+            strategies_per_base = "--"
 
         # Find bottleneck (lowest non-100% pass rate after validation)
         bottleneck = ""
-        if shuf > 0 and mw == 0:
+        if shuf > 0 and mw == 0 and mw_in_progress == 0:
             bottleneck = " <-- BOTTLENECK"
         elif score > 0 and shuf == 0:
             bottleneck = " <-- BOTTLENECK"
 
-        logger.info('[FUNNEL 24H] strategies processed in last 24 hours')
-        logger.info(f'[FUNNEL 24H] generated: {gen} base strategies created by AI/patterns')
-        logger.info(f'[FUNNEL 24H] validated: {val} of {gen} passed syntax/AST/execution ({fmt_pct(funnel["validated_pct"])})')
-        logger.info(f'[FUNNEL 24H] backtested_base: {val} base strategies entered backtest')
-        logger.info(f'[FUNNEL 24H] backtested_parametric: {bt} parameter combinations tested ({expansion} expansion)')
-        logger.info(f'[FUNNEL 24H] backtested_score_ok: {score} of {bt} passed min_score {self.pool_min_score} ({fmt_pct(funnel["score_ok_pct"])})')
+        # Show validation with failed count for clarity
+        val_total = val + val_failed
+        val_failed_str = f", {val_failed} failed" if val_failed > 0 else ""
+        logger.info('[FUNNEL 24H] pipeline conversion (base strategies -> output strategies)')
+        logger.info(f'[FUNNEL 24H] validated: {val} of {gen} base passed syntax/AST/execution ({fmt_pct(funnel["validated_pct"])}){val_failed_str}')
+        logger.info(f'[FUNNEL 24H] parametric: {bases_producing} base -> {param_passed} strategies ({strategies_per_base}/base), {param_failed} base rejected, {combinations} combos')
+        logger.info(f'[FUNNEL 24H] score_ok: {score} of {param_passed} strategies passed min_score {self.pool_min_score} ({fmt_pct(funnel["score_ok_pct"])})')
         logger.info(f'[FUNNEL 24H] shuffle_ok: {shuf} of {score} passed lookahead test ({fmt_pct(funnel["shuffle_ok_pct"])})')
-        mw_bottleneck = bottleneck if "BOTTLENECK" in bottleneck else ""
-        logger.info(f'[FUNNEL 24H] multiwindow_ok: {mw} of {shuf} passed consistency test ({fmt_pct(funnel["mw_ok_pct"])}){mw_bottleneck}')
+        mw_in_progress_str = f", {mw_in_progress} in progress" if mw_in_progress > 0 else ""
+        logger.info(f'[FUNNEL 24H] multiwindow_ok: {mw} of {shuf} passed 4-window consistency ({fmt_pct(funnel["mw_ok_pct"])}), {mw_failed} failed{mw_in_progress_str}{bottleneck}')
         logger.info(f'[FUNNEL 24H] pool_added: {pool} entered ACTIVE pool')
 
         # === TIMING ===
-        logger.info('[TIMING] average time per strategy')
-        logger.info(f'[TIMING] validation_total: {fmt_time(timing.get("validation"))}')
-        logger.info(f'[TIMING] backtest_total: {fmt_time(timing.get("backtest"))} (includes parametric optimization)')
-        logger.info(f'[TIMING] shuffle_test: {fmt_time(timing.get("shuffle"))}')
-        logger.info(f'[TIMING] multiwindow_test: {fmt_time(timing.get("multiwindow"))} (4 time windows)')
+        logger.info('[TIMING 24H] average duration by operation type')
+        logger.info(f'[TIMING 24H] validation: {fmt_time(timing.get("validation"))} per base (syntax + AST + execution)')
+        logger.info(f'[TIMING 24H] parametric_backtest: {fmt_time(timing.get("backtest"))} per base (1015 combos x {self.is_days}d + {self.oos_days}d)')
+        shuffle_cached = failures.get("shuffle_cached", 0)
+        shuffle_cached_str = f", {shuffle_cached} cached" if shuffle_cached > 0 else ""
+        logger.info(f'[TIMING 24H] shuffle_test: {fmt_time(timing.get("shuffle"))} per strategy (lookahead detection{shuffle_cached_str})')
+        logger.info(f'[TIMING 24H] multiwindow_test: {fmt_time(timing.get("multiwindow"))} per strategy (4 window backtests)')
 
         # === FAILURES 24H ===
-        logger.info('[FAILURES 24H] rejection counts by stage')
+        # Note: counts may exceed funnel numbers due to backlog (strategies validated before 24h window)
+        logger.info('[FAILURES 24H] rejection counts by stage (may include backlog)')
         logger.info(f'[FAILURES 24H] validation: {failures["validation"]} (code errors)')
-        logger.info(f'[FAILURES 24H] backtest_score: {failures["score_reject"]} (score < {self.pool_min_score} threshold)')
-        logger.info(f'[FAILURES 24H] shuffle: {failures["shuffle_fail"]} (lookahead bias detected)')
-        logger.info(f'[FAILURES 24H] multiwindow: {failures["mw_fail"]} (inconsistent across time periods)')
-        logger.info(f'[FAILURES 24H] pool_full: {failures["pool_reject"]} (pool at {self.limit_active} max, score < worst in pool)')
+        logger.info(f'[FAILURES 24H] parametric_no_valid: {failures["parametric_fail"]} (no combo passed filters)')
+        logger.info(f'[FAILURES 24H] score_below_min: {failures["score_reject"]} (score < {self.pool_min_score})')
+        logger.info(f'[FAILURES 24H] shuffle_bias: {failures["shuffle_fail"]} (lookahead bias detected)')
+        logger.info(f'[FAILURES 24H] multiwindow_inconsistent: {failures["mw_fail"]} (CV > 1.5 across time windows)')
+        # pool_rejected: explain based on whether pool is full and whether rejections happened
+        pool_size = pool_stats["size"]
+        pool_reject_count = failures["pool_reject"]
+        if pool_reject_count == 0:
+            if pool_size >= self.limit_active:
+                pool_reject_msg = f"pool_rejected: 0 (pool full at {self.limit_active}, no new strategies qualified)"
+            else:
+                pool_reject_msg = f"pool_rejected: 0 (pool not full, all qualifying strategies accepted)"
+        else:
+            pool_reject_msg = f"pool_rejected: {pool_reject_count} (score < worst in full pool of {self.limit_active})"
+        logger.info(f'[FAILURES 24H] {pool_reject_msg}')
 
         # === BACKPRESSURE ===
         gen_pct = int(100 * backpressure["gen_queue"] / backpressure["gen_limit"]) if backpressure["gen_limit"] > 0 else 0
@@ -789,36 +1420,32 @@ class MetricsCollector:
         gen_status = "OVERFLOW" if backpressure["gen_full"] else "OK"
         val_status = "OVERFLOW" if val_pct > 100 else "OK"
         logger.info('[BACKPRESSURE] queue saturation')
-        logger.info(f'[BACKPRESSURE] generator_queue: {backpressure["gen_queue"]}/{backpressure["gen_limit"]} ({gen_pct}%) {gen_status}')
-        logger.info(f'[BACKPRESSURE] validator_queue: {backpressure["val_queue"]}/{backpressure["val_limit"]} ({val_pct}%) {val_status}')
-        logger.info(f'[BACKPRESSURE] backtest_queue: {backpressure["bt_waiting"]} waiting')
+        logger.info(f'[BACKPRESSURE] validation_pending: {backpressure["gen_queue"]}/{backpressure["gen_limit"]} ({gen_pct}%) {gen_status}')
+        logger.info(f'[BACKPRESSURE] backtest_pending: {backpressure["val_queue"]}/{backpressure["val_limit"]} ({val_pct}%) {val_status}')
+        logger.info(f'[BACKPRESSURE] backtest_waiting: {backpressure["bt_waiting"]} in queue')
         logger.info(f'[BACKPRESSURE] backtest_active: {backpressure["bt_processing"]} running now')
 
-        # === POOL ===
+        # === POOL === (IMPROVED - includes composition by source)
+        pool_pattern = pool_by_source.get('pattern', 0)
+        pool_ai_free = pool_by_source.get('ai_free', 0)
+        pool_ai_assigned = pool_by_source.get('ai_assigned', 0)
+        pool_optimized = pool_by_source.get('optimized', 0)
         logger.info('[POOL] strategies ready for live trading')
         logger.info(f'[POOL] size: {pool_stats["size"]} of {pool_stats["limit"]} max')
-        logger.info(f'[POOL] score_min: {fmt_float(pool_stats["score_min"])}')
-        logger.info(f'[POOL] score_max: {fmt_float(pool_stats["score_max"])}')
-        logger.info(f'[POOL] score_avg: {fmt_float(pool_stats["score_avg"])}')
+        logger.info(f'[POOL] by_source: pattern={pool_pattern}, ai_free={pool_ai_free}, ai_assigned={pool_ai_assigned}, optimized={pool_optimized}')
+        logger.info(f'[POOL] score_range: {fmt_float(pool_stats["score_min"])} - {fmt_float(pool_stats["score_max"])} (avg {fmt_float(pool_stats["score_avg"])})')
         expectancy_str = f'{pool_quality["expectancy_avg"]*100:.1f}%' if pool_quality["expectancy_avg"] else "--"
-        logger.info(f'[POOL] expectancy_avg: {expectancy_str}')
-        logger.info(f'[POOL] sharpe_avg: {fmt_float(pool_quality["sharpe_avg"])}')
-        logger.info(f'[POOL] winrate_avg: {fmt_pct_float(pool_quality["winrate_avg"])}')
-        logger.info(f'[POOL] drawdown_avg: {fmt_pct_float(pool_quality["dd_avg"])}')
+        logger.info(f'[POOL] quality: sharpe={fmt_float(pool_quality["sharpe_avg"])}, winrate={fmt_pct_float(pool_quality["winrate_avg"])}, expectancy={expectancy_str}, dd={fmt_pct_float(pool_quality["dd_avg"])}')
 
         # === RETEST 24H ===
         logger.info(f'[RETEST 24H] pool freshness (re-backtest every {self.retest_interval_days} days)')
-        logger.info(f'[RETEST 24H] tested: {retest_stats["tested"]} re-evaluated')
-        logger.info(f'[RETEST 24H] passed: {retest_stats["passed"]} still valid')
-        logger.info(f'[RETEST 24H] evicted: {retest_stats["retired"]} removed (performance degraded)')
+        logger.info(f'[RETEST 24H] tested: {retest_stats["tested"]}, passed: {retest_stats["passed"]}, evicted: {retest_stats["retired"]}')
 
         # === LIVE ===
-        avg_age_str = f'{live_stats["avg_age_days"]:.1f} days' if live_stats["avg_age_days"] else "--"
+        avg_age_str = f'{live_stats["avg_age_days"]:.1f}d' if live_stats["avg_age_days"] else "--"
         logger.info('[LIVE] strategies trading real money')
-        logger.info(f'[LIVE] active: {live_stats["live"]} of {live_stats["limit"]} max')
-        logger.info(f'[LIVE] deployed_24h: {live_stats["deployed_24h"]} started trading')
-        logger.info(f'[LIVE] retired_24h: {live_stats["retired_24h"]} stopped trading')
-        logger.info(f'[LIVE] avg_age: {avg_age_str}')
+        logger.info(f'[LIVE] active: {live_stats["live"]} of {live_stats["limit"]} max (avg_age: {avg_age_str})')
+        logger.info(f'[LIVE] 24h: deployed={live_stats["deployed_24h"]}, retired={live_stats["retired_24h"]}')
 
     # =========================================================================
     # PUBLIC API METHODS (for external use)

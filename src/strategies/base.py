@@ -334,6 +334,18 @@ class StrategyCore(ABC):
     # Stop loss percentage (e.g., 0.02 = 2%)
     sl_pct: float = 0.02
 
+    # Stop loss type (PERCENTAGE or TRAILING)
+    sl_type: StopLossType = StopLossType.PERCENTAGE
+
+    # Trailing stop parameters (only used when sl_type = TRAILING)
+    trailing_stop_pct: Optional[float] = None      # Distance from high water mark
+    trailing_activation_pct: Optional[float] = None  # Activate after N% profit
+
+    # ATR-based stop parameters (only used when sl_type = ATR)
+    atr_stop_multiplier: float = 2.0    # SL at N × ATR from entry
+    atr_take_multiplier: float = 3.0    # TP at N × ATR from entry
+    atr_period: int = 14                # ATR calculation period
+
     # Take profit percentage (e.g., 0.03 = 3%)
     tp_pct: float = 0.03
 

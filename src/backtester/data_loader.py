@@ -86,41 +86,41 @@ class BacktestDataLoader:
 
         return df
 
-    def load_training_holdout(
+    def load_is_oos(
         self,
         symbol: str,
         timeframe: str,
-        training_days: int = 365,
-        holdout_days: int = 30,
+        is_days: int,
+        oos_days: int,
         end_date: Optional[datetime] = None
     ) -> tuple:
         """
-        Load data split into training and holdout periods
+        Load data split into in-sample and out-of-sample periods
 
         This method loads data for two NON-OVERLAPPING periods:
-        1. Training period: older data for backtest metrics (e.g., 365 days)
-        2. Holdout period: recent data NEVER seen during selection (e.g., last 30 days)
+        1. In-sample (IS): older data for backtest metrics (e.g., 120 days)
+        2. Out-of-sample (OOS): recent data NEVER seen during selection (e.g., last 30 days)
 
-        The holdout serves TWO purposes:
-        - Anti-overfitting: if strategy crashes on holdout, it's overfitted
-        - Recency score: good holdout performance = strategy "in form" now
+        The OOS serves TWO purposes:
+        - Anti-overfitting: if strategy crashes on OOS, it's overfitted
+        - Recency score: good OOS performance = strategy "in form" now
 
         Data layout:
-        |---- Training (365 days) ----|---- Holdout (30 days) ----|
-        ^                             ^                           ^
-        start                    split point                     end
+        |---- In-sample (N days) ----|---- Out-of-sample (M days) ----|
+        ^                            ^                                 ^
+        start                   split point                           end
 
         Args:
             symbol: Trading pair (e.g., 'BTC', 'ETH')
-            timeframe: Candle timeframe ('15m', '1h', '4h', '1d')
-            training_days: Days for training period
-            holdout_days: Days for holdout period (from end)
+            timeframe: Candle timeframe ('15m', '30m', '1h', '2h')
+            is_days: Days for in-sample period
+            oos_days: Days for out-of-sample period (from end)
             end_date: End date (default: latest in cache)
 
         Returns:
-            Tuple of (training_df, holdout_df) - NON-OVERLAPPING
+            Tuple of (is_df, oos_df) - NON-OVERLAPPING
         """
-        total_days = training_days + holdout_days
+        total_days = is_days + oos_days
 
         # Load all data
         df = self.cache_reader.read(
@@ -133,65 +133,65 @@ class BacktestDataLoader:
         if df.empty:
             return pd.DataFrame(), pd.DataFrame()
 
-        # Calculate split point based on holdout_days from end
+        # Calculate split point based on oos_days from end
         if 'timestamp' in df.columns:
             df = df.sort_values('timestamp')
             end_ts = df['timestamp'].max()
-            split_ts = end_ts - timedelta(days=holdout_days)
+            split_ts = end_ts - timedelta(days=oos_days)
 
-            training_df = df[df['timestamp'] < split_ts].copy()
-            holdout_df = df[df['timestamp'] >= split_ts].copy()
+            is_df = df[df['timestamp'] < split_ts].copy()
+            oos_df = df[df['timestamp'] >= split_ts].copy()
         else:
             # Use index if no timestamp column
             df = df.sort_index()
             end_ts = df.index.max()
-            split_ts = end_ts - timedelta(days=holdout_days)
+            split_ts = end_ts - timedelta(days=oos_days)
 
-            training_df = df[df.index < split_ts].copy()
-            holdout_df = df[df.index >= split_ts].copy()
+            is_df = df[df.index < split_ts].copy()
+            oos_df = df[df.index >= split_ts].copy()
 
         logger.debug(
             f"Split {symbol} {timeframe}: "
-            f"training={len(training_df)} candles, holdout={len(holdout_df)} candles"
+            f"in_sample={len(is_df)} candles, out_of_sample={len(oos_df)} candles"
         )
 
-        return training_df, holdout_df
+        return is_df, oos_df
 
-    def load_multi_symbol_training_holdout(
+    def load_multi_symbol_is_oos(
         self,
         symbols: List[str],
         timeframe: str,
-        training_days: int = 365,
-        holdout_days: int = 30,
+        is_days: int,
+        oos_days: int,
         end_date: Optional[datetime] = None,
         target_count: Optional[int] = None,
         min_coverage_pct: float = 0.80
     ) -> tuple:
         """
-        Load training/holdout data for multiple symbols
+        Load in-sample/out-of-sample data for multiple symbols
 
-        Loads NON-OVERLAPPING training and holdout data for portfolio backtesting.
+        Loads NON-OVERLAPPING IS and OOS data for portfolio backtesting.
 
         Args:
             symbols: List of trading pairs (ordered by priority)
             timeframe: Candle timeframe
-            training_days: Days for training period
-            holdout_days: Days for holdout period
+            is_days: Days for in-sample period
+            oos_days: Days for out-of-sample period
             end_date: End date
             target_count: Target number of symbols (uses all if None)
             min_coverage_pct: Minimum data coverage required
 
         Returns:
-            Tuple of (training_data_dict, holdout_data_dict) - NON-OVERLAPPING
+            Tuple of (is_data_dict, oos_data_dict) - NON-OVERLAPPING
         """
-        total_days = training_days + holdout_days
+        total_days = is_days + oos_days
 
         # Limit symbols if target_count specified
         if target_count:
             symbols = symbols[:target_count * 2]  # Get extra in case some fail
 
-        training_data = {}
-        holdout_data = {}
+        is_data = {}
+        oos_data = {}
         loaded = 0
 
         for symbol in symbols:
@@ -199,51 +199,51 @@ class BacktestDataLoader:
                 break
 
             try:
-                training_df, holdout_df = self.load_training_holdout(
+                is_df, oos_df = self.load_is_oos(
                     symbol=symbol,
                     timeframe=timeframe,
-                    training_days=training_days,
-                    holdout_days=holdout_days,
+                    is_days=is_days,
+                    oos_days=oos_days,
                     end_date=end_date
                 )
 
                 # Check coverage
-                if training_df.empty or holdout_df.empty:
+                if is_df.empty or oos_df.empty:
                     continue
 
                 # Calculate expected candles
                 tf_minutes = self._timeframe_to_minutes(timeframe)
-                expected_training = (training_days * 24 * 60) / tf_minutes
-                expected_holdout = (holdout_days * 24 * 60) / tf_minutes
+                expected_is = (is_days * 24 * 60) / tf_minutes
+                expected_oos = (oos_days * 24 * 60) / tf_minutes
 
-                training_coverage = len(training_df) / expected_training
-                holdout_coverage = len(holdout_df) / expected_holdout
+                is_coverage = len(is_df) / expected_is
+                oos_coverage = len(oos_df) / expected_oos
 
                 # DEBUG: Log actual bars loaded vs expected
                 logger.debug(
                     f"{symbol} {timeframe}: "
-                    f"Training {len(training_df)}/{expected_training:.0f} bars ({training_coverage:.1%}), "
-                    f"Holdout {len(holdout_df)}/{expected_holdout:.0f} bars ({holdout_coverage:.1%})"
+                    f"IS {len(is_df)}/{expected_is:.0f} bars ({is_coverage:.1%}), "
+                    f"OOS {len(oos_df)}/{expected_oos:.0f} bars ({oos_coverage:.1%})"
                 )
 
                 # Smart coverage check: Accept if >= 80% coverage OR >= min absolute bars
                 # This handles data gaps gracefully (maintenance windows, delistings, etc.)
                 min_relaxed_coverage = 0.80
-                min_training_bars = 1000  # Absolute minimum for statistical significance
-                min_holdout_bars = 50     # Absolute minimum for holdout validation
+                min_is_bars = 1000  # Absolute minimum for statistical significance
+                min_oos_bars = 50   # Absolute minimum for OOS validation
 
-                training_ok = (training_coverage >= min_relaxed_coverage or len(training_df) >= min_training_bars)
-                holdout_ok = (holdout_coverage >= min_relaxed_coverage or len(holdout_df) >= min_holdout_bars)
+                is_ok = (is_coverage >= min_relaxed_coverage or len(is_df) >= min_is_bars)
+                oos_ok = (oos_coverage >= min_relaxed_coverage or len(oos_df) >= min_oos_bars)
 
-                if not training_ok or not holdout_ok:
+                if not is_ok or not oos_ok:
                     logger.debug(
                         f"Skipping {symbol}: insufficient data "
-                        f"(training={len(training_df):.0f} bars, holdout={len(holdout_df):.0f} bars)"
+                        f"(is={len(is_df):.0f} bars, oos={len(oos_df):.0f} bars)"
                     )
                     continue
 
-                training_data[symbol] = training_df
-                holdout_data[symbol] = holdout_df
+                is_data[symbol] = is_df
+                oos_data[symbol] = oos_df
                 loaded += 1
 
             except Exception as e:
@@ -251,11 +251,11 @@ class BacktestDataLoader:
                 continue
 
         logger.info(
-            f"Loaded training/holdout data for {len(training_data)} symbols "
-            f"({timeframe}, {training_days}d/{holdout_days}d)"
+            f"Loaded IS/OOS data for {len(is_data)} symbols "
+            f"({timeframe}, {is_days}d/{oos_days}d)"
         )
 
-        return training_data, holdout_data
+        return is_data, oos_data
 
     def _timeframe_to_minutes(self, timeframe: str) -> int:
         """Convert timeframe string to minutes"""

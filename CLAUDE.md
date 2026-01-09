@@ -263,7 +263,7 @@ from src.features.timeframe import bars_in_period
 bars_24h = bars_in_period('24h')  # Works with any TF
 ```
 
-**Requirement**: Strategies must work on 5m, 15m, 30m, 1h, 4h, 1d without code changes.
+**Requirement**: Strategies must work on 15m, 30m, 1h, 2h without code changes.
 
 ### Rule #4: Hyperliquid is Source of Truth
 - Exchange state is canonical for positions, orders, balance
@@ -438,7 +438,7 @@ sixbtc/
 ┌────────────────────────────────────────────────────────────────┐
 │ PHASE 3: BACKTESTING                                           │
 ├────────────────────────────────────────────────────────────────┤
-│ Backtester daemon: training (730d) + holdout (30d)             │
+│ Backtester daemon: in-sample (120d) + out-of-sample (30d)      │
 │ Score calculation (unified formula)                            │
 │ If score >= min_score:                                         │
 │   - Shuffle test (cached by base_code_hash)                    │
@@ -694,18 +694,16 @@ pytest tests/ -v
 ## 📊 MULTI-TIMEFRAME COVERAGE
 
 ### Requirement
-Strategies must be generated and tested across ALL Hyperliquid-supported timeframes:
-- **5m** - Ultra-short scalping
+Strategies must be generated and tested across ALL configured timeframes:
 - **15m** - Short-term momentum
 - **30m** - Intraday swings
 - **1h** - Short-term trends
-- **4h** - Medium-term positions
-- **1d** - Long-term directional
+- **2h** - Medium-term swing trades
 
 ### Implementation
 ```python
-# Strategy generation distributes across timeframes
-TIMEFRAMES = ['5m', '15m', '30m', '1h', '4h', '1d']
+# Strategy generation distributes across timeframes (from config)
+TIMEFRAMES = ['15m', '30m', '1h', '2h']
 
 # Each generation cycle creates strategies for ALL timeframes
 for tf in TIMEFRAMES:
@@ -782,7 +780,7 @@ After testing phase passes:
 
 ### 5. Lack of Diversification
 ❌ **Wrong**: Deploy 10 momentum strategies in trending market
-✅ **Right**: Mix types (MOM, REV, TRN) and timeframes (5m to 1d)
+✅ **Right**: Mix types (MOM, REV, TRN) and timeframes (15m to 2h)
 
 ---
 

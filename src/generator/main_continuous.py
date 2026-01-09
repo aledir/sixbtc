@@ -359,6 +359,9 @@ class ContinuousGeneratorProcess:
                     )
                     return (False, 0, "daily_limit")
 
+            # Track generation time
+            gen_start = time.time()
+
             # Generate strategies with capacity limit
             results = self.strategy_builder.generate_strategies(
                 strategy_type=strategy_type,
@@ -367,6 +370,9 @@ class ContinuousGeneratorProcess:
                 patterns=selected_patterns,
                 max_strategies=remaining_capacity
             )
+
+            # Calculate generation duration
+            gen_duration_ms = int((time.time() - gen_start) * 1000)
 
             if not results:
                 # This is normal when patterns are filtered out (e.g., insufficient coins)
@@ -387,7 +393,20 @@ class ContinuousGeneratorProcess:
             base_code_hash = getattr(results[0], 'base_code_hash', None)
 
             for result in results:
+                # Determine generation_mode
+                generation_mode = getattr(result, 'generation_mode', None)
+                if generation_mode is None:
+                    generation_mode = "pattern" if use_patterns else "ai_free"
+
                 if not result.validation_passed:
+                    # Track generation failure
+                    from src.database.event_tracker import EventTracker
+                    EventTracker.generation_failed(
+                        strategy_type=strategy_type,
+                        timeframe=result.timeframe,
+                        generation_mode=generation_mode,
+                        error='; '.join(result.validation_errors) if result.validation_errors else None
+                    )
                     continue
 
                 # Use different prefix for pattern-based vs template-based strategies
@@ -405,7 +424,10 @@ class ContinuousGeneratorProcess:
                     template_id=result.template_id,
                     parameters=result.parameters,
                     pattern_coins=getattr(result, 'pattern_coins', None),
-                    base_code_hash=getattr(result, 'base_code_hash', base_code_hash)
+                    base_code_hash=getattr(result, 'base_code_hash', base_code_hash),
+                    generation_mode=generation_mode,
+                    duration_ms=gen_duration_ms,
+                    leverage=getattr(result, 'leverage', None)
                 )
                 saved_count += 1
 
@@ -420,6 +442,29 @@ class ContinuousGeneratorProcess:
             logger.error(f"Generation error: {e}", exc_info=True)
             return (False, 0, str(e))
 
+    def _detect_direction(self, code: str) -> str:
+        """
+        Detect trading direction from strategy code.
+
+        Analyzes Signal() calls to determine if strategy trades:
+        - LONG: Only long positions
+        - SHORT: Only short positions
+        - BIDIR: Both directions
+
+        Returns:
+            Direction string: "LONG", "SHORT", or "BIDIR"
+        """
+        code_lower = code.lower()
+        has_long = "direction='long'" in code_lower or 'direction="long"' in code_lower
+        has_short = "direction='short'" in code_lower or 'direction="short"' in code_lower
+
+        if has_long and has_short:
+            return "BIDIR"
+        elif has_short:
+            return "SHORT"
+        else:
+            return "LONG"  # Default to LONG if unclear
+
     def _save_to_database(
         self,
         name: str,
@@ -432,13 +477,19 @@ class ContinuousGeneratorProcess:
         template_id: Optional[str] = None,
         parameters: Optional[dict] = None,
         pattern_coins: Optional[list] = None,
-        base_code_hash: Optional[str] = None
+        base_code_hash: Optional[str] = None,
+        generation_mode: Optional[str] = None,
+        duration_ms: Optional[int] = None,
+        leverage: Optional[int] = None
     ):
         """Save generated strategy to database"""
         try:
             # Convert empty strings to None for UUID fields
             if template_id == '' or template_id is None:
                 template_id = None
+
+            # Detect direction from code
+            direction = self._detect_direction(code)
 
             with get_session() as session:
                 strategy = Strategy(
@@ -453,7 +504,8 @@ class ContinuousGeneratorProcess:
                     template_id=template_id,
                     parameters=parameters,
                     pattern_coins=pattern_coins,
-                    base_code_hash=base_code_hash
+                    base_code_hash=base_code_hash,
+                    generation_mode=generation_mode
                 )
                 session.add(strategy)
                 session.flush()  # Get ID before commit
@@ -467,7 +519,11 @@ class ContinuousGeneratorProcess:
                     timeframe=timeframe,
                     ai_provider=ai_provider,
                     pattern_based=pattern_based,
-                    base_code_hash=base_code_hash
+                    base_code_hash=base_code_hash,
+                    generation_mode=generation_mode,
+                    direction=direction,
+                    duration_ms=duration_ms,
+                    leverage=leverage
                 )
 
             logger.debug(f"Saved strategy {name} to database")

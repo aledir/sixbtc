@@ -16,7 +16,7 @@ system:
 # ==============================================================================
 # GLOBAL TIMEFRAMES (used by downloader, generator, backtester, executor)
 # ==============================================================================
-timeframes: ['15m', '30m', '1h', '4h', '1d']
+timeframes: ['15m', '30m', '1h', '2h']
 
 # ==============================================================================
 # DIRECTORIES
@@ -261,38 +261,50 @@ backtesting:
   # AI: selects top N coins by volume from active trading pairs
   max_coins: 30
 
-  # Training/Holdout split (unified approach)
-  # Total period = training_days + holdout_days = 760 days
-  training_days: 730         # 24 months for training (multiple market cycles)
-  holdout_days: 30           # Last 30 days for validation (anti-overfitting + recency)
+  # In-sample/Out-of-sample split (unified approach)
+  # Total period = is_days + oos_days = 150 days
+  is_days: 120               # 4 months in-sample (rotation-based system, recent regimes)
+  oos_days: 30               # Last 30 days out-of-sample (anti-overfitting + recency)
   min_coverage_pct: 0.80     # 80% minimum data coverage required for coins
 
   # Minimum trades per timeframe (parallel arrays with timeframes config)
-  # timeframes: ['15m', '30m', '1h', '4h', '1d']
+  # timeframes: ['15m', '30m', '1h', '2h']
   min_trades:
-    training: [600, 400, 300, 160, 100]  # For 730d period
-    holdout:  [30,  20,  15,  8,  5]     # For 30d period
+    in_sample:    [240, 180, 120, 60]  # For 120d IS period: 15m, 30m, 1h, 2h
+    out_of_sample: [60,  45,  30, 15]  # For 30d OOS period
 
-  # Holdout validation thresholds
-  holdout:
-    max_degradation: 0.50    # Max 50% degradation from training to holdout
-    min_sharpe: 0.0          # Holdout Sharpe must be positive
-    recency_weight: 0.60     # Weight for holdout score in final ranking
+  # Out-of-sample validation thresholds
+  out_of_sample:
+    max_degradation: 0.50    # Max 50% degradation from IS to OOS
+    min_sharpe: 0.0          # OOS Sharpe must be positive
+    recency_weight: 0.60     # Weight for OOS score in final ranking
 
-  # Multi-window validation (post-scoring, only for score >= min_score)
-  # Tests strategy on N non-overlapping time windows for consistency
-  multi_window:
-    enabled: true              # Enable multi-window validation
-    windows: 4                 # Number of validation windows (divides training period)
-    min_avg_sharpe: 0.2        # Avg Sharpe across windows must be >= 0.2
-    max_cv: 1.5                # Max coefficient of variation (std/avg) = 1.5
+  # Robustness validation (neighbor quality check)
+  # Verifies that parameter neighbors also pass min_sharpe threshold (not isolated peak)
+  # This approach checks if neighbors are "good enough" in absolute terms,
+  # rather than comparing to best (which penalizes strategies with very high best Sharpe)
+  robustness:
+    enabled: true              # Enable robustness validation
+    min_threshold: 0.50        # Minimum fraction of neighbors that must pass min_sharpe
+    # Example: if 8 neighbors, at least 4 must have sharpe >= min_sharpe (0.3)
+    # Old formula (removed): avg_neighbors / best - penalized high-performing strategies
+
+  # Walk-Forward Validation with FIXED parameters
+  # Runs AFTER shuffle test, BEFORE pool entry
+  # Tests if the best combo (params already embedded) performs consistently
+  # across 4 expanding time windows. Uses expectancy >= min_expectancy (0.002)
+  # as profitability criterion (more direct than Sharpe).
+  wfa_validation:
+    enabled: true
+    window_percentages: [0.25, 0.50, 0.75, 1.0]  # Expanding windows
+    min_profitable_windows: 4                     # All 4 windows must be profitable
 
   # Minimum thresholds (gate check - classifier does the real ranking)
   thresholds:
     min_sharpe: 0.3          # Minimum Sharpe ratio
     min_win_rate: 0.35       # 35% minimum win rate
     min_total_trades: 10     # Minimum trades for significance
-    min_expectancy: 0.0      # Must have positive expectancy
+    min_expectancy: 0.002    # 0.2% per trade minimum (covers fees + ensures profitability)
     max_drawdown: 0.50       # Max 50% drawdown (now correctly calculated)
 
   # NOTE: realistic_mode and max_concurrent_positions removed
@@ -313,12 +325,15 @@ trading:
 # ==============================================================================
 scorer:
   # Unified scoring weights (used for both backtest and live)
-  # Score = (0.45 x Expectancy) + (0.25 x Sharpe) + (0.15 x Consistency) + (0.15 x Drawdown)
+  # Score = weighted sum of 6 normalized components (0-100 each)
+  # All weights must sum to 1.0
   weights:
-    expectancy: 0.45  # Expectancy - most important metric
-    sharpe: 0.25      # Risk-adjusted return
-    consistency: 0.15 # Win rate
+    expectancy: 0.35  # Expectancy - most important metric
+    sharpe: 0.20      # Risk-adjusted return
+    win_rate: 0.10    # Win rate (trades won / total trades)
     drawdown: 0.15    # Penalizes high drawdown (lower DD = higher score)
+    robustness: 0.10  # Parameter stability (neighbors perform similarly)
+    recency: 0.10     # Recent performance vs training (from holdout degradation)
 
 # ==============================================================================
 # ROTATOR (ACTIVE -> LIVE Deployment)
@@ -363,7 +378,7 @@ classification:
   score_weights:
     expectancy: 0.45
     sharpe: 0.25
-    consistency: 0.15
+    win_rate: 0.15
     drawdown: 0.15
 
   filter_thresholds:

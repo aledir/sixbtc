@@ -106,9 +106,28 @@ class EventTracker:
         timeframe: str,
         ai_provider: Optional[str] = None,
         pattern_based: bool = False,
-        base_code_hash: Optional[str] = None
+        base_code_hash: Optional[str] = None,
+        generation_mode: Optional[str] = None,
+        direction: Optional[str] = None,
+        duration_ms: Optional[int] = None,
+        leverage: Optional[int] = None
     ) -> bool:
-        """Emit event when a new strategy is generated."""
+        """
+        Emit event when a new strategy is generated.
+
+        Args:
+            strategy_id: Strategy UUID
+            strategy_name: Strategy name
+            strategy_type: Type (MOM, REV, TRN, BRE, VOL, SCA)
+            timeframe: Timeframe (5m, 15m, 1h, etc.)
+            ai_provider: AI provider name if AI-based
+            pattern_based: True if from pattern-discovery API
+            base_code_hash: Hash of base code before parameter embedding
+            generation_mode: Source type (pattern, ai_free, ai_assigned)
+            direction: Trading direction (LONG, SHORT, BIDIR)
+            duration_ms: Generation time in milliseconds
+            leverage: Leverage used (from coins table max_leverage)
+        """
         return EventTracker.emit(
             event_type="created",
             stage="generation",
@@ -116,10 +135,40 @@ class EventTracker:
             strategy_id=strategy_id,
             strategy_name=strategy_name,
             base_code_hash=base_code_hash,
+            duration_ms=duration_ms,
             strategy_type=strategy_type,
             timeframe=timeframe,
             ai_provider=ai_provider,
-            pattern_based=pattern_based
+            pattern_based=pattern_based,
+            generation_mode=generation_mode,
+            direction=direction,
+            leverage=leverage
+        )
+
+    @staticmethod
+    def generation_failed(
+        strategy_type: str,
+        timeframe: str,
+        generation_mode: str,
+        error: Optional[str] = None
+    ) -> bool:
+        """
+        Emit event when strategy generation fails validation (before DB save).
+
+        Args:
+            strategy_type: Type (MOM, REV, TRN, etc.)
+            timeframe: Timeframe
+            generation_mode: Source type (pattern, ai_free, ai_assigned)
+            error: Validation error message
+        """
+        return EventTracker.emit(
+            event_type="failed",
+            stage="generation",
+            status="failed",
+            strategy_type=strategy_type,
+            timeframe=timeframe,
+            generation_mode=generation_mode,
+            error=error
         )
 
     # =========================================================================
@@ -259,7 +308,8 @@ class EventTracker:
         consistency: float,
         drawdown: float,
         duration_ms: Optional[int] = None,
-        combinations_tested: Optional[int] = None
+        combinations_tested: Optional[int] = None,
+        base_code_hash: Optional[str] = None
     ) -> bool:
         """Emit event when strategy is scored after backtest."""
         return EventTracker.emit(
@@ -268,6 +318,7 @@ class EventTracker:
             status="completed",
             strategy_id=strategy_id,
             strategy_name=strategy_name,
+            base_code_hash=base_code_hash,
             score=score,
             sharpe=sharpe,
             win_rate=win_rate,
@@ -285,7 +336,8 @@ class EventTracker:
         score: float,
         threshold: float,
         duration_ms: Optional[int] = None,
-        combinations_tested: Optional[int] = None
+        combinations_tested: Optional[int] = None,
+        base_code_hash: Optional[str] = None
     ) -> bool:
         """Emit event when strategy is rejected due to low score."""
         return EventTracker.emit(
@@ -294,6 +346,7 @@ class EventTracker:
             status="failed",
             strategy_id=strategy_id,
             strategy_name=strategy_name,
+            base_code_hash=base_code_hash,
             score=score,
             threshold=threshold,
             reason="score_below_threshold",

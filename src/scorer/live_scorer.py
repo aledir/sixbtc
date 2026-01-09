@@ -5,7 +5,7 @@ Calculates performance metrics from live Trade records.
 Used for monitoring LIVE strategies and retirement decisions.
 
 Score Formula (unified):
-    Score = (0.45 x Expectancy) + (0.25 x Sharpe) + (0.15 x Consistency) + (0.15 x Drawdown)
+    Score = (0.45 x Expectancy) + (0.25 x Sharpe) + (0.15 x Win Rate) + (0.15 x Drawdown)
     Normalized to 0-100 scale
 """
 
@@ -50,7 +50,7 @@ class LiveScorer:
             self.weights = {
                 'expectancy': weights_config.get('expectancy', 0.45),
                 'sharpe': weights_config.get('sharpe', 0.25),
-                'consistency': weights_config.get('consistency', 0.15),
+                'win_rate': weights_config.get('win_rate', 0.15),
                 'drawdown': weights_config.get('drawdown', 0.15)
             }
 
@@ -241,7 +241,7 @@ class LiveScorer:
         """
         Calculate composite score using unified formula.
 
-        Score = (0.45 x Expectancy) + (0.25 x Sharpe) + (0.15 x Consistency) + (0.15 x Drawdown)
+        Score = (0.45 x Expectancy) + (0.25 x Sharpe) + (0.15 x Win Rate) + (0.15 x Drawdown)
         """
         # Normalize expectancy: typical range 0-10%
         expectancy_score = self._normalize(expectancy, 0, 0.10)
@@ -249,8 +249,8 @@ class LiveScorer:
         # Normalize Sharpe: typical range 0-3
         sharpe_score = self._normalize(sharpe, 0, 3.0)
 
-        # Consistency: use win_rate directly
-        consistency_score = win_rate
+        # Win rate: already 0-1
+        win_rate_score = win_rate
 
         # Drawdown: inverse normalized (lower DD = higher score)
         # max_allowed = 30%, DD >= 30% = 0 score
@@ -260,7 +260,7 @@ class LiveScorer:
         score = (
             self.weights['expectancy'] * expectancy_score +
             self.weights['sharpe'] * sharpe_score +
-            self.weights['consistency'] * consistency_score +
+            self.weights['win_rate'] * win_rate_score +
             self.weights['drawdown'] * drawdown_score
         )
 

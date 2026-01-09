@@ -64,7 +64,7 @@ def test_lifecycle():
         strategy_type = random.choice(strategy_types)
 
         # Random timeframe for diversity
-        timeframes = ['15m', '1h', '4h']
+        timeframes = ['15m', '30m', '1h', '2h']
         timeframe = random.choice(timeframes)
 
         console.print(f"  Generating [cyan]{strategy_type}[/cyan] strategy for [cyan]{timeframe}[/cyan]...")

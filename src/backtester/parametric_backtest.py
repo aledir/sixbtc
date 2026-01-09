@@ -294,7 +294,7 @@ def _calc_metrics(
 
     Args:
         bars_per_year: Number of bars per year for Sharpe annualization.
-            15m = 35040, 30m = 17520, 1h = 8760, 4h = 2190, 1d = 365
+            15m = 35040, 30m = 17520, 1h = 8760, 2h = 4380
 
     Returns:
         sharpe, max_drawdown, win_rate, expectancy, total_trades, total_return
@@ -424,8 +424,7 @@ class ParametricBacktester:
         '15m': 15,
         '30m': 30,
         '1h': 60,
-        '4h': 240,
-        '1d': 1440,
+        '2h': 120,
     }
 
     def __init__(self, config: dict):
@@ -437,20 +436,18 @@ class ParametricBacktester:
         """
         self.config = config
 
-        # Load settings
-        bt_config = config.get('backtesting', {})
-        self.initial_capital = bt_config.get('initial_capital', 10000)
-        self.max_positions = config.get('risk', {}).get('limits', {}).get(
-            'max_open_positions_per_subaccount', 10
-        )
+        # Load settings (crash if missing - CLAUDE.md Rule #3)
+        bt_config = config['backtesting']
+        self.initial_capital = bt_config['initial_capital']
+        self.max_positions = config['risk']['limits']['max_open_positions_per_subaccount']
 
-        hl_config = config.get('hyperliquid', {})
-        self.fee_rate = hl_config.get('fee_rate', 0.00045)
-        self.slippage = hl_config.get('slippage', 0.0005)
-        self.min_notional = hl_config['min_notional']  # Crash if missing (CLAUDE.md Rule #3)
+        hl_config = config['hyperliquid']  # Crash if missing (CLAUDE.md Rule #3)
+        self.fee_rate = hl_config['fee_rate']
+        self.slippage = hl_config['slippage']
+        self.min_notional = hl_config['min_notional']
 
-        risk_config = config.get('risk', {}).get('fixed_fractional', {})
-        self.risk_pct = risk_config.get('risk_per_trade_pct', 0.02)
+        risk_config = config['risk']['fixed_fractional']  # Crash if missing
+        self.risk_pct = risk_config['risk_per_trade_pct']
 
         # Parameter space (can be overridden)
         self.parameter_space = self.DEFAULT_PARAMETER_SPACE.copy()
@@ -460,7 +457,7 @@ class ParametricBacktester:
         self.score_weights = {
             'edge': class_config.get('edge', 0.50),
             'sharpe': class_config.get('sharpe', 0.25),
-            'consistency': class_config.get('consistency', 0.15),
+            'win_rate': class_config.get('win_rate', 0.15),
             'stability': class_config.get('stability', 0.10),
         }
 
@@ -479,8 +476,7 @@ class ParametricBacktester:
             '15m': 35040,   # 4 bars/hour * 24 * 365
             '30m': 17520,   # 2 bars/hour * 24 * 365
             '1h': 8760,     # 1 bar/hour * 24 * 365
-            '4h': 2190,     # 0.25 bars/hour * 24 * 365
-            '1d': 365,      # 1 bar/day * 365
+            '2h': 4380,     # 0.5 bars/hour * 24 * 365
         }
         self.bars_per_year = float(tf_to_bars.get(timeframe, 35040))
 
@@ -546,8 +542,8 @@ class ParametricBacktester:
         # Normalize sharpe
         sharpe_norm = min(max(result.sharpe / 3.0, 0), 1)  # 0-3 range
 
-        # Win rate is already normalized
-        consistency = result.win_rate
+        # Win rate is already normalized (0-1)
+        win_rate_score = result.win_rate
 
         # Stability (inverse of drawdown)
         stability = 1.0 - result.max_drawdown
@@ -555,7 +551,7 @@ class ParametricBacktester:
         score = (
             self.score_weights['edge'] * edge_norm +
             self.score_weights['sharpe'] * sharpe_norm +
-            self.score_weights['consistency'] * consistency +
+            self.score_weights['win_rate'] * win_rate_score +
             self.score_weights['stability'] * stability
         )
 

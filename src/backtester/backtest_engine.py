@@ -49,7 +49,8 @@ def _simulate_portfolio_numba(
     max_positions: int,
     initial_capital: float,
     fee_rate: float,
-    slippage: float
+    slippage: float,
+    breakeven_buffer: float
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
            np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
     """
@@ -144,17 +145,23 @@ def _simulate_portfolio_numba(
                         pos_high_water[j] = current_price
                 continue
 
-            # Update trailing SL
+            # Update trailing SL with breakeven buffer floor/ceiling (matches live executor)
             if direction == 1:  # long
                 if current_high > pos_high_water[j]:
                     pos_high_water[j] = current_high
-                new_sl = pos_high_water[j] * (1.0 - pos_trailing_pct[j])
+                theoretical_sl = pos_high_water[j] * (1.0 - pos_trailing_pct[j])
+                # Floor at entry + buffer to ensure minimum profit (covers fees)
+                floor_price = pos_entry_price[j] * (1.0 + breakeven_buffer)
+                new_sl = max(theoretical_sl, floor_price)
                 if new_sl > pos_sl[j]:
                     pos_sl[j] = new_sl
             else:  # short
                 if current_price < pos_high_water[j]:
                     pos_high_water[j] = current_price
-                new_sl = pos_high_water[j] * (1.0 + pos_trailing_pct[j])
+                theoretical_sl = pos_high_water[j] * (1.0 + pos_trailing_pct[j])
+                # Ceiling at entry - buffer to ensure minimum profit
+                ceiling_price = pos_entry_price[j] * (1.0 - breakeven_buffer)
+                new_sl = min(theoretical_sl, ceiling_price)
                 if new_sl < pos_sl[j]:
                     pos_sl[j] = new_sl
 
@@ -350,6 +357,45 @@ def _simulate_portfolio_numba(
             trade_leverage, trade_exit_reason, n_trades)
 
 
+def _calculate_atr_at_bar(data: pd.DataFrame, bar_idx: int, period: int = 14) -> float:
+    """
+    Calculate ATR at a specific bar using lookback only (no future data).
+
+    Args:
+        data: DataFrame with 'high', 'low', 'close' columns
+        bar_idx: Index of the bar to calculate ATR for
+        period: ATR period (default 14)
+
+    Returns:
+        ATR value at the specified bar, or 0.0 if insufficient data
+    """
+    if bar_idx < period:
+        return 0.0
+
+    # Use only data up to and including bar_idx
+    df = data.iloc[max(0, bar_idx - period):bar_idx + 1]
+
+    if len(df) < 2:
+        return 0.0
+
+    high = df['high']
+    low = df['low']
+    close_prev = df['close'].shift(1)
+
+    # True Range components
+    tr1 = high - low
+    tr2 = abs(high - close_prev)
+    tr3 = abs(low - close_prev)
+
+    # True Range is max of the three
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    # ATR is EMA of True Range
+    atr = tr.ewm(span=period, adjust=False).mean().iloc[-1]
+
+    return float(atr) if not pd.isna(atr) else 0.0
+
+
 def sanitize_float(value: float, default: float = 0.0) -> float:
     """
     Sanitize float values for JSON storage.
@@ -383,12 +429,14 @@ class BacktestEngine:
             self.fee_rate = self.config.get('hyperliquid.fee_rate')
             self.slippage = self.config.get('hyperliquid.slippage')
             self.initial_capital = self.config.get('backtesting.initial_capital')
+            self.breakeven_buffer = self.config.get('risk.trailing.breakeven_buffer_pct')
             risk_config = self.config._raw_config
         else:
             # Raw dict - navigate manually
             self.fee_rate = self.config.get('hyperliquid', {}).get('fee_rate', 0.0004)
             self.slippage = self.config.get('hyperliquid', {}).get('slippage', 0.0002)
             self.initial_capital = self.config.get('backtesting', {}).get('initial_capital', 10000)
+            self.breakeven_buffer = self.config.get('risk', {}).get('trailing', {}).get('breakeven_buffer_pct', 0.002)
             risk_config = self.config
 
         # Use the same RiskManager as live executor for consistency
@@ -554,7 +602,8 @@ class BacktestEngine:
             max_positions,
             self.initial_capital,
             self.fee_rate,
-            self.slippage
+            self.slippage,
+            self.breakeven_buffer
         )
         _t_simulation = time.perf_counter() - _t0
 
@@ -760,7 +809,8 @@ class BacktestEngine:
         self,
         strategy: StrategyCore,
         data: Dict[str, pd.DataFrame],
-        max_positions: Optional[int] = None
+        max_positions: Optional[int] = None,
+        timeframe: Optional[str] = None
     ) -> Dict:
         """
         Original Python implementation of backtest (kept for reference/debugging).
@@ -1144,7 +1194,7 @@ class BacktestEngine:
         indices = [set(df.index) for df in indexed_data.values()]
         common_idx = sorted(set.intersection(*indices))
 
-        # Minimum common data points - adaptive for holdout periods
+        # Minimum common data points - adaptive for OOS periods
         # 20 bars minimum allows for warmup + some signal generation
         min_common_bars = 20
         if len(common_idx) < min_common_bars:
@@ -1244,9 +1294,9 @@ class BacktestEngine:
                     # trades_per_year = total_trades / (n_bars / bars_per_year)
                     if timeframe:
                         bars_per_year = {
-                            '1d': 365, '4h': 2190, '1h': 8760,
-                            '30m': 17520, '15m': 35040, '5m': 105120
-                        }.get(timeframe, 365)
+                            '2h': 4380, '1h': 8760, '30m': 17520,
+                            '15m': 35040, '5m': 105120
+                        }.get(timeframe, 35040)
                     else:
                         bars_per_year = 365
 
@@ -1255,8 +1305,8 @@ class BacktestEngine:
 
                     # Sharpe = mean / std * sqrt(trades_per_year)
                     # Cap annualization factor to avoid inflation
-                    # Max sqrt(250) ~= 15.8 (reasonable for daily trading)
-                    annualization = np.sqrt(min(trades_per_year, 250))
+                    # Max sqrt(365) ~= 19.1 (crypto trades 365 days/year)
+                    annualization = np.sqrt(min(trades_per_year, 365))
                     sharpe = mean_trade_return / std_trade_return * annualization
                 else:
                     sharpe = 0.0
@@ -1343,6 +1393,16 @@ class BacktestEngine:
         leverage = getattr(strategy, 'leverage', 1)
         exit_after_bars = getattr(strategy, 'exit_after_bars', 20)
 
+        # Read trailing stop attributes
+        sl_type = getattr(strategy, 'sl_type', StopLossType.PERCENTAGE)
+        trailing_stop_pct = getattr(strategy, 'trailing_stop_pct', None)
+        trailing_activation_pct = getattr(strategy, 'trailing_activation_pct', None)
+
+        # Read ATR attributes (for StopLossType.ATR)
+        atr_stop_multiplier = getattr(strategy, 'atr_stop_multiplier', 2.0)
+        atr_take_multiplier = getattr(strategy, 'atr_take_multiplier', 3.0)
+        atr_period = getattr(strategy, 'atr_period', 14)
+
         # Validate signal column exists
         if signal_column not in df.columns:
             raise ValueError(
@@ -1354,7 +1414,7 @@ class BacktestEngine:
         entry_signal = df[signal_column].values.astype(bool)
 
         # Apply warmup - adaptive to ensure signals are possible
-        # For short data (holdout ~30 bars), reduce warmup to leave room for signals
+        # For short data (OOS ~30 bars), reduce warmup to leave room for signals
         # Minimum 10 bars after warmup for signal generation
         min_signal_bars = 10
         warmup_bars = min(100, max(20, len(entry_signal) - min_signal_bars))
@@ -1367,26 +1427,115 @@ class BacktestEngine:
         # Get entry indices for vectorized operations
         entry_indices = np.where(entries_arr)[0]
 
-        # Fill arrays for all entries (same params for all)
-        sl_pcts_arr[entry_indices] = sl_pct
-        tp_pcts_arr[entry_indices] = tp_pct
-
-        # Position sizing: risk_pct / sl_pct, capped at 1.0
+        # Calculate SL/TP percentages based on sl_type
         risk_pct = self.risk_manager.risk_per_trade_pct
-        position_size = min(risk_pct / sl_pct, 1.0)
-        sizes_arr[entry_indices] = position_size
 
-        # Build metadata dict for all entries (same params)
+        if sl_type == StopLossType.ATR:
+            # ATR-based: calculate effective SL/TP % per entry bar
+            # Check if strategy pre-calculated ATR column
+            has_atr_column = 'atr' in df.columns
+
+            for entry_idx in entry_indices:
+                entry_price = df['close'].iloc[entry_idx]
+
+                # Get ATR value (pre-calculated or on-the-fly)
+                if has_atr_column:
+                    atr_val = df['atr'].iloc[entry_idx]
+                    if pd.isna(atr_val) or atr_val <= 0:
+                        atr_val = _calculate_atr_at_bar(df, entry_idx, atr_period)
+                else:
+                    atr_val = _calculate_atr_at_bar(df, entry_idx, atr_period)
+
+                # Convert ATR to percentage of entry price
+                if atr_val > 0 and entry_price > 0:
+                    effective_sl_pct = (atr_val * atr_stop_multiplier) / entry_price
+                    effective_tp_pct = (atr_val * atr_take_multiplier) / entry_price
+                else:
+                    # Fallback to default percentages if ATR unavailable
+                    effective_sl_pct = sl_pct if sl_pct else 0.02
+                    effective_tp_pct = tp_pct if tp_pct else 0.03
+
+                sl_pcts_arr[entry_idx] = effective_sl_pct
+                tp_pcts_arr[entry_idx] = effective_tp_pct
+
+                # Position sizing for this entry
+                # Divide by leverage to match live executor risk calculation
+                # Kernel does: notional = margin * leverage, so we pre-divide to keep risk accurate
+                effective_leverage = max(leverage, 1)
+                position_size = min(risk_pct / (effective_sl_pct * effective_leverage), 1.0) if effective_sl_pct > 0 else 0.1
+                sizes_arr[entry_idx] = position_size
+
+        elif sl_type == StopLossType.TRAILING:
+            # Trailing: use trailing_stop_pct as initial SL distance
+            effective_sl_pct = trailing_stop_pct if trailing_stop_pct else 0.02
+            sl_pcts_arr[entry_indices] = effective_sl_pct
+            tp_pcts_arr[entry_indices] = tp_pct
+
+            # Divide by leverage to match live executor risk calculation
+            effective_leverage = max(leverage, 1)
+            position_size = min(risk_pct / (effective_sl_pct * effective_leverage), 1.0) if effective_sl_pct > 0 else 0.1
+            sizes_arr[entry_indices] = position_size
+
+        else:
+            # PERCENTAGE (default): use fixed sl_pct/tp_pct
+            effective_sl_pct = sl_pct if sl_pct else 0.02
+            sl_pcts_arr[entry_indices] = effective_sl_pct
+            tp_pcts_arr[entry_indices] = tp_pct
+
+            # Divide by leverage to match live executor risk calculation
+            effective_leverage = max(leverage, 1)
+            position_size = min(risk_pct / (effective_sl_pct * effective_leverage), 1.0) if effective_sl_pct > 0 else 0.1
+            sizes_arr[entry_indices] = position_size
+
+        # Build metadata dict for all entries
         base_meta = {
             'direction': direction,
-            'sl_type': StopLossType.PERCENTAGE,
+            'sl_type': sl_type,
             'exit_type': ExitType.TIME_BASED,
             'exit_after_bars': exit_after_bars,
             'leverage': leverage,
         }
 
-        for i in entry_indices:
-            signal_meta[i] = base_meta.copy()
+        # Add trailing stop parameters if using trailing SL
+        if sl_type == StopLossType.TRAILING:
+            base_meta['trailing_stop_pct'] = trailing_stop_pct or 0.02
+            base_meta['trailing_activation_pct'] = trailing_activation_pct or 0.01
+
+        # Add ATR parameters if using ATR SL
+        if sl_type == StopLossType.ATR:
+            base_meta['atr_stop_multiplier'] = atr_stop_multiplier
+            base_meta['atr_take_multiplier'] = atr_take_multiplier
+
+        # For BIDIRECTIONAL strategies, determine direction per bar
+        # from long_signal/short_signal columns
+        if direction == 'both':
+            has_long_signal = 'long_signal' in df.columns
+            has_short_signal = 'short_signal' in df.columns
+            if has_long_signal and has_short_signal:
+                long_signals = df['long_signal'].values.astype(bool)
+                short_signals = df['short_signal'].values.astype(bool)
+            else:
+                # Fallback: treat 'both' as 'long' if no separate columns
+                logger.warning(
+                    "BIDIR strategy missing long_signal/short_signal columns, defaulting to long"
+                )
+                long_signals = entries_arr
+                short_signals = np.zeros_like(entries_arr, dtype=bool)
+
+            for i in entry_indices:
+                meta = base_meta.copy()
+                # Determine direction from which signal triggered
+                if long_signals[i]:
+                    meta['direction'] = 'long'
+                elif short_signals[i]:
+                    meta['direction'] = 'short'
+                else:
+                    # Should not happen if entry_signal = long_signal | short_signal
+                    meta['direction'] = 'long'
+                signal_meta[i] = meta
+        else:
+            for i in entry_indices:
+                signal_meta[i] = base_meta.copy()
 
         # Convert to pandas Series for compatibility
         entries = pd.Series(entries_arr, index=data.index)

@@ -63,20 +63,12 @@ PARAM_SPACE: Dict[str, Dict[str, List]] = {
         'exit_bars': [0, 4, 8, 16, 32],
     },
 
-    # 4h: Medium-term positions
-    # SL 4-15%, TP 0-30%, exit 0-64h
-    '4h': {
-        'sl_pct': [0.04, 0.06, 0.08, 0.10, 0.15],
-        'tp_pct': [0, 0.08, 0.12, 0.18, 0.25, 0.30],
-        'exit_bars': [0, 2, 4, 8, 16],
-    },
-
-    # 1d: Long-term directional
-    # SL 6-15%, TP 0-30%, exit 0-5d
-    '1d': {
-        'sl_pct': [0.06, 0.08, 0.10, 0.12, 0.15],
-        'tp_pct': [0, 0.10, 0.15, 0.20, 0.25, 0.30],
-        'exit_bars': [0, 1, 2, 3, 5],
+    # 2h: Medium-term swing trades
+    # SL 3-10%, TP 0-25%, exit 0-48h
+    '2h': {
+        'sl_pct': [0.03, 0.04, 0.05, 0.07, 0.10],
+        'tp_pct': [0, 0.06, 0.08, 0.12, 0.18, 0.25],
+        'exit_bars': [0, 3, 6, 12, 24],
     },
 }
 
@@ -86,7 +78,7 @@ def get_param_space(timeframe: str) -> Dict[str, List]:
     Get parameter space for a timeframe.
 
     Args:
-        timeframe: Timeframe string ('5m', '15m', '30m', '1h', '4h', '1d')
+        timeframe: Timeframe string ('5m', '15m', '30m', '1h', '2h')
 
     Returns:
         Dict with 'sl_pct', 'tp_pct', 'exit_bars', 'leverage' lists

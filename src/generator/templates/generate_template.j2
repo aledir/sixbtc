@@ -277,12 +277,21 @@ class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
     # =========================================================================
     # STRATEGY PARAMETERS (read by backtester for vectorized execution)
     # =========================================================================
-{% if structure.entry_long %}
+{% if structure.entry_long and structure.entry_short %}
+    direction = 'both'
+{% elif structure.entry_long %}
     direction = 'long'
 {% else %}
     direction = 'short'
 {% endif %}
+{% if structure.trailing_stop %}
+    sl_type = StopLossType.TRAILING
+    sl_pct = {{ "{{ trailing_stop_pct }}" }}  # Initial SL distance (also used as trailing distance)
+    trailing_stop_pct = {{ "{{ trailing_stop_pct }}" }}
+    trailing_activation_pct = {{ "{{ trailing_activation_pct }}" }}
+{% else %}
     sl_pct = {{ "{{ sl_pct }}" }}
+{% endif %}
     tp_pct = {{ "{{ tp_pct }}" }}
     leverage = {{ "__LEVERAGE__" }}  # Will be replaced by system
 {% if structure.time_exit %}
@@ -293,7 +302,11 @@ class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
     signal_column = 'entry_signal'
 
     # Indicator columns added by calculate_indicators()
+{% if structure.entry_long and structure.entry_short %}
+    indicator_columns = ['atr', 'entry_signal', 'long_signal', 'short_signal']  # ADD YOUR INDICATOR NAMES HERE
+{% else %}
     indicator_columns = ['atr', 'entry_signal']  # ADD YOUR INDICATOR NAMES HERE
+{% endif %}
 
     def __init__(self, params: dict = None):
         super().__init__(params)
@@ -323,17 +336,28 @@ class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
         # Must be a boolean column: True = entry signal, False = no signal
         # ============================================
 
-{% if structure.entry_long %}
+{% if structure.entry_long and structure.entry_short %}
+        # BIDIRECTIONAL: Both long AND short signals
+        long_condition = False  # YOUR VECTORIZED LONG ENTRY LOGIC
+        short_condition = False  # YOUR VECTORIZED SHORT ENTRY LOGIC
+        # Example: long_condition = df['rsi'] < 30
+        # Example: short_condition = df['rsi'] > 70
+
+        # Store both conditions for generate_signal() to use
+        df['long_signal'] = long_condition
+        df['short_signal'] = short_condition
+        df['entry_signal'] = long_condition | short_condition  # Either triggers entry
+{% elif structure.entry_long %}
         # Long entry condition (vectorized)
         entry_condition = False  # YOUR VECTORIZED LONG ENTRY LOGIC using {{ "{{ entry_threshold }}" }}
         # Example: entry_condition = df['rsi'] < {{ "{{ entry_threshold }}" }}
+        df['entry_signal'] = entry_condition
 {% else %}
         # Short entry condition (vectorized)
         entry_condition = False  # YOUR VECTORIZED SHORT ENTRY LOGIC using {{ "{{ entry_threshold }}" }}
         # Example: entry_condition = df['rsi'] > {{ "{{ entry_threshold }}" }}
-{% endif %}
-
         df['entry_signal'] = entry_condition
+{% endif %}
 
         return df
 
@@ -354,11 +378,29 @@ class Strategy_{{ strategy_type }}_{{ template_id }}(StrategyCore):
         if not df['entry_signal'].iloc[-1]:
             return None
 
+{% if structure.entry_long and structure.entry_short %}
+        # BIDIRECTIONAL: Determine direction from active signal
+        if df['long_signal'].iloc[-1]:
+            signal_direction = 'long'
+        elif df['short_signal'].iloc[-1]:
+            signal_direction = 'short'
+        else:
+            return None
+{% else %}
+        signal_direction = self.direction
+{% endif %}
+
         return Signal(
-            direction=self.direction,
+            direction=signal_direction,
             leverage=self.leverage,
+{% if structure.trailing_stop %}
+            sl_type=StopLossType.TRAILING,
+            trailing_stop_pct=self.trailing_stop_pct,
+            trailing_activation_pct=self.trailing_activation_pct,
+{% else %}
             sl_type=StopLossType.PERCENTAGE,
             sl_pct=self.sl_pct,
+{% endif %}
 {% if structure.take_profit %}
             tp_type=TakeProfitType.PERCENTAGE,
             tp_pct=self.tp_pct,
@@ -380,7 +422,12 @@ Be CREATIVE with the values - don't just copy the examples below!
 {
   "indicator_period": {"type": "int", "values": [YOUR_CHOICES]},
   "entry_threshold": {"type": "int_or_float", "values": [YOUR_CHOICES]},
+{% if structure.trailing_stop %}
+  "trailing_stop_pct": {"type": "float", "values": [0.02, 0.03, 0.04, 0.05]},
+  "trailing_activation_pct": {"type": "float", "values": [0.01, 0.015, 0.02]},
+{% else %}
   "sl_pct": {"type": "float", "values": [0.02, 0.03, 0.04, 0.05]},
+{% endif %}
   "tp_pct": {"type": "float", "values": [0.03, 0.04, 0.05, 0.06]}{% if structure.time_exit %},
   "exit_bars": {"type": "int", "values": [YOUR_CHOICES]}{% endif %}
 
@@ -390,7 +437,12 @@ Be CREATIVE with the values - don't just copy the examples below!
 GUIDELINES for parameter values:
 - indicator_period: typically 5-50 for oscillators, 10-200 for MAs
 - entry_threshold: depends on indicator (RSI: 20-40, Z-score: 1.5-3.0, etc.)
+{% if structure.trailing_stop %}
+- trailing_stop_pct: 0.02-0.05 (2%-5% trailing distance from high water mark)
+- trailing_activation_pct: 0.01-0.02 (1%-2% profit before trailing activates)
+{% else %}
 - sl_pct: 0.02-0.05 (2%-5% stop loss)
+{% endif %}
 - tp_pct: 0.03-0.08 (3%-8% take profit)
 {% if structure.time_exit %}
 - exit_bars: MUST be appropriate for {{ timeframe }} timeframe:

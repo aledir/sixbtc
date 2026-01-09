@@ -1,21 +1,24 @@
 """
-Backtest Scorer - Unified Score Formula
+Backtest Scorer - Unified Score Formula (6 Components)
 
 Calculates composite score for strategy ranking based on:
-- Expectancy (edge per trade)
-- Sharpe ratio
-- Consistency (win rate)
-- Drawdown penalty
+- Expectancy (edge per trade) - 35%
+- Sharpe ratio - 20%
+- Win rate - 10%
+- Drawdown penalty - 15%
+- Robustness (parameter stability) - 10%
+- Recency (OOS vs IS) - 10%
 
-Score Formula (Base Score from TRAINING metrics):
-    Base Score = (0.45 x Expectancy) + (0.25 x Sharpe) + (0.15 x Consistency) + (0.15 x Drawdown)
-    Normalized to 0-100 scale
+Score Formula:
+    Score = 0.35 * expectancy_norm +
+            0.20 * sharpe_norm +
+            0.10 * win_rate_norm +
+            0.15 * drawdown_norm +
+            0.10 * robustness_norm +
+            0.10 * recency_norm
 
-Recency Bonus (from holdout degradation):
-    Bonus = -degradation x 50, capped at [-15, +15]
-    Final Score = Base Score + Recency Bonus (0-100)
-
-Strategies performing better in recent 30 days (holdout) get a bonus.
+All components normalized to 0-100, final score naturally in 0-100 range.
+No clamping needed - properly designed formula.
 """
 
 from typing import Dict, Optional
@@ -60,7 +63,7 @@ class BacktestScorer:
             metrics: Dictionary containing:
                 - expectancy: Edge per trade (as decimal, e.g., 0.05 = 5%)
                 - sharpe_ratio: Sharpe ratio
-                - consistency: Win rate (0-1)
+                - win_rate: Win rate (0-1)
                 - max_drawdown: Maximum drawdown (0-1, lower=better)
 
         Returns:
@@ -69,67 +72,90 @@ class BacktestScorer:
         # Extract with guards against None values
         expectancy = metrics.get('expectancy', 0) or 0.0
         sharpe = metrics.get('sharpe_ratio', 0) or 0.0
-        consistency = metrics.get('consistency', 0) or 0.0
+        win_rate = metrics.get('win_rate', 0) or 0.0
         max_drawdown = metrics.get('max_drawdown', 0) or 0.0
 
         # Normalize each metric to 0-1 scale
         expectancy_score = self._normalize_expectancy(expectancy)
         sharpe_score = self._normalize_sharpe(sharpe)
-        consistency_score = consistency  # Already 0-1
+        win_rate_score = win_rate  # Already 0-1
         drawdown_score = self._normalize_drawdown(max_drawdown)
 
         # Weighted sum (unified formula)
         score = (
             self.weights['expectancy'] * expectancy_score +
             self.weights['sharpe'] * sharpe_score +
-            self.weights['consistency'] * consistency_score +
+            self.weights['win_rate'] * win_rate_score +
             self.weights['drawdown'] * drawdown_score
         )
 
         # Scale to 0-100
         return min(max(score * 100, 0), 100)
 
-    def score_from_backtest_result(self, backtest_result, degradation: float = 0.0) -> float:
+    def score_from_backtest_result(
+        self,
+        backtest_result,
+        degradation: float = 0.0,
+        robustness_score: float = 0.5
+    ) -> float:
         """
-        Calculate score from BacktestResult model.
+        Calculate score from BacktestResult model using 6-component formula.
 
-        Uses TRAINING metrics (statistically robust from 730 days) + recency bonus
-        from holdout degradation.
+        Uses IN-SAMPLE metrics (statistically robust from IS period) + robustness
+        (parameter stability) + recency (OOS performance).
 
         Args:
-            backtest_result: BacktestResult model instance (must be training period)
-            degradation: (training_score - holdout_score) / training_score
-                         Negative = holdout better (bonus), Positive = holdout worse (penalty)
+            backtest_result: BacktestResult model instance (must be in-sample period)
+            degradation: (is_sharpe - oos_sharpe) / is_sharpe
+                         Negative = OOS better, Positive = OOS worse
+                         Range typically [-0.5, +0.5]
+            robustness_score: Parameter stability score (0-1)
+                              High = neighbors perform similarly to best
+                              Default 0.5 = neutral
 
         Returns:
-            Final score (0-100 scale) with recency bonus applied
+            Final score (0-100 scale)
 
         Raises:
             ValueError: If backtest_result is missing required metrics
         """
         if backtest_result.sharpe_ratio is None:
             raise ValueError(
-                f"BacktestResult {backtest_result.id} missing training metrics. "
+                f"BacktestResult {backtest_result.id} missing IS metrics. "
                 f"Re-run backtest to populate fields."
             )
 
-        # 1. Base score from TRAINING metrics (statistically robust)
-        metrics = {
-            'expectancy': backtest_result.expectancy or 0.0,
-            'sharpe_ratio': backtest_result.sharpe_ratio or 0.0,
-            'consistency': backtest_result.win_rate or 0.0,
-            'max_drawdown': backtest_result.max_drawdown or 0.0,
-        }
-        base_score = self.score(metrics)
+        # Extract in-sample metrics
+        expectancy = backtest_result.expectancy or 0.0
+        sharpe = backtest_result.sharpe_ratio or 0.0
+        win_rate = backtest_result.win_rate or 0.0
+        max_drawdown = backtest_result.max_drawdown or 0.0
 
-        # 2. Recency bonus from degradation (±15 max)
-        # Negative degradation = holdout performed better → positive bonus
-        # Positive degradation = holdout performed worse → negative penalty
-        recency_bonus = -degradation * 50
-        recency_bonus = max(-15, min(15, recency_bonus))
+        # Normalize all 6 components to 0-1 scale
+        expectancy_norm = self._normalize_expectancy(expectancy)
+        sharpe_norm = self._normalize_sharpe(sharpe)
+        win_rate_norm = win_rate  # Already 0-1
+        drawdown_norm = self._normalize_drawdown(max_drawdown)
+        robustness_norm = min(1.0, max(0.0, robustness_score))  # Already 0-1
 
-        # 3. Final score (0-100)
-        final_score = max(0, min(100, base_score + recency_bonus))
+        # Recency: degradation [-0.5, +0.5] → recency_norm [0, 1]
+        # -0.5 (OOS much better) → 1.0
+        # +0.5 (OOS much worse) → 0.0
+        recency_norm = 0.5 - degradation
+        recency_norm = min(1.0, max(0.0, recency_norm))
+
+        # 6-component weighted sum (each weight from config)
+        score = (
+            self.weights['expectancy'] * expectancy_norm +
+            self.weights['sharpe'] * sharpe_norm +
+            self.weights['win_rate'] * win_rate_norm +
+            self.weights['drawdown'] * drawdown_norm +
+            self.weights['robustness'] * robustness_norm +
+            self.weights['recency'] * recency_norm
+        )
+
+        # Scale to 0-100 (natural range, no clamping needed)
+        final_score = score * 100
 
         return final_score
 

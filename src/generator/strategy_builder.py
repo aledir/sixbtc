@@ -19,6 +19,7 @@ Logic: Patterns first, templates as fallback when no patterns available.
 """
 
 import ast
+import hashlib
 import re
 import uuid
 import random
@@ -267,6 +268,8 @@ class StrategyBuilder:
                     f"-> Strategy_{result.strategy_type}_{result.strategy_id}"
                 )
                 # Convert DirectGeneratedStrategy to GeneratedStrategy
+                # Calculate base_code_hash for metrics tracking
+                base_code_hash = hashlib.sha256(result.code.encode()).hexdigest()
                 return GeneratedStrategy(
                     code=result.code,
                     strategy_id=result.strategy_id,
@@ -279,7 +282,8 @@ class StrategyBuilder:
                     leverage=result.leverage,
                     pattern_id=result.pattern_id,
                     generation_mode="pattern",  # From pattern-discovery API
-                    pattern_coins=pattern_coins
+                    pattern_coins=pattern_coins,
+                    base_code_hash=base_code_hash
                 )
             elif mode == "direct":
                 # Direct-only mode requested but failed
@@ -378,6 +382,8 @@ class StrategyBuilder:
                     return None
                 validation_passed, errors = self._validate_code(code)
 
+            # Calculate base_code_hash for metrics tracking
+            base_code_hash = hashlib.sha256(code.encode()).hexdigest()
             return GeneratedStrategy(
                 code=code,
                 strategy_id=strategy_id,
@@ -390,7 +396,8 @@ class StrategyBuilder:
                 leverage=leverage,
                 pattern_id=pattern.id,
                 generation_mode="pattern",  # From pattern-discovery API (AI-wrapped)
-                pattern_coins=pattern_coins
+                pattern_coins=pattern_coins,
+                base_code_hash=base_code_hash
             )
 
         except Exception as e:
@@ -690,7 +697,7 @@ class StrategyBuilder:
         Returns:
             List of GeneratedStrategy objects (valid only, None excluded)
         """
-        timeframes = timeframes or ['15m', '30m', '1h', '4h', '1d']
+        timeframes = timeframes or self.config.get('timeframes', ['15m', '30m', '1h', '2h'])
         strategy_types = strategy_types or ['MOM', 'REV', 'TRN', 'BRE', 'VOL']
 
         strategies = []
@@ -858,7 +865,8 @@ class StrategyBuilder:
             generation_mode=generation_mode,
             template_id=ps.template_id,
             parameters=ps.parameters,
-            parameter_hash=ps.parameter_hash
+            parameter_hash=ps.parameter_hash,
+            base_code_hash=ps.base_code_hash
         )
 
     def generate_daily_batch(

@@ -26,7 +26,7 @@ class MultiWindowValidator:
     Validates strategy performance consistency across multiple time windows.
 
     Detects overfitting by checking if strategy performs consistently
-    across different market periods, not just the training window.
+    across different market periods, not just the in-sample window.
     """
 
     def __init__(self, config: dict):
@@ -45,9 +45,9 @@ class MultiWindowValidator:
         self.min_avg_sharpe = mw_config['min_avg_sharpe']
         self.max_cv = mw_config['max_cv']
 
-        # Training/holdout config for window sizing
-        self.training_days = config['backtesting']['training_days']
-        self.holdout_days = config['backtesting']['holdout_days']
+        # IS/OOS config for window sizing
+        self.is_days = config['backtesting']['is_days']
+        self.oos_days = config['backtesting']['oos_days']
         self.max_coins = config['backtesting']['max_coins']
 
         # Components
@@ -102,7 +102,7 @@ class MultiWindowValidator:
             period_desc = f"{start_offset_days}d-{start_offset_days - window_days}d ago"
 
             try:
-                # Load data for this window (no train/holdout split needed)
+                # Load data for this window (no IS/OOS split needed)
                 window_data = self.data_loader.load_multi_symbol(
                     symbols=pairs,
                     timeframe=timeframe,
@@ -198,17 +198,17 @@ class MultiWindowValidator:
         Instead of looking further back in time (which causes 0 symbols),
         we divide the SAME period used by the main backtest into N windows.
 
-        With 760d total (730 training + 30 holdout) and 4 windows:
-        - Each window = 190d
-        - Window 1: oldest (760d-570d ago)
-        - Window 4: most recent (190d-0d ago)
+        Example with 150d total (120 IS + 30 OOS) and 4 windows:
+        - Each window = 37.5d
+        - Window 1: oldest (150d-112.5d ago)
+        - Window 4: most recent (37.5d-0d ago)
 
         Returns:
             List of (start_offset_days, window_days) tuples
             - start_offset_days: days from today to START of window
             - window_days: duration of the window
         """
-        total_days = self.training_days + self.holdout_days
+        total_days = self.is_days + self.oos_days
         window_days = total_days // self.n_windows
 
         windows = []

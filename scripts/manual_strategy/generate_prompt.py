@@ -90,7 +90,7 @@ Every strategy must define:
    - Set as class attribute: leverage = N (1-10 recommended)
 
 4. TIMEFRAME
-   - Strategy should work on: 5m, 15m, 30m, 1h, 4h, 1d
+   - Strategy should work on: 15m, 30m, 1h, 2h
    - Use bars_in_period() for timeframe-agnostic calculations
 
 --------------------------------------------------------------------------------

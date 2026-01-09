@@ -410,10 +410,10 @@ def backtest(ctx, backtest_all, strategy, symbol, timeframe, lookback_days, work
                     strategy_instance = strategy_class()
                     metrics = engine.run_backtest(strategy_instance, data)
 
-                    # Check thresholds
-                    min_sharpe = config.get('backtesting.thresholds.min_sharpe', 1.0)
-                    min_win_rate = config.get('backtesting.thresholds.min_win_rate', 0.55)
-                    min_trades = config.get('backtesting.thresholds.min_total_trades', 100)
+                    # Check thresholds (no defaults - crash if config missing)
+                    min_sharpe = config.get_required('backtesting.thresholds.min_sharpe')
+                    min_win_rate = config.get_required('backtesting.thresholds.min_win_rate')
+                    min_trades = config.get_required('backtesting.thresholds.min_total_trades')
 
                     passed = (
                         metrics['sharpe_ratio'] >= min_sharpe and
