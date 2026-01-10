@@ -104,6 +104,9 @@ class MetricsCollector:
                 pool_stats = self._get_pool_stats(session)
                 pool_quality = self._get_pool_quality(session)
                 pool_by_source = self._get_pool_by_source(session)
+                is_stats = self._get_is_stats_24h(session, window_24h)
+                oos_stats = self._get_oos_stats_24h(session, window_24h)
+                score_stats = self._get_score_stats_24h(session, window_24h)
                 retest_stats = self._get_retest_stats_24h(session, window_24h)
                 live_stats = self._get_live_rotation_stats(session, window_24h)
 
@@ -117,20 +120,21 @@ class MetricsCollector:
                     session, queue_depths, throughput, funnel, pool_quality, status
                 )
 
-                # Log metrics in new format
+                # Log metrics in pipeline order (10 steps)
                 self._log_metrics(
                     status=status,
                     issue=issue,
                     queue_depths=queue_depths,
-                    generation_by_source=generation_by_source,
                     generator_stats=generator_stats,
                     ai_calls_today=ai_calls_today,
                     unused_patterns=unused_patterns,
                     funnel=funnel,
                     timing=timing,
-                    throughput=throughput,
                     failures=failures,
                     backpressure=backpressure,
+                    is_stats=is_stats,
+                    oos_stats=oos_stats,
+                    score_stats=score_stats,
                     pool_stats=pool_stats,
                     pool_quality=pool_quality,
                     pool_by_source=pool_by_source,
@@ -990,6 +994,96 @@ class MetricsCollector:
             'dd_avg': None,
         }
 
+    def _get_is_stats_24h(self, session, since: datetime) -> Dict[str, Any]:
+        """
+        Get IN-SAMPLE backtest statistics for last 24h.
+
+        Queries BacktestResult where period_type='in_sample' created in window.
+        """
+        result = session.execute(
+            select(
+                func.count(BacktestResult.id),
+                func.avg(BacktestResult.sharpe_ratio),
+                func.avg(BacktestResult.win_rate),
+                func.avg(BacktestResult.expectancy),
+                func.avg(BacktestResult.total_trades),
+            )
+            .where(and_(
+                BacktestResult.period_type == 'in_sample',
+                BacktestResult.created_at >= since
+            ))
+        ).first()
+
+        return {
+            'count': result[0] if result else 0,
+            'avg_sharpe': float(result[1]) if result and result[1] else None,
+            'avg_wr': float(result[2]) if result and result[2] else None,
+            'avg_exp': float(result[3]) if result and result[3] else None,
+            'avg_trades': float(result[4]) if result and result[4] else None,
+        }
+
+    def _get_oos_stats_24h(self, session, since: datetime) -> Dict[str, Any]:
+        """
+        Get OUT-OF-SAMPLE validation statistics for last 24h.
+
+        Queries BacktestResult for OOS metrics. Degradation is stored on IS row
+        as recency_ratio (1 - degradation).
+        """
+        # Count OOS results
+        oos_count = session.execute(
+            select(func.count(BacktestResult.id))
+            .where(and_(
+                BacktestResult.period_type == 'out_of_sample',
+                BacktestResult.created_at >= since
+            ))
+        ).scalar() or 0
+
+        # Get degradation stats from IS rows (recency_ratio stored there)
+        # recency_ratio = 1 - degradation, so degradation = 1 - recency_ratio
+        degrad_result = session.execute(
+            select(
+                func.avg(1 - BacktestResult.recency_ratio),
+                func.sum(func.cast(BacktestResult.recency_ratio >= 1.0, Integer)),
+                func.sum(func.cast(BacktestResult.recency_ratio < 1.0, Integer)),
+            )
+            .where(and_(
+                BacktestResult.period_type == 'in_sample',
+                BacktestResult.recency_ratio.isnot(None),
+                BacktestResult.created_at >= since
+            ))
+        ).first()
+
+        return {
+            'count': oos_count,
+            'avg_degradation': float(degrad_result[0]) if degrad_result and degrad_result[0] else None,
+            'oos_better': int(degrad_result[1]) if degrad_result and degrad_result[1] else 0,
+            'oos_worse': int(degrad_result[2]) if degrad_result and degrad_result[2] else 0,
+        }
+
+    def _get_score_stats_24h(self, session, since: datetime) -> Dict[str, Any]:
+        """Get score calculation statistics for last 24h."""
+        # Get score distribution from strategies that passed score check
+        result = session.execute(
+            text("""
+                SELECT
+                    MIN((event_data->>'score')::float) as min_score,
+                    MAX((event_data->>'score')::float) as max_score,
+                    AVG((event_data->>'score')::float) as avg_score
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'shuffle_test'
+                  AND event_type = 'started'
+                  AND event_data->>'score' IS NOT NULL
+            """),
+            {'since': since}
+        ).first()
+
+        return {
+            'min_score': float(result[0]) if result and result[0] else None,
+            'max_score': float(result[1]) if result and result[1] else None,
+            'avg_score': float(result[2]) if result and result[2] else None,
+        }
+
     def _get_retest_stats_24h(self, session, since: datetime) -> Dict[str, Any]:
         """Get re-backtest statistics for last 24h."""
         # A retest is when a strategy that was already ACTIVE gets backtested again.
@@ -1177,15 +1271,16 @@ class MetricsCollector:
         status: str,
         issue: Optional[str],
         queue_depths: Dict[str, int],
-        generation_by_source: Dict[str, int],
         generator_stats: Dict[str, Any],
         ai_calls_today: Dict[str, Any],
         unused_patterns: Dict[str, Any],
         funnel: Dict[str, Any],
         timing: Dict[str, Optional[float]],
-        throughput: Dict[str, int],
         failures: Dict[str, int],
         backpressure: Dict[str, Any],
+        is_stats: Dict[str, Any],
+        oos_stats: Dict[str, Any],
+        score_stats: Dict[str, Any],
         pool_stats: Dict[str, Any],
         pool_quality: Dict[str, Any],
         pool_by_source: Dict[str, int],
@@ -1193,14 +1288,9 @@ class MetricsCollector:
         live_stats: Dict[str, Any],
     ) -> None:
         """
-        Log metrics in verbose, self-explanatory format.
+        Log metrics following the 10-step pipeline structure.
 
-        Key design principles:
-        - Strategy types (pattern, ai_free, ai_assigned) are tracked separately
-        - TIMING section clearly distinguishes:
-          * parametric_full = time for ALL ~1015 combinations per base strategy
-          * multiwindow_test = time for ONE strategy on 4 windows
-        - Visual separators make backtester phases crystal clear
+        Each section shows: queue state -> 24h throughput -> timing -> failures
         """
 
         # Helper functions
@@ -1232,220 +1322,177 @@ class MetricsCollector:
         else:
             logger.info(f'=== PIPELINE STATUS: {status} ===')
 
-        # === GENERATOR 24H ===
+        # =====================================================================
+        # [1. GENERATOR]
+        # =====================================================================
         gen_total = generator_stats['total']
         gen_by_source = generator_stats['by_source']
         gen_by_type = generator_stats['by_type']
         gen_by_dir = generator_stats['by_direction']
         gen_by_tf = generator_stats['by_timeframe']
         gen_timing = generator_stats['timing_by_source']
-        gen_leverage = generator_stats['leverage']
 
-        logger.info(f'[GENERATOR 24H] total strategies generated in last 24 hours: {gen_total}')
-
-        # By source
         src_pattern = gen_by_source.get('pattern', 0)
         src_ai_free = gen_by_source.get('ai_free', 0)
         src_ai_assigned = gen_by_source.get('ai_assigned', 0)
-        logger.info(f'[GENERATOR 24H] by_source: pattern={src_pattern}, ai_free={src_ai_free}, ai_assigned={src_ai_assigned}')
+        logger.info(f'[1. GENERATOR] 24h: {gen_total} strategies (pattern={src_pattern}, ai_free={src_ai_free}, ai_assigned={src_ai_assigned})')
 
-        # By type (show all types that have count > 0)
         type_parts = [f'{t}={c}' for t, c in sorted(gen_by_type.items()) if c > 0]
         type_str = ', '.join(type_parts) if type_parts else '--'
-        logger.info(f'[GENERATOR 24H] by_type: {type_str}')
+        logger.info(f'[1. GENERATOR] by_type: {type_str}')
 
-        # By direction
         dir_long = gen_by_dir.get('LONG', 0)
         dir_short = gen_by_dir.get('SHORT', 0)
         dir_bidir = gen_by_dir.get('BIDIR', 0)
-        logger.info(f'[GENERATOR 24H] by_direction: LONG={dir_long}, SHORT={dir_short}, BIDIR={dir_bidir}')
+        logger.info(f'[1. GENERATOR] by_direction: LONG={dir_long}, SHORT={dir_short}, BIDIR={dir_bidir}')
 
-        # By timeframe (ordered by timeframe duration)
         tf_order = ['5m', '15m', '30m', '1h', '2h']
         tf_parts = [f'{tf}={gen_by_tf.get(tf, 0)}' for tf in tf_order if gen_by_tf.get(tf, 0) > 0]
-        # Add any other timeframes not in the standard order
         for tf, count in gen_by_tf.items():
             if tf not in tf_order and count > 0:
                 tf_parts.append(f'{tf}={count}')
         tf_str = ', '.join(tf_parts) if tf_parts else '--'
-        logger.info(f'[GENERATOR 24H] by_timeframe: {tf_str}')
+        logger.info(f'[1. GENERATOR] by_timeframe: {tf_str}')
 
-        # Leverage stats
-        lev_min = gen_leverage.get('min')
-        lev_max = gen_leverage.get('max')
-        lev_avg = gen_leverage.get('avg')
-        lev_str = f"min={lev_min or '--'}, max={lev_max or '--'}, avg={fmt_float(lev_avg)}"
-        logger.info(f'[GENERATOR 24H] leverage: {lev_str}')
-
-        # AI calls today
-        ai_count = ai_calls_today.get('count')
-        ai_max = ai_calls_today.get('max_calls')
-        ai_remaining = ai_calls_today.get('remaining')
-        if ai_count is not None and ai_max is not None:
-            logger.info(f'[GENERATOR 24H] ai_calls_today: {ai_count}/{ai_max} ({ai_remaining} remaining)')
-        else:
-            logger.info('[GENERATOR 24H] ai_calls_today: --')
-
-        # Timing by source
-        time_pattern = fmt_time(gen_timing.get('pattern'))
-        time_ai_free = fmt_time(gen_timing.get('ai_free'))
-        time_ai_assigned = fmt_time(gen_timing.get('ai_assigned'))
-        logger.info(f'[GENERATOR 24H] avg_time: pattern={time_pattern}, ai_free={time_ai_free}, ai_assigned={time_ai_assigned}')
-
-        # Generation failures (validation failed before DB save)
-        gen_failures = generator_stats.get('gen_failures', 0)
-        logger.info(f'[GENERATOR 24H] gen_validation_failed: {gen_failures}')
-
-        # Patterns (all time stats, not 24h)
         pat_unique = unused_patterns.get('unique_used', 0)
         pat_total = unused_patterns.get('total_available')
         pat_remaining = unused_patterns.get('remaining')
         pat_in_db = unused_patterns.get('strategies_in_db', 0)
         if pat_total is not None:
-            logger.info(f'[GENERATOR] patterns: {pat_unique}/{pat_total} used ({pat_remaining} remaining) -> {pat_in_db} strategies in DB')
+            logger.info(f'[1. GENERATOR] patterns: {pat_unique}/{pat_total} used ({pat_remaining} remaining) -> {pat_in_db} in DB')
         else:
-            logger.info(f'[GENERATOR] patterns: {pat_unique} used (total unknown) -> {pat_in_db} strategies in DB')
+            logger.info(f'[1. GENERATOR] patterns: {pat_unique} used -> {pat_in_db} in DB')
 
-        # === QUEUE ===
+        time_pattern = fmt_time(gen_timing.get('pattern'))
+        time_ai_free = fmt_time(gen_timing.get('ai_free'))
+        time_ai_assigned = fmt_time(gen_timing.get('ai_assigned'))
+        gen_failures = generator_stats.get('gen_failures', 0)
+        logger.info(f'[1. GENERATOR] timing: pattern={time_pattern}, ai_free={time_ai_free}, ai_assigned={time_ai_assigned} | failures: {gen_failures}')
+
+        # =====================================================================
+        # [2. VALIDATOR]
+        # =====================================================================
         g = queue_depths.get('GENERATED', 0)
-        v = queue_depths.get('VALIDATED', 0)
-        a = queue_depths.get('ACTIVE', 0)
-        lv = queue_depths.get('LIVE', 0)
-        r = queue_depths.get('RETIRED', 0)
-        # Calculate failed from events (DB count is always 0 because failed strategies are deleted)
-        failed_24h = (
-            failures["validation"] +
-            failures["parametric_fail"] +
-            failures["score_reject"] +
-            failures["shuffle_fail"] +
-            failures["mw_fail"]
-        )
-        logger.info('[QUEUE] strategies waiting at each stage')
-        logger.info(f'[QUEUE] generated: {g} (waiting for validation)')
-        logger.info(f'[QUEUE] validated: {v} (waiting for backtest)')
-        logger.info(f'[QUEUE] active: {a} (in pool, ready to deploy)')
-        logger.info(f'[QUEUE] live: {lv} (trading now)')
-        logger.info(f'[QUEUE] retired: {r} (removed from live)')
-        # Total processed = strategies that completed any stage (use generated as proxy)
-        total_processed = funnel["generated"]
-        failed_pct = f"{100 * failed_24h // total_processed}%" if total_processed > 0 else "--"
-        logger.info(f'[QUEUE] failed_24h: {failed_24h} of {total_processed} ({failed_pct}) rejected in last 24h')
-
-        # === FUNNEL 24H ===
-        gen = funnel["generated"]
         val = funnel["validated"]
         val_failed = funnel["validation_failed"]
-        bases_done = funnel["bases_completed"]
-        bases_with_combos = funnel["bases_with_combos"]
-        bases_with_output = funnel["bases_with_output"]
+        gen = funnel["generated"]
+
+        logger.info(f'[2. VALIDATOR] queue: {g} waiting')
+        val_failed_str = f", {val_failed} failed" if val_failed > 0 else ""
+        logger.info(f'[2. VALIDATOR] 24h: {val}/{gen} passed syntax+AST+execution ({fmt_pct(funnel["validated_pct"])}){val_failed_str}')
+        logger.info(f'[2. VALIDATOR] timing: {fmt_time(timing.get("validation"))} avg | failures: {failures["validation"]}')
+
+        # =====================================================================
+        # [3. PARAMETRIC OPTIMIZATION]
+        # =====================================================================
+        v = queue_depths.get('VALIDATED', 0)
+        bt_waiting = backpressure["bt_waiting"]
+        bt_processing = backpressure["bt_processing"]
         combinations = funnel["combinations_tested"]
-        param_passed = funnel["parametric_passed"]
         param_failed = funnel["parametric_failed"]
-        score = funnel["score_ok"]
-        shuf = funnel["shuffle_ok"]
-        mw_started = funnel["mw_started"]
-        mw = funnel["mw_ok"]
-        mw_failed = funnel["mw_failed"]
-        mw_in_progress = max(0, mw_started - mw - mw_failed)
-        pool = funnel["pool"]
+        bases_with_output = funnel["bases_with_output"]
+        param_passed = funnel["parametric_passed"]
 
-        # Calculate rates - use bases_with_combos for accurate average
-        avg_combos_per_base = f"{combinations // bases_with_combos}" if bases_with_combos > 0 else "1015"
-
-        # bases_with_output uses base_code_hash (0 for legacy events without hash)
-        # When base_code_hash not available, estimate from param_passed / avg_per_base
         if bases_with_output > 0:
-            bases_producing = bases_with_output
             strategies_per_base = f"{param_passed / bases_with_output:.1f}"
         elif param_passed > 0:
-            # Fallback: estimate ~6 strategies per successful base (empirical average)
             estimated_bases = max(1, param_passed // 6)
-            bases_producing = estimated_bases
             strategies_per_base = f"~{param_passed / estimated_bases:.1f}"
         else:
-            bases_producing = 0
             strategies_per_base = "--"
 
-        # Find bottleneck (lowest non-100% pass rate after validation)
-        bottleneck = ""
-        if shuf > 0 and mw == 0 and mw_in_progress == 0:
-            bottleneck = " <-- BOTTLENECK"
-        elif score > 0 and shuf == 0:
-            bottleneck = " <-- BOTTLENECK"
+        logger.info(f'[3. PARAMETRIC OPTIMIZATION] queue: {bt_waiting} waiting, {bt_processing} running')
+        logger.info(f'[3. PARAMETRIC OPTIMIZATION] 24h: {param_failed + (bases_with_output or 0)} bases tested, {combinations} combos')
+        logger.info(f'[3. PARAMETRIC OPTIMIZATION] passed: {bases_with_output or 0} bases -> {param_passed} strategies ({strategies_per_base}/base)')
+        logger.info(f'[3. PARAMETRIC OPTIMIZATION] timing: {fmt_time(timing.get("backtest"))}/base | failures: {param_failed} (no valid combo)')
 
-        # Show validation with failed count for clarity
-        val_total = val + val_failed
-        val_failed_str = f", {val_failed} failed" if val_failed > 0 else ""
-        logger.info('[FUNNEL 24H] pipeline conversion (base strategies -> output strategies)')
-        logger.info(f'[FUNNEL 24H] validated: {val} of {gen} base passed syntax/AST/execution ({fmt_pct(funnel["validated_pct"])}){val_failed_str}')
-        logger.info(f'[FUNNEL 24H] parametric: {bases_producing} base -> {param_passed} strategies ({strategies_per_base}/base), {param_failed} base rejected, {combinations} combos')
-        logger.info(f'[FUNNEL 24H] score_ok: {score} of {param_passed} strategies passed min_score {self.pool_min_score} ({fmt_pct(funnel["score_ok_pct"])})')
-        logger.info(f'[FUNNEL 24H] shuffle_ok: {shuf} of {score} passed lookahead test ({fmt_pct(funnel["shuffle_ok_pct"])})')
-        mw_in_progress_str = f", {mw_in_progress} in progress" if mw_in_progress > 0 else ""
-        logger.info(f'[FUNNEL 24H] multiwindow_ok: {mw} of {shuf} passed 4-window consistency ({fmt_pct(funnel["mw_ok_pct"])}), {mw_failed} failed{mw_in_progress_str}{bottleneck}')
-        logger.info(f'[FUNNEL 24H] pool_added: {pool} entered ACTIVE pool')
+        # =====================================================================
+        # [4. BACKTEST IN-SAMPLE]
+        # =====================================================================
+        is_count = is_stats.get('count', 0)
+        is_sharpe = fmt_float(is_stats.get('avg_sharpe'))
+        is_wr = fmt_pct_float(is_stats.get('avg_wr'))
+        is_exp = fmt_float(is_stats.get('avg_exp'), 3) if is_stats.get('avg_exp') else "--"
+        is_trades = fmt_float(is_stats.get('avg_trades'), 0) if is_stats.get('avg_trades') else "--"
 
-        # === TIMING ===
-        logger.info('[TIMING 24H] average duration by operation type')
-        logger.info(f'[TIMING 24H] validation: {fmt_time(timing.get("validation"))} per base (syntax + AST + execution)')
-        logger.info(f'[TIMING 24H] parametric_backtest: {fmt_time(timing.get("backtest"))} per base (1015 combos x {self.is_days}d + {self.oos_days}d)')
+        logger.info(f'[4. BACKTEST IN-SAMPLE] 24h: {is_count} strategies tested')
+        logger.info(f'[4. BACKTEST IN-SAMPLE] avg_metrics: sharpe={is_sharpe}, wr={is_wr}, exp={is_exp}, trades={is_trades}')
+
+        # =====================================================================
+        # [5. BACKTEST OUT-OF-SAMPLE]
+        # =====================================================================
+        oos_count = oos_stats.get('count', 0)
+        avg_degrad = oos_stats.get('avg_degradation')
+        oos_better = oos_stats.get('oos_better', 0)
+        oos_worse = oos_stats.get('oos_worse', 0)
+
+        degrad_str = f"{avg_degrad*100:.0f}%" if avg_degrad is not None else "--"
+        logger.info(f'[5. BACKTEST OUT-OF-SAMPLE] 24h: {oos_count} strategies tested')
+        logger.info(f'[5. BACKTEST OUT-OF-SAMPLE] avg_degradation: {degrad_str} | oos_better: {oos_better} | oos_worse: {oos_worse}')
+
+        # =====================================================================
+        # [6. SCORE CALCULATION]
+        # =====================================================================
+        score_ok = funnel["score_ok"]
+        score_rejected = failures["score_reject"]
+        min_score = fmt_float(score_stats.get('min_score'))
+        max_score = fmt_float(score_stats.get('max_score'))
+        avg_score = fmt_float(score_stats.get('avg_score'))
+
+        logger.info(f'[6. SCORE CALCULATION] 24h: {score_ok}/{param_passed} passed min_score {self.pool_min_score} ({fmt_pct(funnel["score_ok_pct"])})')
+        logger.info(f'[6. SCORE CALCULATION] score_range: {min_score} to {max_score} (avg {avg_score}) | rejected: {score_rejected}')
+
+        # =====================================================================
+        # [7. SHUFFLE TEST]
+        # =====================================================================
+        shuf = funnel["shuffle_ok"]
+        shuffle_fail = failures["shuffle_fail"]
         shuffle_cached = failures.get("shuffle_cached", 0)
-        shuffle_cached_str = f", {shuffle_cached} cached" if shuffle_cached > 0 else ""
-        logger.info(f'[TIMING 24H] shuffle_test: {fmt_time(timing.get("shuffle"))} per strategy (lookahead detection{shuffle_cached_str})')
-        logger.info(f'[TIMING 24H] multiwindow_test: {fmt_time(timing.get("multiwindow"))} per strategy (4 window backtests)')
 
-        # === FAILURES 24H ===
-        # Note: counts may exceed funnel numbers due to backlog (strategies validated before 24h window)
-        logger.info('[FAILURES 24H] rejection counts by stage (may include backlog)')
-        logger.info(f'[FAILURES 24H] validation: {failures["validation"]} (code errors)')
-        logger.info(f'[FAILURES 24H] parametric_no_valid: {failures["parametric_fail"]} (no combo passed filters)')
-        logger.info(f'[FAILURES 24H] score_below_min: {failures["score_reject"]} (score < {self.pool_min_score})')
-        logger.info(f'[FAILURES 24H] shuffle_bias: {failures["shuffle_fail"]} (lookahead bias detected)')
-        logger.info(f'[FAILURES 24H] multiwindow_inconsistent: {failures["mw_fail"]} (CV > 1.5 across time windows)')
-        # pool_rejected: explain based on whether pool is full and whether rejections happened
+        logger.info(f'[7. SHUFFLE TEST] 24h: {shuf}/{score_ok} passed ({fmt_pct(funnel["shuffle_ok_pct"])})')
+        logger.info(f'[7. SHUFFLE TEST] timing: {fmt_time(timing.get("shuffle"))} | failures: {shuffle_fail} (bias) | cached: {shuffle_cached}')
+
+        # =====================================================================
+        # [8. WFA FIXED PARAMS]
+        # =====================================================================
+        mw = funnel["mw_ok"]
+        mw_failed = funnel["mw_failed"]
+        mw_started = funnel["mw_started"]
+        mw_in_progress = max(0, mw_started - mw - mw_failed)
+
+        mw_in_progress_str = f", {mw_in_progress} in progress" if mw_in_progress > 0 else ""
+        logger.info(f'[8. WFA FIXED PARAMS] 24h: {mw}/{shuf} passed 4-window consistency ({fmt_pct(funnel["mw_ok_pct"])}){mw_in_progress_str}')
+        logger.info(f'[8. WFA FIXED PARAMS] timing: {fmt_time(timing.get("multiwindow"))} | failures: {mw_failed} (CV > 1.5)')
+
+        # =====================================================================
+        # [9. POOL]
+        # =====================================================================
         pool_size = pool_stats["size"]
-        pool_reject_count = failures["pool_reject"]
-        if pool_reject_count == 0:
-            if pool_size >= self.limit_active:
-                pool_reject_msg = f"pool_rejected: 0 (pool full at {self.limit_active}, no new strategies qualified)"
-            else:
-                pool_reject_msg = f"pool_rejected: 0 (pool not full, all qualifying strategies accepted)"
-        else:
-            pool_reject_msg = f"pool_rejected: {pool_reject_count} (score < worst in full pool of {self.limit_active})"
-        logger.info(f'[FAILURES 24H] {pool_reject_msg}')
-
-        # === BACKPRESSURE ===
-        gen_pct = int(100 * backpressure["gen_queue"] / backpressure["gen_limit"]) if backpressure["gen_limit"] > 0 else 0
-        val_pct = int(100 * backpressure["val_queue"] / backpressure["val_limit"]) if backpressure["val_limit"] > 0 else 0
-        gen_status = "OVERFLOW" if backpressure["gen_full"] else "OK"
-        val_status = "OVERFLOW" if val_pct > 100 else "OK"
-        logger.info('[BACKPRESSURE] queue saturation')
-        logger.info(f'[BACKPRESSURE] validation_pending: {backpressure["gen_queue"]}/{backpressure["gen_limit"]} ({gen_pct}%) {gen_status}')
-        logger.info(f'[BACKPRESSURE] backtest_pending: {backpressure["val_queue"]}/{backpressure["val_limit"]} ({val_pct}%) {val_status}')
-        logger.info(f'[BACKPRESSURE] backtest_waiting: {backpressure["bt_waiting"]} in queue')
-        logger.info(f'[BACKPRESSURE] backtest_active: {backpressure["bt_processing"]} running now')
-
-        # === POOL === (IMPROVED - includes composition by source)
+        pool_limit = pool_stats["limit"]
         pool_pattern = pool_by_source.get('pattern', 0)
         pool_ai_free = pool_by_source.get('ai_free', 0)
         pool_ai_assigned = pool_by_source.get('ai_assigned', 0)
         pool_optimized = pool_by_source.get('optimized', 0)
-        logger.info('[POOL] strategies ready for live trading')
-        logger.info(f'[POOL] size: {pool_stats["size"]} of {pool_stats["limit"]} max')
-        logger.info(f'[POOL] by_source: pattern={pool_pattern}, ai_free={pool_ai_free}, ai_assigned={pool_ai_assigned}, optimized={pool_optimized}')
-        logger.info(f'[POOL] score_range: {fmt_float(pool_stats["score_min"])} - {fmt_float(pool_stats["score_max"])} (avg {fmt_float(pool_stats["score_avg"])})')
+        pool_entered = funnel["pool"]
+
+        logger.info(f'[9. POOL] size: {pool_size}/{pool_limit} | 24h_added: {pool_entered}')
+        logger.info(f'[9. POOL] by_source: pattern={pool_pattern}, ai_free={pool_ai_free}, ai_assigned={pool_ai_assigned}, optimized={pool_optimized}')
+        logger.info(f'[9. POOL] score_range: {fmt_float(pool_stats["score_min"])} to {fmt_float(pool_stats["score_max"])} (avg {fmt_float(pool_stats["score_avg"])})')
+
         expectancy_str = f'{pool_quality["expectancy_avg"]*100:.1f}%' if pool_quality["expectancy_avg"] else "--"
-        logger.info(f'[POOL] quality: sharpe={fmt_float(pool_quality["sharpe_avg"])}, winrate={fmt_pct_float(pool_quality["winrate_avg"])}, expectancy={expectancy_str}, dd={fmt_pct_float(pool_quality["dd_avg"])}')
+        logger.info(f'[9. POOL] quality: sharpe={fmt_float(pool_quality["sharpe_avg"])}, wr={fmt_pct_float(pool_quality["winrate_avg"])}, exp={expectancy_str}, dd={fmt_pct_float(pool_quality["dd_avg"])}')
 
-        # === RETEST 24H ===
-        logger.info(f'[RETEST 24H] pool freshness (re-backtest every {self.retest_interval_days} days)')
-        logger.info(f'[RETEST 24H] tested: {retest_stats["tested"]}, passed: {retest_stats["passed"]}, evicted: {retest_stats["retired"]}')
+        logger.info(f'[9. POOL] retest_24h: tested={retest_stats["tested"]}, passed={retest_stats["passed"]}, evicted={retest_stats["retired"]}')
 
-        # === LIVE ===
+        # =====================================================================
+        # [10. LIVE]
+        # =====================================================================
+        live_count = live_stats["live"]
+        live_limit = live_stats["limit"]
         avg_age_str = f'{live_stats["avg_age_days"]:.1f}d' if live_stats["avg_age_days"] else "--"
-        logger.info('[LIVE] strategies trading real money')
-        logger.info(f'[LIVE] active: {live_stats["live"]} of {live_stats["limit"]} max (avg_age: {avg_age_str})')
-        logger.info(f'[LIVE] 24h: deployed={live_stats["deployed_24h"]}, retired={live_stats["retired_24h"]}')
+
+        logger.info(f'[10. LIVE] active: {live_count}/{live_limit} (avg_age: {avg_age_str})')
+        logger.info(f'[10. LIVE] 24h: deployed={live_stats["deployed_24h"]}, retired={live_stats["retired_24h"]}')
 
     # =========================================================================
     # PUBLIC API METHODS (for external use)
