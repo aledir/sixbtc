@@ -285,9 +285,14 @@ backtesting:
   # rather than comparing to best (which penalizes strategies with very high best Sharpe)
   robustness:
     enabled: true              # Enable robustness validation
-    min_threshold: 0.50        # Minimum fraction of neighbors that must pass min_sharpe
+    min_threshold: 0.50        # Default for AI strategies (ai_free, ai_assigned)
+    min_threshold_pattern: 0.30  # More permissive for pattern strategies (narrow optimal range)
+    min_threshold_optimized: 0.40  # Middle ground for optimized (from parametric)
     # Example: if 8 neighbors, at least 4 must have sharpe >= min_sharpe (0.3)
-    # Old formula (removed): avg_neighbors / best - penalized high-performing strategies
+    # Rationale for different thresholds:
+    # - Pattern: 30% - validated patterns have specific optimal range by design
+    # - Optimized: 40% - output of parametric optimization, already tuned
+    # - AI free/assigned: 50% - must demonstrate broad robustness
 
   # Walk-Forward Validation with FIXED parameters
   # Runs AFTER shuffle test, BEFORE pool entry
@@ -508,6 +513,13 @@ scheduler:
       enabled: true
       interval_hours: 24          # Check once per day
       run_hour: 4                 # Run at 4 AM (after agent renewal)
+
+    # Clean /tmp directory (remove old temporary files)
+    cleanup_tmp_dir:
+      enabled: true
+      interval_hours: 24          # Once per day
+      run_hour: 5                 # Run at 5 AM
+      max_age_hours: 24           # Delete files older than 24 hours
 
 # ==============================================================================
 # DATA SCHEDULER

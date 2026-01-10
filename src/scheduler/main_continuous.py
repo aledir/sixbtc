@@ -10,6 +10,7 @@ Coordinates scheduled tasks across the system:
 
 import asyncio
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -81,6 +82,13 @@ class ContinuousSchedulerProcess:
             self.tasks['check_subaccount_funds'] = funds_config['interval_hours']
             self.check_funds_hour = funds_config.get('run_hour', 4)
 
+        # Cleanup /tmp directory
+        tmp_config = scheduler_config.get('cleanup_tmp_dir', {})
+        if tmp_config.get('enabled', False):
+            self.tasks['cleanup_tmp_dir'] = tmp_config['interval_hours']
+            self.cleanup_tmp_hour = tmp_config.get('run_hour', 5)
+            self.cleanup_tmp_max_age = tmp_config.get('max_age_hours', 24)
+
         # Initialize last run times (use timezone-aware datetime)
         for task in self.tasks:
             self.last_run[task] = datetime.min.replace(tzinfo=UTC)
@@ -149,6 +157,11 @@ class ContinuousSchedulerProcess:
                 result = await self._check_subaccount_funds()
                 tracker.add_metadata('checked', result.get('checked', 0))
                 tracker.add_metadata('topped_up', result.get('topped_up', 0))
+
+            elif task_name == 'cleanup_tmp_dir':
+                result = await self._cleanup_tmp_dir()
+                tracker.add_metadata('deleted_files', result.get('deleted_files', 0))
+                tracker.add_metadata('deleted_bytes', result.get('deleted_bytes', 0))
 
             else:
                 logger.warning(f"Unknown task: {task_name}")
@@ -501,6 +514,73 @@ class ContinuousSchedulerProcess:
         except Exception as e:
             logger.error(f"Fund check failed: {e}")
             return {'checked': 0, 'topped_up': 0, 'reason': str(e)}
+
+    async def _cleanup_tmp_dir(self) -> dict:
+        """
+        Clean up old files from /tmp directory.
+
+        Only runs at the configured run_hour.
+        Deletes files older than max_age_hours.
+        """
+        # Check if it's the right hour
+        current_hour = datetime.now(UTC).hour
+        target_hour = getattr(self, 'cleanup_tmp_hour', 5)
+
+        if current_hour != target_hour:
+            logger.debug(
+                f"Skipping tmp cleanup: current hour {current_hour}, target {target_hour}"
+            )
+            return {'deleted_files': 0, 'deleted_bytes': 0, 'reason': 'wrong_hour'}
+
+        deleted_files = 0
+        deleted_bytes = 0
+        max_age_hours = getattr(self, 'cleanup_tmp_max_age', 24)
+        cutoff_time = datetime.now().timestamp() - (max_age_hours * 3600)
+
+        try:
+            tmp_path = Path('/tmp')
+
+            for item in tmp_path.iterdir():
+                try:
+                    # Skip system-critical files/dirs
+                    if item.name.startswith('.') or item.name in (
+                        'systemd-private-*', 'snap.*', 'ssh-*'
+                    ):
+                        continue
+
+                    # Check modification time
+                    stat = item.stat()
+                    if stat.st_mtime < cutoff_time:
+                        if item.is_file():
+                            size = stat.st_size
+                            item.unlink()
+                            deleted_files += 1
+                            deleted_bytes += size
+                        elif item.is_dir():
+                            # Recursively delete directory
+                            size = sum(
+                                f.stat().st_size for f in item.rglob('*') if f.is_file()
+                            )
+                            shutil.rmtree(item)
+                            deleted_files += 1
+                            deleted_bytes += size
+
+                except (PermissionError, FileNotFoundError, OSError):
+                    # Skip files we can't access or that disappeared
+                    continue
+
+            if deleted_files > 0:
+                mb_deleted = deleted_bytes / (1024 * 1024)
+                logger.info(
+                    f"Cleaned /tmp: {deleted_files} items, {mb_deleted:.2f} MB freed"
+                )
+            else:
+                logger.debug("No old files to clean in /tmp")
+
+        except Exception as e:
+            logger.error(f"Tmp cleanup failed: {e}")
+
+        return {'deleted_files': deleted_files, 'deleted_bytes': deleted_bytes}
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""

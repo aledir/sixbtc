@@ -172,7 +172,13 @@ class ContinuousBacktesterProcess:
 
         # Robustness validation (parameter stability check)
         self.robustness_enabled = self.config.get_required('backtesting.robustness.enabled')
-        self.robustness_min_threshold = self.config.get_required('backtesting.robustness.min_threshold')
+        # Load thresholds per generation_mode
+        self.robustness_thresholds = {
+            'pattern': self.config.get('backtesting.robustness.min_threshold_pattern', 0.30),
+            'optimized': self.config.get('backtesting.robustness.min_threshold_optimized', 0.40),
+            'ai_free': self.config.get_required('backtesting.robustness.min_threshold'),
+            'ai_assigned': self.config.get_required('backtesting.robustness.min_threshold'),
+        }
 
         # SCORER and PoolManager for post-backtest scoring and pool management
         self.scorer = BacktestScorer(self.config._raw_config)
@@ -519,7 +525,8 @@ class ContinuousBacktesterProcess:
                         strategy.code,
                         strategy.timeframe,
                         strategy.pattern_coins,
-                        strategy.base_code_hash  # Pass hash to detect pre-parametrized strategies
+                        strategy.base_code_hash,  # Pass hash to detect pre-parametrized strategies
+                        strategy.generation_mode  # Pass for robustness threshold selection
                     )
                     validated_futures[future] = (str(strategy.id), strategy.name)
                     await asyncio.sleep(0.1)
@@ -537,7 +544,8 @@ class ContinuousBacktesterProcess:
         code: str,
         original_tf: str,
         pattern_coins: Optional[List[str]] = None,
-        base_code_hash: Optional[str] = None
+        base_code_hash: Optional[str] = None,
+        generation_mode: str = "ai_free"
     ) -> Tuple[bool, str]:
         """
         Run training/holdout backtest on strategy's assigned timeframe.
@@ -630,7 +638,8 @@ class ContinuousBacktesterProcess:
                     # Initial parametric to find best combo
                     parametric_results = self._run_parametric_backtest(
                         strategy_instance, is_data, assigned_tf, is_pattern_based,
-                        strategy_id=strategy_id, strategy_name=strategy_name
+                        strategy_id=strategy_id, strategy_name=strategy_name,
+                        generation_mode=generation_mode
                     )
 
                     if not parametric_results:
@@ -877,7 +886,8 @@ class ContinuousBacktesterProcess:
         timeframe: str,
         is_pattern_based: bool = False,
         strategy_id=None,
-        strategy_name: str = None
+        strategy_name: str = None,
+        generation_mode: str = "ai_free"
     ) -> List[Dict]:
         """
         Run parametric backtest generating strategies with different SL/TP/leverage/exit.
@@ -1076,9 +1086,17 @@ class ContinuousBacktesterProcess:
                     results_df, params, param_space
                 )
 
+                # Get threshold based on generation_mode
+                threshold = self.robustness_thresholds.get(generation_mode, 0.50)
+
                 # Filter by robustness threshold
-                if robustness_score < self.robustness_min_threshold:
+                if robustness_score < threshold:
                     robustness_rejected += 1
+                    logger.debug(
+                        f"[{strategy_name}] Combo rejected by robustness: "
+                        f"score={robustness_score:.2f} < threshold={threshold:.0%} "
+                        f"(mode={generation_mode})"
+                    )
                     continue
             else:
                 robustness_score = 0.5  # Neutral default when disabled
@@ -1101,9 +1119,10 @@ class ContinuousBacktesterProcess:
 
         # Log robustness filtering if any were rejected
         if robustness_rejected > 0:
+            threshold = self.robustness_thresholds.get(generation_mode, 0.50)
             logger.info(
-                f"[{strategy_name}] Robustness filter: {robustness_rejected} rejected "
-                f"(threshold={self.robustness_min_threshold:.0%}), {len(results)} passed"
+                f"[{strategy_name}] Robustness filter ({generation_mode}): {robustness_rejected} rejected "
+                f"(threshold={threshold:.0%}), {len(results)} passed"
             )
 
         if results:

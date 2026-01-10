@@ -155,6 +155,8 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
         # Read pre-calculated entry signal
         entry_condition = bool(df['entry_signal'].iloc[-1])
 
+{atr_filter_code}
+
         if entry_condition:
             return Signal(
                 direction=self.direction,
@@ -184,6 +186,39 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
             'cache_ttl_seconds', 3600
         )
         self.helper_fetcher = HelperFetcher(api_url, cache_ttl_seconds=cache_ttl)
+
+    def _build_atr_filter_code(self, pattern: Pattern) -> str:
+        """
+        Generate ATR volatility filter code if pattern provides statistics.
+
+        Uses pattern's atr_signal_median to filter signals in abnormally low volatility.
+        If current ATR < threshold × median, signal is skipped.
+
+        Args:
+            pattern: Pattern object with optional atr_signal_median
+
+        Returns:
+            Python code string to inject into generate_signal(), or empty comment
+        """
+        # Check if pattern has ATR statistics
+        if not hasattr(pattern, 'atr_signal_median') or pattern.atr_signal_median is None:
+            return "        # No ATR filter (pattern has no volatility statistics)"
+
+        # Threshold multiplier (configurable - could move to config)
+        # 0.5 = skip if ATR < 50% of historical median
+        threshold_multiplier = 0.5
+
+        median_pct = pattern.atr_signal_median * 100  # Convert to percentage for display
+
+        return f"""
+        # ATR volatility filter
+        # Pattern historically fired at median ATR = {pattern.atr_signal_median:.4f} ({median_pct:.2f}% of price)
+        # Skip signals when current volatility is abnormally low (< {threshold_multiplier:.0%} of median)
+        atr_normalized = df['atr'].iloc[-1] / df['close'].iloc[-1]
+        atr_threshold = {pattern.atr_signal_median} * {threshold_multiplier}
+
+        if atr_normalized < atr_threshold:
+            return None  # Low volatility - pattern edge may not exist"""
 
     def generate(
         self,
@@ -287,6 +322,7 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
                 sl_pct_display=sl_pct_display,
                 expected_profit=expected_profit,
                 rr_ratio=rr_ratio,
+                atr_filter_code=self._build_atr_filter_code(pattern),
             )
 
             # Validate generated code

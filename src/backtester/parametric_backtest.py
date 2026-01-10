@@ -519,6 +519,12 @@ class ParametricBacktester:
 
         Filters out invalid combinations:
         - tp_pct=0 AND exit_bars=0: No exit condition except SL (invalid)
+        - tp_pct>0 AND sl_pct/tp_pct > 2.0: SL:TP ratio > 2:1 (requires unrealistic WR)
+
+        Rationale for 2:1 max ratio:
+        - Break-even WR = SL/(SL+TP)
+        - 2:1 ratio → 67% WR (achievable)
+        - 6:1 ratio → 86% WR (impossible)
         """
         all_combos = itertools.product(
             self.parameter_space['sl_pct'],
@@ -526,11 +532,12 @@ class ParametricBacktester:
             self.parameter_space['leverage'],
             self.parameter_space['exit_bars'],
         )
-        # Filter: if tp=0, must have exit_bars > 0 (otherwise no exit except SL)
+        # Filter invalid combinations
         return [
             (sl, tp, lev, exit_b)
             for sl, tp, lev, exit_b in all_combos
-            if not (tp == 0 and exit_b == 0)
+            if not (tp == 0 and exit_b == 0)  # Must have an exit condition
+            and (tp == 0 or sl / tp <= 2.0)   # Max 2:1 SL:TP ratio when TP>0
         ]
 
     def _calculate_score(self, result: ParametricResult) -> float:
@@ -712,7 +719,15 @@ class ParametricBacktester:
         - 3x: Aggressive
         - No 4x+ to avoid excessive risk
 
-        TOTAL: 6 x 5 x 5 x 3 = 450 combinations, minus invalid (tp=0, exit=0) = ~435
+        TOTAL: 6 x 5 x 5 x 3 = 450 combinations
+        FILTERED:
+        - tp=0 AND exit=0 (no exit condition)
+        - SL:TP ratio > 2:1 when TP>0 (unrealistic WR requirement)
+        RESULT: ~230-240 valid combinations (actual count depends on base values)
+
+        Example filtering (base_tp=2%, base_sl=6%):
+        - SL=12% (2.0×), TP=2% (1.0×) → 6:1 ratio → BLOCKED (needs 86% WR)
+        - SL=6% (1.0×), TP=3% (1.5×) → 2:1 ratio → OK (needs 67% WR)
 
         Args:
             base_tp_pct: Pattern's target magnitude (e.g., 0.06 for 6%)
@@ -747,17 +762,19 @@ class ParametricBacktester:
             'exit_bars': exit_bars,
         }
 
-        # Calculate valid combinations (exclude tp=0 AND exit=0)
+        # Calculate valid combinations estimate (actual count depends on ratio filtering)
+        # Note: _generate_parameter_sets() will apply additional filters:
+        # - tp=0 AND exit=0 (no exit)
+        # - SL:TP ratio > 2:1 (unrealistic WR)
         total = len(sl_pcts) * len(tp_pcts) * len(leverages) * len(exit_bars)
-        invalid = len(sl_pcts) * 1 * len(leverages) * 1  # tp=0, exit=0
-        valid = total - invalid
+        estimate = total // 2  # Rough estimate after all filters (~50% pass)
 
         logger.info(
             f"Built pattern-centered space: "
             f"TP={[f'{p:.1%}' for p in tp_pcts]}, "
             f"SL={[f'{p:.1%}' for p in sl_pcts]}, "
             f"exit={exit_bars}, lev={leverages} "
-            f"({valid} valid combinations)"
+            f"({estimate} estimated valid combinations after filtering)"
         )
 
         return space
