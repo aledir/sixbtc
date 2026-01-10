@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from src.generator.pattern_fetcher import Pattern
 from src.generator.helper_fetcher import HelperFetcher
+from src.generator.target_selector import select_best_target
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
     """
     Pattern-based strategy: {pattern_name}
     Target: {target_name}
+    Execution Type: {execution_type}
 
     Direction: {direction} only
     Timeframe: {timeframe}
@@ -86,15 +88,8 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
     Pattern Edge: {edge:.2f}%
     Pattern Win Rate: {win_rate:.1f}%
 
-    EXIT STRATEGY:
-    - Take Profit at target magnitude ({magnitude}%)
-    - Stop Loss at {rr_ratio}× magnitude ({sl_pct_display}%) - Asymmetric R:R 1:{rr_ratio}
-    - Time limit at {holding_bars} bars (backstop if TP not hit)
-
-    RISK MANAGEMENT:
-    Pattern-discovery validated this pattern has {edge:.1f}% edge.
-    SL:TP ratio of {rr_ratio}:1 from pattern-discovery recommendations.
-    Expected profit per trade = magnitude × edge = {magnitude}% × {edge:.1f}% ≈ {expected_profit:.2f}%
+    EXIT STRATEGY ({execution_type}):
+    {exit_strategy_description}
 
     Generated via Direct Embedding (Mode A) - No AI translation.
     """
@@ -276,27 +271,52 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
                 pattern.timeframe
             )
 
-            # Get target magnitude from API (REQUIRED - no fallback)
-            target_name = pattern.target_name or "unknown"
-            magnitude = pattern.target_magnitude
-            if magnitude is None or magnitude <= 0:
-                raise ValueError(
-                    f"Pattern {pattern.name} missing target_magnitude from API. "
-                    f"Target: {target_name}. API must provide this field."
+            # Select best target and derive execution-aligned parameters
+            target_selection = select_best_target(pattern, holding_bars)
+
+            if target_selection:
+                tp_pct = target_selection.tp_pct
+                sl_pct = target_selection.sl_pct
+                exit_after_bars = target_selection.exit_bars
+                execution_type = target_selection.execution_type
+                magnitude = target_selection.target.magnitude or pattern.target_magnitude or 2.0
+                target_name = target_selection.target.target_name
+
+                logger.info(
+                    f"Pattern {pattern.name}: execution_type={execution_type}, "
+                    f"tp_pct={tp_pct:.2%}, sl_pct={sl_pct:.2%}, exit_bars={exit_after_bars}"
                 )
+            else:
+                # Fallback to pattern-suggested values (backward compatibility)
+                target_name = pattern.target_name or "unknown"
+                magnitude = pattern.target_magnitude
+                if magnitude is None or magnitude <= 0:
+                    raise ValueError(
+                        f"Pattern {pattern.name} missing target_magnitude from API. "
+                        f"Target: {target_name}. API must provide this field."
+                    )
+                tp_pct = magnitude / 100.0
+                rr_ratio = pattern.suggested_rr_ratio or 2.0
+                sl_pct = tp_pct * rr_ratio
+                exit_after_bars = holding_bars
+                execution_type = pattern.execution_type
 
-            # Convert magnitude to decimal for tp_pct (5% -> 0.05)
-            tp_pct = magnitude / 100.0
-
-            # Get RR ratio from pattern-discovery (or default to 2.0)
-            # suggested_rr_ratio is the SL:TP ratio that pattern-discovery recommends
-            rr_ratio = pattern.suggested_rr_ratio or 2.0
-            sl_pct = tp_pct * rr_ratio
+            # Build exit strategy description based on execution type
+            if execution_type == 'touch_based':
+                exit_strategy_description = (
+                    f"- Take Profit: {tp_pct*100:.1f}% (pattern predicts price will TOUCH this level)\n"
+                    f"    - Stop Loss: {sl_pct*100:.1f}% (2:1 SL:TP ratio)\n"
+                    f"    - Time Exit: {exit_after_bars} bars (backstop if TP not hit)"
+                )
+            else:
+                exit_strategy_description = (
+                    f"- Time Exit: {exit_after_bars} bars (pattern predicts CLOSE at this time)\n"
+                    f"    - Stop Loss: {sl_pct*100:.1f}% (wider for price breathing room)\n"
+                    f"    - Take Profit: DISABLED (time-based exit is primary)"
+                )
 
             # For docstring display
             edge_pct = pattern.test_edge * 100
-            sl_pct_display = magnitude * rr_ratio
-            expected_profit = magnitude * edge_pct / 100  # magnitude × edge
 
             # Build complete strategy code
             code = self.STRATEGY_TEMPLATE.format(
@@ -310,7 +330,7 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
                 strategy_id=strategy_id,
                 direction=pattern.target_direction,
                 holding_period=pattern.holding_period or "24h",
-                holding_bars=holding_bars,
+                holding_bars=exit_after_bars,
                 target_name=target_name,
                 edge=edge_pct,
                 win_rate=pattern.test_win_rate * 100,
@@ -319,9 +339,8 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
                 magnitude=magnitude,
                 tp_pct=tp_pct,
                 sl_pct=sl_pct,
-                sl_pct_display=sl_pct_display,
-                expected_profit=expected_profit,
-                rr_ratio=rr_ratio,
+                execution_type=execution_type,
+                exit_strategy_description=exit_strategy_description,
                 atr_filter_code=self._build_atr_filter_code(pattern),
             )
 

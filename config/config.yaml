@@ -279,21 +279,6 @@ backtesting:
     min_sharpe: 0.0          # OOS Sharpe must be positive
     recency_weight: 0.60     # Weight for OOS score in final ranking
 
-  # Robustness validation (neighbor quality check)
-  # Verifies that parameter neighbors also pass min_sharpe threshold (not isolated peak)
-  # This approach checks if neighbors are "good enough" in absolute terms,
-  # rather than comparing to best (which penalizes strategies with very high best Sharpe)
-  robustness:
-    enabled: true              # Enable robustness validation
-    min_threshold: 0.50        # Default for AI strategies (ai_free, ai_assigned)
-    min_threshold_pattern: 0.30  # More permissive for pattern strategies (narrow optimal range)
-    min_threshold_optimized: 0.40  # Middle ground for optimized (from parametric)
-    # Example: if 8 neighbors, at least 4 must have sharpe >= min_sharpe (0.3)
-    # Rationale for different thresholds:
-    # - Pattern: 30% - validated patterns have specific optimal range by design
-    # - Optimized: 40% - output of parametric optimization, already tuned
-    # - AI free/assigned: 50% - must demonstrate broad robustness
-
   # Walk-Forward Validation with FIXED parameters
   # Runs AFTER shuffle test, BEFORE pool entry
   # Tests if the best combo (params already embedded) performs consistently
@@ -330,14 +315,13 @@ trading:
 # ==============================================================================
 scorer:
   # Unified scoring weights (used for both backtest and live)
-  # Score = weighted sum of 6 normalized components (0-100 each)
+  # Score = weighted sum of 5 normalized components (0-100 each)
   # All weights must sum to 1.0
   weights:
-    expectancy: 0.35  # Expectancy - most important metric
-    sharpe: 0.20      # Risk-adjusted return
+    expectancy: 0.40  # Expectancy - most important metric (+5% from removed robustness)
+    sharpe: 0.25      # Risk-adjusted return (+5% from removed robustness)
     win_rate: 0.10    # Win rate (trades won / total trades)
     drawdown: 0.15    # Penalizes high drawdown (lower DD = higher score)
-    robustness: 0.10  # Parameter stability (neighbors perform similarly)
     recency: 0.10     # Recent performance vs training (from holdout degradation)
 
 # ==============================================================================

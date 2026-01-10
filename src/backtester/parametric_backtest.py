@@ -779,6 +779,108 @@ class ParametricBacktester:
 
         return space
 
+    def build_execution_type_space(
+        self,
+        execution_type: str,
+        base_magnitude: float,
+        base_exit_bars: int,
+    ) -> Dict[str, List]:
+        """
+        Build parameter space constrained by execution type.
+
+        This ensures parametric optimization stays aligned with the pattern's
+        validated target semantics:
+
+        TOUCH_BASED targets (target_max_*):
+        - Pattern predicts price will TOUCH level
+        - TP is PRIMARY exit (must be > 0)
+        - Time exit is BACKSTOP (can be 0)
+        - Optimize TP around validated magnitude
+
+        CLOSE_BASED targets (all others):
+        - Pattern predicts price at CLOSE of period
+        - Time exit is PRIMARY (must be > 0)
+        - TP is DISABLED (always 0)
+        - Optimize exit_bars around validated holding period
+
+        Args:
+            execution_type: 'touch_based' or 'close_based'
+            base_magnitude: Target magnitude as decimal (e.g., 0.02 for 2%)
+            base_exit_bars: Holding period in bars
+
+        Returns:
+            Parameter space dict with sl_pct, tp_pct, exit_bars, leverage
+        """
+        if execution_type == 'touch_based':
+            # TP-BASED: Pattern predicts price will TOUCH level
+            # TP must exist, centered around magnitude (no zero)
+            tp_multipliers = [0.5, 0.75, 1.0, 1.25, 1.5]
+            tp_values = sorted(set([
+                round(base_magnitude * mult, 4)
+                for mult in tp_multipliers
+            ]))
+            tp_values = [v for v in tp_values if v > 0]  # No zero TP
+
+            # SL constrained by max 2.5:1 ratio to TP
+            # 2.5:1 requires ~71% WR to break even, reasonable for validated patterns
+            max_sl = base_magnitude * 2.5
+            sl_multipliers = [1.0, 1.5, 2.0, 2.5]
+            sl_values = sorted(set([
+                round(base_magnitude * mult, 4)
+                for mult in sl_multipliers
+                if base_magnitude * mult <= max_sl
+            ]))
+
+            # Exit as backstop (can be 0 = disabled)
+            exit_multipliers = [0, 1.0, 1.5, 2.0]
+            exit_values = sorted(set([
+                max(0, int(base_exit_bars * mult))
+                for mult in exit_multipliers
+            ]))
+
+            logger.info(
+                f"Built touch_based space: "
+                f"TP={[f'{p:.1%}' for p in tp_values]} (NO zero), "
+                f"SL={[f'{p:.1%}' for p in sl_values]}, "
+                f"exit={exit_values} (can be 0 = backstop disabled)"
+            )
+
+        else:  # close_based
+            # TIME-BASED: Pattern predicts price will CLOSE at level
+            # TP disabled, time exit is primary
+            tp_values = [0.0]  # Only zero - no TP
+
+            # SL wider for breathing room during holding period
+            sl_multipliers = [2.0, 3.0, 4.0, 5.0]
+            sl_values = sorted(set([
+                round(base_magnitude * mult, 4)
+                for mult in sl_multipliers
+            ]))
+
+            # Exit MUST exist (no zero - time exit is primary)
+            exit_multipliers = [0.5, 0.75, 1.0, 1.25, 1.5]
+            exit_values = sorted(set([
+                max(1, int(base_exit_bars * mult))
+                for mult in exit_multipliers
+            ]))
+
+            logger.info(
+                f"Built close_based space: "
+                f"TP=[0.00%] (DISABLED - time exit is primary), "
+                f"SL={[f'{p:.1%}' for p in sl_values]} (wider), "
+                f"exit={exit_values} (NO zero - must have time exit)"
+            )
+
+        # Standard leverage values
+        leverage_values = LEVERAGE_VALUES.copy()
+
+        return {
+            'sl_pct': sl_values,
+            'tp_pct': tp_values,
+            'exit_bars': exit_values,
+            'leverage': leverage_values,
+        }
+
     def build_absolute_space(self, timeframe: str = '15m') -> Dict[str, List]:
         """
         Build parameter space for AI strategies using predefined constants.

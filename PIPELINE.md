@@ -21,7 +21,6 @@ Pipeline Completa Aggiornata:
 ├─────────────────────────────────────────────────────────────────┤
 │ • Testa ~1015 combo SL × TP × leverage × exit_bars              │
 │ • Threshold filter: sharpe≥0.3, WR≥0.35, exp≥0.002, DD≤0.50     │
-│ • Robustness filter: ≥50% neighbors passano threshold           │
 │ • Se 0 combo passano → FAILED + DELETE                          │
 │ • Output: BEST COMBO (params ottimali)                          │
 └─────────────────────────────────────────────────────────────────┘
@@ -352,12 +351,52 @@ Pipeline Completa Aggiornata:
 ║  Decision Flow:                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
 ║  │ is_pattern_based?                                                      │  ║
-║  │    YES → build_pattern_centered_space() (valori centrati sul pattern)  │  ║
+║  │    YES → has execution_type?                                           │  ║
+║  │           YES → build_execution_type_space() (allineato al target)     │  ║
+║  │           NO  → build_pattern_centered_space() (fallback)              │  ║
 ║  │    NO  → build_absolute_space(timeframe) (range assoluti per TF)       │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ PATTERN-CENTERED SPACE (per PatStrat_*)                                │  ║
+║  │ EXECUTION TYPE ALIGNED SPACE (PREFERITO per PatStrat_*)               │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │ Pattern-discovery valida i pattern su target con semantiche diverse:   │  ║
+║  │                                                                        │  ║
+║  │ TOUCH-BASED (target_max_*): verifica se prezzo TOCCA livello          │  ║
+║  │   → Allineato con TP-based execution                                   │  ║
+║  │   → TP DEVE esistere (centrato su magnitude)                           │  ║
+║  │   → Exit time è backstop (può essere 0)                                │  ║
+║  │                                                                        │  ║
+║  │ CLOSE-BASED (tutti gli altri): verifica CLOSE a fine periodo          │  ║
+║  │   → Allineato con time-based execution                                 │  ║
+║  │   → TP DISABILITATO (sempre 0)                                         │  ║
+║  │   → Exit time è primario (non può essere 0)                            │  ║
+║  │                                                                        │  ║
+║  │ ┌───────────────────────────────────────────────────────────────────┐  │  ║
+║  │ │ TOUCH_BASED SPACE                                                │  │  ║
+║  │ ├───────────────────────────────────────────────────────────────────┤  │  ║
+║  │ │ TP:   [50%, 75%, 100%, 125%, 150%] di magnitude (NO zero)        │  │  ║
+║  │ │ SL:   [100%, 150%, 200%, 250%] di magnitude (max 2.5:1 ratio)    │  │  ║
+║  │ │ EXIT: [0, 100%, 150%, 200%] di holding_bars (0 = backstop off)   │  │  ║
+║  │ │ LEV:  [1, 2, 3, 5, 10, 20, 40]                                   │  │  ║
+║  │ │ Combinazioni: 5 × 4 × 4 × 7 = 560                                │  │  ║
+║  │ └───────────────────────────────────────────────────────────────────┘  │  ║
+║  │                                                                        │  ║
+║  │ ┌───────────────────────────────────────────────────────────────────┐  │  ║
+║  │ │ CLOSE_BASED SPACE                                                │  │  ║
+║  │ ├───────────────────────────────────────────────────────────────────┤  │  ║
+║  │ │ TP:   [0] SOLO (disabilitato - time exit è primario)             │  │  ║
+║  │ │ SL:   [200%, 300%, 400%, 500%] di magnitude (wider per respiro)  │  │  ║
+║  │ │ EXIT: [50%, 75%, 100%, 125%, 150%] di holding_bars (NO zero)     │  │  ║
+║  │ │ LEV:  [1, 2, 3, 5, 10, 20, 40]                                   │  │  ║
+║  │ │ Combinazioni: 1 × 4 × 5 × 7 = 140                                │  │  ║
+║  │ └───────────────────────────────────────────────────────────────────┘  │  ║
+║  │                                                                        │  ║
+║  │ File: target_selector.py (selezione), parametric_backtest.py (spazio)  │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ PATTERN-CENTERED SPACE (fallback per PatStrat_* senza execution_type)  │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │ Input dal pattern:                                                     │  ║
 ║  │   - base_tp_pct: target_magnitude (es: 6%)                             │  ║
@@ -480,29 +519,9 @@ Pipeline Completa Aggiornata:
 ║  │ Combinazioni che non passano TUTTI i threshold → SCARTATE              │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
-║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ ROBUSTNESS FILTER (per combo che passano threshold)                    │  ║
-║  ├────────────────────────────────────────────────────────────────────────┤  ║
-║  │ Obiettivo: Verificare che non sia un picco isolato (overfitting)       │  ║
-║  │                                                                        │  ║
-║  │ Logica:                                                                │  ║
-║  │   1. Per ogni combo che passa threshold, trova i ~8 vicini             │  ║
-║  │      (±1 step per SL, TP, leverage, exit_bars)                         │  ║
-║  │   2. Conta quanti vicini hanno sharpe >= min_sharpe (0.3)              │  ║
-║  │   3. robustness = neighbors_passing / total_neighbors                  │  ║
-║  │                                                                        │  ║
-║  │ Da config.yaml → backtesting.robustness:                               │  ║
-║  │   min_threshold: 0.50 → almeno 50% dei vicini devono passare           │  ║
-║  │                                                                        │  ║
-║  │ Esempio: 8 vicini, 5 con sharpe >= 0.3 → robustness = 5/8 = 0.625 ok   │  ║
-║  │ Esempio: 8 vicini, 3 con sharpe >= 0.3 → robustness = 3/8 = 0.375 ko   │  ║
-║  │                                                                        │  ║
-║  │ Se TUTTE le combo falliscono → strategia DELETE                        │  ║
-║  └────────────────────────────────────────────────────────────────────────┘  ║
-║                                                                              ║
 ║  Output:                                                                     ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ DataFrame ordinato per score DESC (solo combo che passano entrambi):   │  ║
+║  │ DataFrame ordinato per score DESC (solo combo che passano threshold):  │  ║
 ║  │                                                                        │  ║
 ║  │ ┌───────┬───────┬─────┬──────┬────────┬────────┬────────┬───────────┐  │  ║
 ║  │ │sl_pct │tp_pct │ lev │ exit │ sharpe │ max_dd │win_rate│   score   │  │  ║
@@ -797,26 +816,24 @@ Pipeline Completa Aggiornata:
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║                                                                              ║
 ║  Obiettivo: Calcolare lo score finale della strategia combinando metriche    ║
-║             IS, OOS e robustness per il ranking nel pool.                    ║
+║             IS e OOS per il ranking nel pool.                                ║
 ║                                                                              ║
 ║  Input:                                                                      ║
 ║    - backtest_result: BacktestResult con metriche IS                         ║
 ║    - final_result: metriche pesate IS+OOS                                    ║
 ║    - degradation: (is_sharpe - oos_sharpe) / is_sharpe                       ║
-║    - robustness_score: da parametric optimization (neighbor quality)         ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ FORMULA SCORE (6 componenti)                                           │  ║
+║  │ FORMULA SCORE (5 componenti)                                           │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │                                                                        │  ║
 ║  │  BacktestScorer.score_from_backtest_result()                           │  ║
 ║  │                                                                        │  ║
 ║  │  Formula:                                                              │  ║
-║  │    score = ( 0.35 * expectancy_norm +                                  │  ║
-║  │              0.20 * sharpe_norm +                                      │  ║
+║  │    score = ( 0.40 * expectancy_norm +                                  │  ║
+║  │              0.25 * sharpe_norm +                                      │  ║
 ║  │              0.10 * win_rate_norm +                                    │  ║
 ║  │              0.15 * drawdown_norm +                                    │  ║
-║  │              0.10 * robustness_norm +                                  │  ║
 ║  │              0.10 * recency_norm ) * 100                               │  ║
 ║  │                                                                        │  ║
 ║  │  Normalizzazioni:                                                      │  ║
@@ -824,7 +841,6 @@ Pipeline Completa Aggiornata:
 ║  │    sharpe_norm:     [0, 3.0]  -> [0, 1]                                │  ║
 ║  │    win_rate_norm:   gia' [0, 1]                                        │  ║
 ║  │    drawdown_norm:   1 - (dd / 0.30)       (30% max = 0)                │  ║
-║  │    robustness_norm: neighbor quality [0, 1] (da parametric)            │  ║
 ║  │    recency_norm:    0.5 - degradation     (OOS vs IS)                  │  ║
 ║  │                                                                        │  ║
 ║  │  Output: score 0-100                                                   │  ║

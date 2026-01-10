@@ -1,20 +1,18 @@
 """
-Backtest Scorer - Unified Score Formula (6 Components)
+Backtest Scorer - Unified Score Formula (5 Components)
 
 Calculates composite score for strategy ranking based on:
-- Expectancy (edge per trade) - 35%
-- Sharpe ratio - 20%
+- Expectancy (edge per trade) - 40%
+- Sharpe ratio - 25%
 - Win rate - 10%
 - Drawdown penalty - 15%
-- Robustness (parameter stability) - 10%
 - Recency (OOS vs IS) - 10%
 
 Score Formula:
-    Score = 0.35 * expectancy_norm +
-            0.20 * sharpe_norm +
+    Score = 0.40 * expectancy_norm +
+            0.25 * sharpe_norm +
             0.10 * win_rate_norm +
             0.15 * drawdown_norm +
-            0.10 * robustness_norm +
             0.10 * recency_norm
 
 All components normalized to 0-100, final score naturally in 0-100 range.
@@ -95,23 +93,18 @@ class BacktestScorer:
     def score_from_backtest_result(
         self,
         backtest_result,
-        degradation: float = 0.0,
-        robustness_score: float = 0.5
+        degradation: float = 0.0
     ) -> float:
         """
-        Calculate score from BacktestResult model using 6-component formula.
+        Calculate score from BacktestResult model using 5-component formula.
 
-        Uses IN-SAMPLE metrics (statistically robust from IS period) + robustness
-        (parameter stability) + recency (OOS performance).
+        Uses IN-SAMPLE metrics (statistically robust from IS period) + recency (OOS performance).
 
         Args:
             backtest_result: BacktestResult model instance (must be in-sample period)
             degradation: (is_sharpe - oos_sharpe) / is_sharpe
                          Negative = OOS better, Positive = OOS worse
                          Range typically [-0.5, +0.5]
-            robustness_score: Parameter stability score (0-1)
-                              High = neighbors perform similarly to best
-                              Default 0.5 = neutral
 
         Returns:
             Final score (0-100 scale)
@@ -131,12 +124,11 @@ class BacktestScorer:
         win_rate = backtest_result.win_rate or 0.0
         max_drawdown = backtest_result.max_drawdown or 0.0
 
-        # Normalize all 6 components to 0-1 scale
+        # Normalize all 5 components to 0-1 scale
         expectancy_norm = self._normalize_expectancy(expectancy)
         sharpe_norm = self._normalize_sharpe(sharpe)
         win_rate_norm = win_rate  # Already 0-1
         drawdown_norm = self._normalize_drawdown(max_drawdown)
-        robustness_norm = min(1.0, max(0.0, robustness_score))  # Already 0-1
 
         # Recency: degradation [-0.5, +0.5] → recency_norm [0, 1]
         # -0.5 (OOS much better) → 1.0
@@ -144,13 +136,12 @@ class BacktestScorer:
         recency_norm = 0.5 - degradation
         recency_norm = min(1.0, max(0.0, recency_norm))
 
-        # 6-component weighted sum (each weight from config)
+        # 5-component weighted sum (each weight from config)
         score = (
             self.weights['expectancy'] * expectancy_norm +
             self.weights['sharpe'] * sharpe_norm +
             self.weights['win_rate'] * win_rate_norm +
             self.weights['drawdown'] * drawdown_norm +
-            self.weights['robustness'] * robustness_norm +
             self.weights['recency'] * recency_norm
         )
 

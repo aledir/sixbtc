@@ -170,16 +170,6 @@ class ContinuousBacktesterProcess:
         # Initial capital for expectancy normalization
         self.initial_capital = self.config.get_required('backtesting.initial_capital')
 
-        # Robustness validation (parameter stability check)
-        self.robustness_enabled = self.config.get_required('backtesting.robustness.enabled')
-        # Load thresholds per generation_mode
-        self.robustness_thresholds = {
-            'pattern': self.config.get('backtesting.robustness.min_threshold_pattern', 0.30),
-            'optimized': self.config.get('backtesting.robustness.min_threshold_optimized', 0.40),
-            'ai_free': self.config.get_required('backtesting.robustness.min_threshold'),
-            'ai_assigned': self.config.get_required('backtesting.robustness.min_threshold'),
-        }
-
         # SCORER and PoolManager for post-backtest scoring and pool management
         self.scorer = BacktestScorer(self.config._raw_config)
         self.pool_manager = PoolManager(self.config._raw_config)
@@ -525,8 +515,7 @@ class ContinuousBacktesterProcess:
                         strategy.code,
                         strategy.timeframe,
                         strategy.pattern_coins,
-                        strategy.base_code_hash,  # Pass hash to detect pre-parametrized strategies
-                        strategy.generation_mode  # Pass for robustness threshold selection
+                        strategy.base_code_hash  # Pass hash to detect pre-parametrized strategies
                     )
                     validated_futures[future] = (str(strategy.id), strategy.name)
                     await asyncio.sleep(0.1)
@@ -544,8 +533,7 @@ class ContinuousBacktesterProcess:
         code: str,
         original_tf: str,
         pattern_coins: Optional[List[str]] = None,
-        base_code_hash: Optional[str] = None,
-        generation_mode: str = "ai_free"
+        base_code_hash: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
         Run training/holdout backtest on strategy's assigned timeframe.
@@ -638,8 +626,7 @@ class ContinuousBacktesterProcess:
                     # Initial parametric to find best combo
                     parametric_results = self._run_parametric_backtest(
                         strategy_instance, is_data, assigned_tf, is_pattern_based,
-                        strategy_id=strategy_id, strategy_name=strategy_name,
-                        generation_mode=generation_mode
+                        strategy_id=strategy_id, strategy_name=strategy_name
                     )
 
                     if not parametric_results:
@@ -789,15 +776,13 @@ class ContinuousBacktesterProcess:
                         # Get degradation for recency bonus
                         degradation = backtest_result.get('degradation', 0.0)
 
-                        # Get combinations_tested and robustness from parametric results (if parametric was used)
+                        # Get combinations_tested from parametric results (if parametric was used)
                         combinations = all_parametric_results[0].get('combinations_tested') if all_parametric_results else None
-                        robustness = all_parametric_results[0].get('robustness_score', 0.5) if all_parametric_results else 0.5
 
                         # Try to enter ACTIVE pool (handles leaderboard logic)
                         entered, pool_reason = self._promote_to_active_pool(
                             strategy_id, db_backtest, backtest_start_time, degradation,
-                            combinations_tested=combinations,
-                            robustness_score=robustness
+                            combinations_tested=combinations
                         )
 
                         if entered:
@@ -886,8 +871,7 @@ class ContinuousBacktesterProcess:
         timeframe: str,
         is_pattern_based: bool = False,
         strategy_id=None,
-        strategy_name: str = None,
-        generation_mode: str = "ai_free"
+        strategy_name: str = None
     ) -> List[Dict]:
         """
         Run parametric backtest generating strategies with different SL/TP/leverage/exit.
@@ -938,12 +922,28 @@ class ContinuousBacktesterProcess:
             base_exit_bars = getattr(strategy_instance, 'exit_after_bars', 20)
             base_leverage = getattr(strategy_instance, 'leverage', 1)
 
-            space = self.parametric_backtester.build_pattern_centered_space(
-                base_tp_pct=base_tp_pct,
-                base_sl_pct=base_sl_pct,
-                base_exit_bars=base_exit_bars,
-                base_leverage=base_leverage
-            )
+            # Check for execution_type to use aligned parameter space
+            execution_type = getattr(strategy_instance, 'execution_type', None)
+
+            if execution_type:
+                # Use execution-type aligned space
+                # For close_based: TP=0, optimize around time exit
+                # For touch_based: optimize around TP, time exit as backstop
+                base_magnitude = base_tp_pct if base_tp_pct > 0 else 0.02
+                space = self.parametric_backtester.build_execution_type_space(
+                    execution_type=execution_type,
+                    base_magnitude=base_magnitude,
+                    base_exit_bars=base_exit_bars,
+                )
+                logger.info(f"Using execution-type aligned space: {execution_type}")
+            else:
+                # Fallback: use pattern-centered space
+                space = self.parametric_backtester.build_pattern_centered_space(
+                    base_tp_pct=base_tp_pct,
+                    base_sl_pct=base_sl_pct,
+                    base_exit_bars=base_exit_bars,
+                    base_leverage=base_leverage
+                )
         else:
             # AI STRATEGY: use timeframe-scaled absolute ranges
             space = self.parametric_backtester.build_absolute_space(timeframe)
@@ -1064,14 +1064,9 @@ class ContinuousBacktesterProcess:
         # Track total combinations tested (for metrics)
         combinations_tested = len(results_df)
 
-        # Get parameter space for robustness calculation
-        param_space = self.parametric_backtester.parameter_space
-
         # Convert to list of dicts matching expected format
         # Use float() to convert np.float64 to native Python float (required for DB)
-        # Calculate robustness and filter if enabled
         results = []
-        robustness_rejected = 0
         for _, row in valid_results.iterrows():
             params = {
                 'sl_pct': float(row['sl_pct']),
@@ -1079,27 +1074,6 @@ class ContinuousBacktesterProcess:
                 'leverage': int(row['leverage']),
                 'exit_bars': int(row['exit_bars']),
             }
-
-            # Calculate robustness for this parameter set
-            if self.robustness_enabled:
-                robustness_score = self._calculate_robustness_from_neighbors(
-                    results_df, params, param_space
-                )
-
-                # Get threshold based on generation_mode
-                threshold = self.robustness_thresholds.get(generation_mode, 0.50)
-
-                # Filter by robustness threshold
-                if robustness_score < threshold:
-                    robustness_rejected += 1
-                    logger.debug(
-                        f"[{strategy_name}] Combo rejected by robustness: "
-                        f"score={robustness_score:.2f} < threshold={threshold:.0%} "
-                        f"(mode={generation_mode})"
-                    )
-                    continue
-            else:
-                robustness_score = 0.5  # Neutral default when disabled
 
             result = {
                 'sharpe_ratio': float(row['sharpe']),
@@ -1109,7 +1083,6 @@ class ContinuousBacktesterProcess:
                 'total_trades': int(row['total_trades']),
                 'total_return': float(row['total_return']),
                 'parametric_score': float(row['score']),
-                'robustness_score': robustness_score,
                 # Store the parameters used
                 'params': params,
                 # Track combinations tested (same for all results from this base strategy)
@@ -1117,20 +1090,11 @@ class ContinuousBacktesterProcess:
             }
             results.append(result)
 
-        # Log robustness filtering if any were rejected
-        if robustness_rejected > 0:
-            threshold = self.robustness_thresholds.get(generation_mode, 0.50)
-            logger.info(
-                f"[{strategy_name}] Robustness filter ({generation_mode}): {robustness_rejected} rejected "
-                f"(threshold={threshold:.0%}), {len(results)} passed"
-            )
-
         if results:
             best = results[0]
             logger.info(
                 f"[{strategy_name}] Parametric: {len(results)} strategies | "
                 f"Best: Sharpe={best['sharpe_ratio']:.2f}, Trades={best['total_trades']}, "
-                f"Robustness={best['robustness_score']:.2f}, "
                 f"SL={best['params']['sl_pct']:.1%}, TP={best['params']['tp_pct']:.1%}"
             )
         else:
@@ -1203,121 +1167,6 @@ class ContinuousBacktesterProcess:
                     )
 
         return results
-
-    def _calculate_robustness_from_neighbors(
-        self,
-        all_results: pd.DataFrame,
-        best_params: dict,
-        param_space: dict
-    ) -> float:
-        """
-        Calculate robustness as fraction of neighbors that pass min_sharpe threshold.
-
-        Neighbors are parameter combinations with ONE dimension different (adjacent in grid).
-        This approach counts how many neighbors are "good enough" in absolute terms,
-        rather than comparing to the best (which penalizes strategies with high best).
-
-        Example:
-            - Best has Sharpe 3.0, neighbors have [1.5, 1.2, 0.8, 1.4, 0.9, 1.1, 1.3, 0.7]
-            - If min_sharpe = 0.3, then 8/8 neighbors pass → robustness = 1.0
-            - Old method: avg(neighbors)/best = 1.1/3.0 = 0.37 (would barely pass!)
-
-        Args:
-            all_results: DataFrame with ALL parametric results (sorted by score desc)
-            best_params: Dict with best parameter values {sl_pct, tp_pct, leverage, exit_bars}
-            param_space: Dict with parameter grids {sl_pct: [...], tp_pct: [...], ...}
-
-        Returns:
-            Robustness score [0.0, 1.0] = fraction of neighbors passing min_sharpe
-        """
-        # Get best Sharpe
-        best_sharpe = all_results.iloc[0]['sharpe']
-        if best_sharpe <= 0:
-            return 0.0  # No edge = not robust
-
-        # Get grid values
-        sl_values = param_space.get('sl_pct', [])
-        tp_values = param_space.get('tp_pct', [])
-        lev_values = param_space.get('leverage', [])
-        exit_values = param_space.get('exit_bars', [])
-
-        # Find indices of best params in grids
-        try:
-            best_sl_idx = sl_values.index(best_params['sl_pct'])
-            best_tp_idx = tp_values.index(best_params['tp_pct'])
-            best_lev_idx = lev_values.index(best_params['leverage'])
-            best_exit_idx = exit_values.index(best_params['exit_bars'])
-        except (ValueError, KeyError):
-            # Param not in grid (shouldn't happen) - return neutral
-            return 0.5
-
-        # Build neighbor parameter sets (ONE dimension different, adjacent)
-        neighbor_sharpes = []
-
-        # SL neighbors
-        for delta in [-1, 1]:
-            idx = best_sl_idx + delta
-            if 0 <= idx < len(sl_values):
-                match = all_results[
-                    (all_results['sl_pct'] == sl_values[idx]) &
-                    (all_results['tp_pct'] == best_params['tp_pct']) &
-                    (all_results['leverage'] == best_params['leverage']) &
-                    (all_results['exit_bars'] == best_params['exit_bars'])
-                ]
-                if not match.empty:
-                    neighbor_sharpes.append(match.iloc[0]['sharpe'])
-
-        # TP neighbors
-        for delta in [-1, 1]:
-            idx = best_tp_idx + delta
-            if 0 <= idx < len(tp_values):
-                match = all_results[
-                    (all_results['sl_pct'] == best_params['sl_pct']) &
-                    (all_results['tp_pct'] == tp_values[idx]) &
-                    (all_results['leverage'] == best_params['leverage']) &
-                    (all_results['exit_bars'] == best_params['exit_bars'])
-                ]
-                if not match.empty:
-                    neighbor_sharpes.append(match.iloc[0]['sharpe'])
-
-        # Leverage neighbors
-        for delta in [-1, 1]:
-            idx = best_lev_idx + delta
-            if 0 <= idx < len(lev_values):
-                match = all_results[
-                    (all_results['sl_pct'] == best_params['sl_pct']) &
-                    (all_results['tp_pct'] == best_params['tp_pct']) &
-                    (all_results['leverage'] == lev_values[idx]) &
-                    (all_results['exit_bars'] == best_params['exit_bars'])
-                ]
-                if not match.empty:
-                    neighbor_sharpes.append(match.iloc[0]['sharpe'])
-
-        # Exit bars neighbors
-        for delta in [-1, 1]:
-            idx = best_exit_idx + delta
-            if 0 <= idx < len(exit_values):
-                match = all_results[
-                    (all_results['sl_pct'] == best_params['sl_pct']) &
-                    (all_results['tp_pct'] == best_params['tp_pct']) &
-                    (all_results['leverage'] == best_params['leverage']) &
-                    (all_results['exit_bars'] == exit_values[idx])
-                ]
-                if not match.empty:
-                    neighbor_sharpes.append(match.iloc[0]['sharpe'])
-
-        if not neighbor_sharpes:
-            # No neighbors found (edge case) - return neutral
-            return 0.5
-
-        # Count neighbors that pass min_sharpe threshold
-        neighbors_passing = sum(1 for s in neighbor_sharpes if s >= self.min_sharpe)
-        total_neighbors = len(neighbor_sharpes)
-
-        # Robustness = fraction of neighbors that are "good enough"
-        robustness = neighbors_passing / total_neighbors
-
-        return robustness
 
     def _validate_oos(
         self,
@@ -2177,14 +2026,13 @@ class ContinuousBacktesterProcess:
         backtest_result: BacktestResult,
         backtest_start_time: Optional[float] = None,
         degradation: float = 0.0,
-        combinations_tested: Optional[int] = None,
-        robustness_score: float = 0.5
+        combinations_tested: Optional[int] = None
     ) -> Tuple[bool, str]:
         """
         Attempt to promote a strategy to the ACTIVE pool after backtest.
 
         Flow:
-        1. Calculate score from backtest result (6-component formula)
+        1. Calculate score from backtest result (5-component formula)
         2. If score < min_score -> reject (no shuffle test needed)
         3. Run shuffle test (cached by base_code_hash)
         4. If shuffle fails -> reject
@@ -2198,7 +2046,6 @@ class ContinuousBacktesterProcess:
             backtest_start_time: Start time for duration calculation
             degradation: Holdout degradation [-0.5, +0.5] for recency component
             combinations_tested: Number of parametric combinations tested (for metrics)
-            robustness_score: Parameter stability score [0, 1] (default 0.5 = neutral)
 
         Returns:
             (success, reason) tuple
@@ -2211,9 +2058,9 @@ class ContinuousBacktesterProcess:
             if backtest_start_time is not None:
                 duration_ms = int((time.time() - backtest_start_time) * 1000)
 
-            # Calculate score using 6-component formula
+            # Calculate score using 5-component formula
             score = self.scorer.score_from_backtest_result(
-                backtest_result, degradation, robustness_score
+                backtest_result, degradation
             )
             strategy = backtest_result.strategy
             strategy_name = strategy.name if strategy else str(strategy_id)

@@ -35,6 +35,7 @@ class TargetResult:
     magnitude: Optional[float] = None  # Target price move in % (e.g., 2.0 for 2%)
     is_valid: bool = False
     quality_score: float = 0.0
+    execution_type: str = "close_based"  # 'touch_based' or 'close_based'
 
 
 @dataclass
@@ -78,6 +79,9 @@ class Pattern:
     target_results: Optional[List[TargetResult]] = None
     original_pattern_id: Optional[str] = None  # For virtual patterns
     is_virtual: bool = False  # True if expanded from multi-target
+
+    # Execution type alignment
+    execution_type: str = "close_based"  # 'touch_based' or 'close_based'
 
     def get_high_edge_coins(
         self,
@@ -376,7 +380,8 @@ class PatternFetcher:
                     hold_hours=tr_data.get('hold_hours', 24),
                     magnitude=tr_data.get('magnitude'),  # Target price move in %
                     is_valid=tr_data.get('is_valid', False),
-                    quality_score=tr_data.get('quality_score', 0.0)
+                    quality_score=tr_data.get('quality_score', 0.0),
+                    execution_type=tr_data.get('execution_type', 'close_based'),
                 )
                 for target_name, tr_data in target_results_data.items()
                 if target_name and tr_data  # Skip empty entries
@@ -421,6 +426,9 @@ class PatternFetcher:
             target_results=target_results,
             original_pattern_id=None,
             is_virtual=False,
+
+            # Execution type alignment
+            execution_type=data.get('execution_type', 'close_based'),
         )
 
     def get_stats(self) -> dict:
@@ -527,6 +535,7 @@ class PatternFetcher:
                 target_results=pattern.target_results,
                 original_pattern_id=pattern.id,
                 is_virtual=True,
+                execution_type=target.execution_type,
             )
             virtual_patterns.append(virtual)
 
