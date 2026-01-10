@@ -245,13 +245,13 @@ class StrategyBuilder:
             coin_config = self.config.get('pattern_discovery', {}).get('coin_selection', {})
             min_edge = coin_config.get('min_edge', 0.10)
             min_signals = coin_config.get('min_signals', 50)
-            # max_coins from backtesting config (shared with AI strategies)
-            max_coins = self.config.get('backtesting', {}).get('max_coins', 30)
+            # Liquidity threshold from trading config (no artificial coin limit)
+            min_volume = self.config.get('trading', {}).get('min_volume_24h', 1_000_000)
 
             pattern_coins = pattern.get_high_edge_coins(
                 min_edge=min_edge,
                 min_signals=min_signals,
-                max_coins=max_coins
+                min_volume=min_volume
             )
             if pattern_coins:
                 logger.info(

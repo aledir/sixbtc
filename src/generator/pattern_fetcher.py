@@ -93,20 +93,23 @@ class Pattern:
         self,
         min_edge: float = 0.10,
         min_signals: int = 50,
-        max_coins: int = 30,
+        min_volume: Optional[float] = None,
         filter_tradable: bool = True
     ) -> List[str]:
         """
         Get coins where this pattern has demonstrated positive edge.
 
+        Returns ALL coins meeting criteria (no artificial limit).
+        Coins are filtered by edge, signal count, and optionally liquidity.
+
         Args:
             min_edge: Minimum edge threshold (default 10%)
             min_signals: Minimum number of signals for reliability
-            max_coins: Maximum coins to return
-            filter_tradable: If True, only return coins in CoinRegistry (default True)
+            min_volume: Minimum 24h volume in USD for liquidity filter
+            filter_tradable: If True, only return coins with sufficient liquidity
 
         Returns:
-            List of coin symbols sorted by edge (descending)
+            List of coin symbols sorted by edge (descending), no limit
         """
         if not self.coin_performance:
             return []
@@ -115,8 +118,11 @@ class Pattern:
         tradable_coins = None
         if filter_tradable:
             try:
-                from src.data.coin_registry import get_active_pairs
-                tradable_coins = set(get_active_pairs())
+                from src.data.coin_registry import CoinRegistry
+                registry = CoinRegistry()
+                # Get coins with sufficient liquidity (min_volume threshold)
+                active_pairs = registry.get_active_pairs(min_volume=min_volume)
+                tradable_coins = set(active_pairs)
             except Exception as e:
                 logger.warning(f"Failed to get tradable coins: {e}")
                 tradable_coins = None
@@ -127,10 +133,10 @@ class Pattern:
             and (tradable_coins is None or cp.coin in tradable_coins)
         ]
 
-        # Sort by edge descending
+        # Sort by edge descending - return ALL matching coins (no limit)
         sorted_coins = sorted(filtered, key=lambda x: x.edge, reverse=True)
 
-        return [cp.coin for cp in sorted_coins[:max_coins]]
+        return [cp.coin for cp in sorted_coins]
 
 
 class PatternFetcher:

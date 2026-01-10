@@ -222,10 +222,10 @@ pattern_discovery:
   min_quality_score: 0.75      # Minimum pattern quality score
 
   # Coin selection from pattern's coin_performance
+  # Uses ALL coins meeting edge/signals criteria + liquidity filter from trading.min_volume_24h
   coin_selection:
     min_edge: 0.10             # 10% minimum edge to include coin
     min_signals: 50            # Minimum signals for statistical reliability
-    # NOTE: max_coins is in backtesting.max_coins (shared with AI strategies)
 
   # Multi-target expansion: one pattern with N Tier 1 targets -> N strategies
   multi_target:
@@ -256,10 +256,8 @@ backtesting:
     interval_days: 3         # Re-test ACTIVE strategies every 3 days
     # Re-backtest uses: optimal TF only, 365+30 days, same parameters (no parametric)
 
-  # Coins per backtest (applies to BOTH pattern and AI strategies)
-  # Pattern: selects top N coins by edge from pattern's coin_performance
-  # AI: selects top N coins by volume from active trading pairs
-  max_coins: 30
+  # Max coins for AI strategies (pattern strategies use ALL coins meeting edge criteria)
+  max_coins: 30              # Top 30 by volume for AI strategies
 
   # In-sample/Out-of-sample split (unified approach)
   # Total period = is_days + oos_days = 150 days

@@ -335,10 +335,11 @@ class ContinuousBacktesterProcess:
             return None, "no_cached_coins"
 
         # Level 3: Coverage filter using UNIFIED scroll-down logic
+        # For pattern strategies: use ALL coins that pass (no artificial limit)
         validated_coins, status = self._scroll_down_coverage(
             coins=cached_coins,
             timeframe=timeframe,
-            target_count=self.max_coins
+            target_count=len(cached_coins)  # Take all coins with valid coverage
         )
 
         if not validated_coins:
@@ -347,7 +348,7 @@ class ContinuousBacktesterProcess:
 
         logger.info(
             f"Validated {len(validated_coins)} pattern coins "
-            f"(from {len(pattern_coins)} edge-sorted, target: {self.max_coins})"
+            f"(from {len(pattern_coins)} edge-sorted, no limit)"
         )
 
         return validated_coins, "validated"
@@ -384,12 +385,13 @@ class ContinuousBacktesterProcess:
             )
 
         try:
+            # Use all validated pairs (pattern strategies may have more than max_coins)
             is_data, oos_data = self.data_loader.load_multi_symbol_is_oos(
                 symbols=pairs,
                 timeframe=timeframe,
                 is_days=self.is_days,
                 oos_days=self.oos_days,
-                target_count=self.max_coins  # Scroll through pairs to find 30 with valid data
+                target_count=len(pairs)  # Use all validated pairs
             )
 
             self._data_cache[is_cache_key] = is_data
@@ -1939,10 +1941,11 @@ class ContinuousBacktesterProcess:
                 return (False, "Could not load strategy instance")
 
             # Validate pairs (same 3-level validation as initial backtest)
+            # Use all provided pairs (pattern strategies may have > max_coins)
             validated_pairs, status = self._scroll_down_coverage(
                 coins=pairs,
                 timeframe=assigned_tf,
-                target_count=self.max_coins
+                target_count=len(pairs)
             )
 
             if validated_pairs is None:

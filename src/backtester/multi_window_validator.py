@@ -103,12 +103,13 @@ class MultiWindowValidator:
 
             try:
                 # Load data for this window (no IS/OOS split needed)
+                # Use all validated pairs (no artificial limit)
                 window_data = self.data_loader.load_multi_symbol(
                     symbols=pairs,
                     timeframe=timeframe,
                     days=window_days,
                     end_date=end_date,
-                    target_count=self.max_coins
+                    target_count=len(pairs)  # Respect validated pairs count
                 )
 
                 if not window_data:
