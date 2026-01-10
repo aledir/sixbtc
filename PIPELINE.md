@@ -358,46 +358,46 @@ Pipeline Completa Aggiornata:
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ EXECUTION TYPE ALIGNED SPACE (PREFERITO per PatStrat_*)               │  ║
+║  │ EXECUTION TYPE ALIGNED SPACE (PREFERITO per PatStrat_*)                │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │ Pattern-discovery valida i pattern su target con semantiche diverse:   │  ║
 ║  │                                                                        │  ║
-║  │ TOUCH-BASED (target_max_*): verifica se prezzo TOCCA livello          │  ║
+║  │ TOUCH-BASED (target_max_*): verifica se prezzo TOCCA livello           │  ║
 ║  │   → Allineato con TP-based execution                                   │  ║
 ║  │   → TP DEVE esistere (centrato su magnitude)                           │  ║
 ║  │   → Exit time è backstop (può essere 0)                                │  ║
 ║  │                                                                        │  ║
-║  │ CLOSE-BASED (tutti gli altri): verifica CLOSE a fine periodo          │  ║
+║  │ CLOSE-BASED (tutti gli altri): verifica CLOSE a fine periodo           │  ║
 ║  │   → Allineato con time-based execution                                 │  ║
 ║  │   → TP DISABILITATO (sempre 0)                                         │  ║
 ║  │   → Exit time è primario (non può essere 0)                            │  ║
 ║  │                                                                        │  ║
 ║  │ ┌───────────────────────────────────────────────────────────────────┐  │  ║
-║  │ │ TOUCH_BASED SPACE                                                │  │  ║
+║  │ │ TOUCH_BASED SPACE                                                 │  │  ║
 ║  │ ├───────────────────────────────────────────────────────────────────┤  │  ║
-║  │ │ TP:   [50%, 75%, 100%, 125%, 150%] di magnitude (NO zero)        │  │  ║
-║  │ │ SL:   [100%, 150%, 200%, 250%] di magnitude (max 2.5:1 ratio)    │  │  ║
-║  │ │ EXIT: [0, 100%, 150%, 200%] di holding_bars (0 = backstop off)   │  │  ║
-║  │ │ LEV:  [1, 2, 3, 5, 10, 20, 40]                                   │  │  ║
-║  │ │ Combinazioni: 5 × 4 × 4 × 7 = 560                                │  │  ║
+║  │ │ TP:   [50%, 75%, 100%, 125%, 150%] di magnitude (NO zero)         │  │  ║
+║  │ │ SL:   [100%, 150%, 200%, 250%] di magnitude (max 2.5:1 ratio)     │  │  ║
+║  │ │ EXIT: [0, 100%, 150%, 200%] di holding_bars (0 = backstop off)    │  │  ║
+║  │ │ LEV:  [1, 2, 3, 5, 10, 20, 40]                                    │  │  ║
+║  │ │ Combinazioni: 5 × 4 × 4 × 7 = 560                                 │  │  ║
 ║  │ └───────────────────────────────────────────────────────────────────┘  │  ║
 ║  │                                                                        │  ║
 ║  │ ┌───────────────────────────────────────────────────────────────────┐  │  ║
-║  │ │ CLOSE_BASED SPACE                                                │  │  ║
+║  │ │ CLOSE_BASED SPACE                                                 │  │  ║
 ║  │ ├───────────────────────────────────────────────────────────────────┤  │  ║
-║  │ │ TP:   [0] SOLO (disabilitato - time exit è primario)             │  │  ║
-║  │ │ SL:   ATR-based: [200%, 300%, 400%, 500%] di atr_signal_median   │  │  ║
-║  │ │       Fallback:  [400%, 600%, 800%, 1000%] di magnitude          │  │  ║
-║  │ │ EXIT: [50%, 75%, 100%, 125%, 150%] di holding_bars (NO zero)     │  │  ║
-║  │ │ LEV:  [1, 2, 3, 5, 10, 20, 40]                                   │  │  ║
-║  │ │ Combinazioni: 1 × 4 × 5 × 7 = 140                                │  │  ║
-║  │ │                                                                  │  │  ║
-║  │ │ Rationale SL ATR-based:                                          │  │  ║
-║  │ │ - Pattern validato con TP/SL infiniti (solo time exit)           │  │  ║
-║  │ │ - SL deve proteggere da perdite catastrofiche, non da noise      │  │  ║
-║  │ │ - atr_signal_median riflette volatilità storica quando pattern   │  │  ║
-║  │ │   ha fired → SL proporzionato alla condizione di mercato         │  │  ║
-║  │ │ - Multipliers 2-5x ATR danno spazio per oscillazioni normali     │  │  ║
+║  │ │ TP:   [0] SOLO (disabilitato - time exit è primario)              │  │  ║
+║  │ │ SL:   ATR-based: [200%, 300%, 400%, 500%] di atr_signal_median    │  │  ║
+║  │ │       Fallback:  [400%, 600%, 800%, 1000%] di magnitude           │  │  ║
+║  │ │ EXIT: [50%, 75%, 100%, 125%, 150%] di holding_bars (NO zero)      │  │  ║
+║  │ │ LEV:  [1, 2, 3, 5, 10, 20, 40]                                    │  │  ║
+║  │ │ Combinazioni: 1 × 4 × 5 × 7 = 140                                 │  │  ║
+║  │ │                                                                   │  │  ║
+║  │ │ Rationale SL ATR-based:                                           │  │  ║
+║  │ │ - Pattern validato con TP/SL infiniti (solo time exit)            │  │  ║
+║  │ │ - SL deve proteggere da perdite catastrofiche, non da noise       │  │  ║
+║  │ │ - atr_signal_median riflette volatilità storica quando pattern    │  │  ║
+║  │ │   ha fired → SL proporzionato alla condizione di mercato          │  │  ║
+║  │ │ - Multipliers 2-5x ATR danno spazio per oscillazioni normali      │  │  ║
 ║  │ └───────────────────────────────────────────────────────────────────┘  │  ║
 ║  │                                                                        │  ║
 ║  │ File: target_selector.py (selezione), parametric_backtest.py (spazio)  │  ║
@@ -1306,5 +1306,661 @@ Pipeline Completa Aggiornata:
 ║  - src/rotator/main_continuous.py -> ContinuousRotatorProcess                ║
 ║  - src/rotator/selector.py        -> StrategySelector                        ║
 ║  - src/rotator/deployer.py        -> StrategyDeployer                        ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║                     ███████╗██╗     ██╗   ██╗███████╗███████╗██╗             ║
+║                     ██╔════╝██║     ██║   ██║██╔════╝██╔════╝██║             ║
+║                     █████╗  ██║     ██║   ██║███████╗███████╗██║             ║
+║                     ██╔══╝  ██║     ██║   ██║╚════██║╚════██║██║             ║
+║                     ██║     ███████╗╚██████╔╝███████║███████║██║             ║
+║                     ╚═╝     ╚══════╝ ╚═════╝ ╚══════╝╚══════╝╚═╝             ║
+║                                                                              ║
+║                 █████╗ ██╗   ██╗███████╗██╗██╗     ██╗ █████╗ ██████╗ ██╗    ║
+║                ██╔══██╗██║   ██║██╔════╝██║██║     ██║██╔══██╗██╔══██╗██║    ║
+║                ███████║██║   ██║███████╗██║██║     ██║███████║██████╔╝██║    ║
+║                ██╔══██║██║   ██║╚════██║██║██║     ██║██╔══██║██╔══██╗██║    ║
+║                ██║  ██║╚██████╔╝███████║██║███████╗██║██║  ██║██║  ██║██║    ║
+║                ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝╚══════╝╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝    ║
+║                                                                              ║
+║                        (Support Flows - Non-Core Pipeline)                   ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Questa sezione documenta i flussi ausiliari che supportano la pipeline principale.
+Non fanno parte del flusso GENERATED -> LIVE, ma sono essenziali per il funzionamento.
+
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         A1. COIN REGISTRY & PAIRS UPDATE                     ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Obiettivo: Mantenere aggiornata la lista dei coin tradabili.                ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ PAIRS UPDATER (scheduled)                                              │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  Schedule: 04:00 e 16:00 UTC (config: data_scheduler.update_hours)     │  ║
+║  │                                                                        │  ║
+║  │  PairsUpdater.update():                                                │  ║
+║  │                                                                        │  ║
+║  │  1. Fetch Hyperliquid markets                                          │  ║
+║  │     - GET /info type=metaAndAssetCtxs                                  │  ║
+║  │     - Estrae: symbol, volume_24h, price, max_leverage                  │  ║
+║  │                                                                        │  ║
+║  │  2. Intersezione con Binance                                           │  ║
+║  │     - Solo symbol disponibili su ENTRAMBI gli exchange                 │  ║
+║  │     - Binance = fonte dati OHLCV, Hyperliquid = esecuzione             │  ║
+║  │                                                                        │  ║
+║  │  3. Filter + Sort                                                      │  ║
+║  │     - volume_24h >= min_volume_usd (config)                            │  ║
+║  │     - ORDER BY volume_24h DESC                                         │  ║
+║  │     - LIMIT top_pairs_count (default 50)                               │  ║
+║  │                                                                        │  ║
+║  │  4. Upsert to DB (coins table)                                         │  ║
+║  │     - Nuovi coin: INSERT                                               │  ║
+║  │     - Esistenti: UPDATE (volume, price, leverage)                      │  ║
+║  │     - Non piu' in top N: is_active = false                             │  ║
+║  │                                                                        │  ║
+║  │  Output:                                                               │  ║
+║  │    - coins table aggiornata                                            │  ║
+║  │    - Log in pairs_update_logs                                          │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ COIN REGISTRY (runtime cache)                                          │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  CoinRegistry: Singleton thread-safe con cache                         │  ║
+║  │                                                                        │  ║
+║  │  Cache policy:                                                         │  ║
+║  │    - TTL: 5 minuti (CACHE_TTL_SECONDS)                                 │  ║
+║  │    - Auto-invalidation: se coins.updated_at > cache_time               │  ║
+║  │                                                                        │  ║
+║  │  API:                                                                  │  ║
+║  │    get_active_pairs(min_volume, limit)  -> List[str]                   │  ║
+║  │    get_coin(symbol)                     -> CoinInfo                    │  ║
+║  │    get_max_leverage(symbol)             -> int                         │  ║
+║  │    is_tradable(symbol)                  -> bool                        │  ║
+║  │    get_tradable_for_strategy(...)       -> List[str]                   │  ║
+║  │                                                                        │  ║
+║  │  Usato da:                                                             │  ║
+║  │    - Backtester (selezione coin per backtest)                          │  ║
+║  │    - Executor (validazione coin prima di trade)                        │  ║
+║  │    - Rotator (verifica coin ancora tradabili)                          │  ║
+║  │    - Generator (pattern coins filtering)                               │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  Config (config.yaml):                                                       ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │  data_scheduler:                                                       │  ║
+║  │    enabled: true                                                       │  ║
+║  │    update_hours: [4, 16]        # UTC                                  │  ║
+║  │    top_pairs_count: 50                                                 │  ║
+║  │    min_volume_usd: 1000000      # $1M minimo                           │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  File coinvolti:                                                             ║
+║  - src/data/pairs_updater.py   -> PairsUpdater                               ║
+║  - src/data/coin_registry.py   -> CoinRegistry (singleton)                   ║
+║  - src/data/data_scheduler.py  -> DataScheduler (orchestration)              ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         A2. BINANCE DATA DOWNLOADER                          ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Obiettivo: Scaricare e mantenere aggiornati i dati OHLCV da Binance.        ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ DOWNLOAD FLOW (scheduled)                                              │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  Schedule: 04:05 e 16:05 UTC (+5min da PairsUpdate)                    │  ║
+║  │                                                                        │  ║
+║  │  BinanceDownloader.download_for_pairs():                               │  ║
+║  │                                                                        │  ║
+║  │  1. Legge coin attivi da CoinRegistry                                  │  ║
+║  │                                                                        │  ║
+║  │  2. Per ogni symbol x timeframe (config.timeframes):                   │  ║
+║  │                                                                        │  ║
+║  │     a. Check cache esistente                                           │  ║
+║  │        - Parquet: data/binance/{symbol}_{tf}.parquet                   │  ║
+║  │        - Metadata: data/binance/{symbol}_{tf}.meta.json                │  ║
+║  │                                                                        │  ║
+║  │     b. Determina azione:                                               │  ║
+║  │        - No cache         -> download da listing date                  │  ║
+║  │        - Cache completa   -> forward update solo                       │  ║
+║  │        - Cache incompleta -> backfill + forward update                 │  ║
+║  │                                                                        │  ║
+║  │     c. Download via CCXT (Binance Futures)                             │  ║
+║  │        - Paginated (1000 candle per request)                           │  ║
+║  │        - Rate limited automatico                                       │  ║
+║  │                                                                        │  ║
+║  │     d. Validate + Save                                                 │  ║
+║  │        - OHLCV validation (no negative, high >= low)                   │  ║
+║  │        - Atomic write (temp file + rename)                             │  ║
+║  │        - Update metadata                                               │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ AUTO-HEALING FEATURES                                                  │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  Corrupted file detection:                                             │  ║
+║  │    - File size < MIN_PARQUET_SIZE (12 bytes) -> delete + re-download   │  ║
+║  │    - Parquet read error -> delete + re-download                        │  ║
+║  │    - Invalid OHLCV structure -> delete + re-download                   │  ║
+║  │                                                                        │  ║
+║  │  Gap detection + fill:                                                 │  ║
+║  │    - detect_gaps(df, timeframe) -> List[(start, end, missing_count)]   │  ║
+║  │    - fill_gaps(symbol, timeframe) -> backfill missing candles          │  ║
+║  │    - CLI: python -m src.data.binance_downloader --fill-gaps            │  ║
+║  │                                                                        │  ║
+║  │  Legacy cache migration:                                               │  ║
+║  │    - Cache senza metadata -> check vs listing date                     │  ║
+║  │    - Se incompleta -> backfill automatico                              │  ║
+║  │    - Se completa -> crea metadata                                      │  ║
+║  │                                                                        │  ║
+║  │  Metadata tracking (is_full_history):                                  │  ║
+║  │    - true  = cache contiene TUTTI i dati da listing date               │  ║
+║  │    - false = cache parziale (es. solo ultimi 30 giorni)                │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ STORAGE FORMAT                                                         │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  Location: data/binance/                                               │  ║
+║  │                                                                        │  ║
+║  │  Files per symbol/timeframe:                                           │  ║
+║  │    {symbol}_{tf}.parquet     # OHLCV data                              │  ║
+║  │    {symbol}_{tf}.meta.json   # Metadata (is_full_history, etc.)        │  ║
+║  │                                                                        │  ║
+║  │  Parquet columns:                                                      │  ║
+║  │    timestamp (datetime64[ns, UTC])                                     │  ║
+║  │    open, high, low, close (float64)                                    │  ║
+║  │    volume (float64)                                                    │  ║
+║  │                                                                        │  ║
+║  │  Esempio:                                                              │  ║
+║  │    data/binance/BTC_15m.parquet      (~2.5 MB, 5+ years)               │  ║
+║  │    data/binance/BTC_15m.meta.json                                      │  ║
+║  │    data/binance/ETH_1h.parquet                                         │  ║
+║  │    data/binance/ETH_1h.meta.json                                       │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  CLI usage:                                                                  ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │  # Download all active coins, all timeframes                           │  ║
+║  │  python -m src.data.binance_downloader                                 │  ║
+║  │                                                                        │  ║
+║  │  # Download specific symbols                                           │  ║
+║  │  python -m src.data.binance_downloader -s BTC -s ETH                   │  ║
+║  │                                                                        │  ║
+║  │  # Verify data integrity                                               │  ║
+║  │  python -m src.data.binance_downloader --verify                        │  ║
+║  │                                                                        │  ║
+║  │  # Fill gaps in existing data                                          │  ║
+║  │  python -m src.data.binance_downloader --fill-gaps                     │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  File coinvolti:                                                             ║
+║  - src/data/binance_downloader.py -> BinanceDataDownloader                   ║
+║  - src/data/data_scheduler.py     -> DataScheduler.download_data()           ║
+║  - src/backtester/data_loader.py  -> BacktestDataLoader (consumer)           ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         A3. RE-BACKTEST ACTIVE STRATEGIES                    ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Obiettivo: Mantenere il pool ACTIVE "fresco" ri-testando periodicamente     ║
+║             le strategie per verificare che l'edge sia ancora valido.        ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ RE-TEST FLOW (FIFO)                                                    │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  Trigger: Backtester idle (no VALIDATED in queue)                      │  ║
+║  │  Config: backtesting.retest.interval_days (default: 3)                 │  ║
+║  │                                                                        │  ║
+║  │  STEP 1: _get_strategy_needing_retest()                                │  ║
+║  │    - Query: ACTIVE WHERE last_backtested_at < (now - interval_days)    │  ║
+║  │    - ORDER BY last_backtested_at ASC (FIFO: oldest first)              │  ║
+║  │    - LIMIT 1                                                           │  ║
+║  │                                                                        │  ║
+║  │  STEP 2: _retest_strategy()                                            │  ║
+║  │    - Solo assigned TF (non tutti i TF come primo backtest)             │  ║
+║  │    - Stessi parametri (no parametric optimization)                     │  ║
+║  │    - IS (120 giorni) + OOS (30 giorni) backtest                        │  ║
+║  │                                                                        │  ║
+║  │  STEP 3: Validation                                                    │  ║
+║  │    - Same OOS validation as initial backtest                           │  ║
+║  │    - Se fallisce OOS -> RETIRED                                        │  ║
+║  │                                                                        │  ║
+║  │  STEP 4: Score recalculation                                           │  ║
+║  │    - Stesso BacktestScorer                                             │  ║
+║  │    - Nuovo score basato su dati recenti                                │  ║
+║  │                                                                        │  ║
+║  │  STEP 5: PoolManager.revalidate_after_retest()                         │  ║
+║  │    - Se new_score < min_score -> RETIRED                               │  ║
+║  │    - Se new_score < min(pool) AND pool full -> RETIRED                 │  ║
+║  │    - Altrimenti: update score + last_backtested_at                     │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ PERCHE' SERVE IL RE-TEST                                               │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  Market regime change:                                                 │  ║
+║  │    - Strategia momentum funzionava in trend, ora mercato laterale      │  ║
+║  │    - Pattern che funzionava non genera piu' segnali                    │  ║
+║  │    - Volatilita' cambiata, SL/TP non piu' ottimali                     │  ║
+║  │                                                                        │  ║
+║  │  Data freshness:                                                       │  ║
+║  │    - Score calcolato 30 giorni fa su dati vecchi                       │  ║
+║  │    - Re-test usa dati recenti -> score piu' rappresentativo            │  ║
+║  │                                                                        │  ║
+║  │  Pool quality:                                                         │  ║
+║  │    - Evita "zombie strategies" che occupano slot                       │  ║
+║  │    - Libera spazio per strategie nuove e migliori                      │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ DIFFERENZE RE-TEST vs PRIMO BACKTEST                                   │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  ┌─────────────────────┬────────────────────┬────────────────────────┐ │  ║
+║  │  │ Aspetto             │ Primo Backtest     │ Re-Test                │ │  ║
+║  │  ├─────────────────────┼────────────────────┼────────────────────────┤ │  ║
+║  │  │ Timeframes          │ Tutti (4 TF)       │ Solo assigned TF       │ │  ║
+║  │  │ Parametric opt      │ Si (~1015 combo)   │ No (stessi params)     │ │  ║
+║  │  │ Shuffle test        │ Si                 │ No                     │ │  ║
+║  │  │ WFA validation      │ Si (4 windows)     │ No                     │ │  ║
+║  │  │ Pool entry          │ Compete per slot   │ Gia' in pool           │ │  ║
+║  │  │ Failure action      │ DELETE             │ RETIRED                │ │  ║
+║  │  └─────────────────────┴────────────────────┴────────────────────────┘ │  ║
+║  │                                                                        │  ║
+║  │  Re-test e' piu' veloce: ~10x meno costoso del primo backtest          │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  Config (config.yaml):                                                       ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │  backtesting:                                                          │  ║
+║  │    retest:                                                             │  ║
+║  │      interval_days: 3      # Re-test ogni 3 giorni                     │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  File coinvolti:                                                             ║
+║  - src/backtester/main_continuous.py -> _get_strategy_needing_retest()       ║
+║  - src/backtester/main_continuous.py -> _retest_strategy()                   ║
+║  - src/scorer/pool_manager.py        -> revalidate_after_retest()            ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         A4. TRADE SYNC (LIVE)                                ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Obiettivo: Sincronizzare i trade chiusi da Hyperliquid al database          ║
+║             per calcolare le metriche di performance live.                   ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ SYNC FLOW                                                              │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  Trigger: ogni ciclo Monitor (15 secondi)                              │  ║
+║  │                                                                        │  ║
+║  │  TradeSync.sync_cycle():                                               │  ║
+║  │                                                                        │  ║
+║  │  1. Monitor posizioni via WebSocket (webData2)                         │  ║
+║  │     - Mantiene _last_positions dict                                    │  ║
+║  │     - Confronta con posizioni attuali                                  │  ║
+║  │                                                                        │  ║
+║  │  2. Detect closed positions                                            │  ║
+║  │     - Posizione in _last_positions ma non in current -> CHIUSA         │  ║
+║  │                                                                        │  ║
+║  │  3. Fetch fills via HTTP API                                           │  ║
+║  │     - GET fills per symbol                                             │  ║
+║  │     - Lookback: fills_lookback_days (default 7)                        │  ║
+║  │                                                                        │  ║
+║  │  4. Reconstruct trade                                                  │  ║
+║  │     - Entry fills + Exit fill                                          │  ║
+║  │     - Calcola: entry_price, exit_price, pnl, duration                  │  ║
+║  │                                                                        │  ║
+║  │  5. Update Trade record nel DB                                         │  ║
+║  │     - Se Trade esiste: update con exit data                            │  ║
+║  │     - Se non esiste: create completo                                   │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ PRINCIPIO: HYPERLIQUID E' SOURCE OF TRUTH                              │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  - Exchange state e' CANONICO per posizioni, ordini, balance           │  ║
+║  │  - Database e' AUDIT TRAIL e metadata only                             │  ║
+║  │  - In caso di discrepanza, Hyperliquid PREVALE sempre                  │  ║
+║  │                                                                        │  ║
+║  │  Implicazioni:                                                         │  ║
+║  │    - Trade table puo' essere ricostruita da fills                      │  ║
+║  │    - Non ci sono "lost trades" (exchange li ha sempre)                 │  ║
+║  │    - Sync puo' recuperare trade mancanti (lookback)                    │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  Config (config.yaml):                                                       ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │  hyperliquid:                                                          │  ║
+║  │    trade_sync:                                                         │  ║
+║  │      enabled: true                                                     │  ║
+║  │      fills_lookback_days: 7                                            │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  File coinvolti:                                                             ║
+║  - src/executor/trade_sync.py    -> TradeSync                                ║
+║  - src/monitor/main_continuous.py -> chiama sync_cycle() ogni iterazione    ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         A5. METRICS COLLECTOR                                ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Obiettivo: Raccogliere snapshot delle metriche pipeline per monitoring      ║
+║             e trend analysis.                                                ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ COLLECTION FLOW                                                        │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  Interval: 60 secondi (config: metrics.collection_interval)            │  ║
+║  │                                                                        │  ║
+║  │  MetricsCollector.collect_snapshot():                                  │  ║
+║  │                                                                        │  ║
+║  │  Metriche raccolte:                                                    │  ║
+║  │                                                                        │  ║
+║  │  [QUEUE] Strategy counts by status                                     │  ║
+║  │    - GENERATED, VALIDATED, ACTIVE, LIVE, RETIRED counts                │  ║
+║  │    - Utilization % vs queue limits                                     │  ║
+║  │                                                                        │  ║
+║  │  [FUNNEL 24H] Conversion rates                                         │  ║
+║  │    - generated -> validated rate                                       │  ║
+║  │    - validated -> active rate                                          │  ║
+║  │    - active -> live rate                                               │  ║
+║  │                                                                        │  ║
+║  │  [TIMING] Processing time per stage                                    │  ║
+║  │    - Avg seconds in GENERATED                                          │  ║
+║  │    - Avg seconds in VALIDATED                                          │  ║
+║  │    - Avg seconds in backtest                                           │  ║
+║  │                                                                        │  ║
+║  │  [FAILURES 24H] Rejection counts + reasons                             │  ║
+║  │    - validation_failed: syntax, lookahead, execution                   │  ║
+║  │    - backtest_failed: no trades, OOS degraded, shuffle failed          │  ║
+║  │                                                                        │  ║
+║  │  [BACKPRESSURE] Queue saturation                                       │  ║
+║  │    - OK: < 80% capacity                                                │  ║
+║  │    - WARNING: 80-95%                                                   │  ║
+║  │    - OVERFLOW: > 95%                                                   │  ║
+║  │                                                                        │  ║
+║  │  [POOL] ACTIVE pool statistics                                         │  ║
+║  │    - count, min/max/avg score                                          │  ║
+║  │    - quality metrics (sharpe, win_rate)                                │  ║
+║  │    - breakdown by source (pattern, ai_free, ai_assigned)               │  ║
+║  │                                                                        │  ║
+║  │  [RETEST 24H] Pool freshness                                           │  ║
+║  │    - Strategies re-tested in last 24h                                  │  ║
+║  │    - Pass/fail rate                                                    │  ║
+║  │                                                                        │  ║
+║  │  [LIVE] Live trading stats                                             │  ║
+║  │    - Strategies currently LIVE                                         │  ║
+║  │    - Rotations in last 24h                                             │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ STORAGE                                                                │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  Table: pipeline_metrics_snapshots                                     │  ║
+║  │                                                                        │  ║
+║  │  Columns:                                                              │  ║
+║  │    - timestamp                                                         │  ║
+║  │    - overall_status (HEALTHY, WARNING, CRITICAL)                       │  ║
+║  │    - queue_* (counts per status)                                       │  ║
+║  │    - utilization_* (percentages)                                       │  ║
+║  │    - throughput_* (items/minute)                                       │  ║
+║  │    - success_rate_* (per stage)                                        │  ║
+║  │    - avg_sharpe, avg_win_rate (pool quality)                           │  ║
+║  │                                                                        │  ║
+║  │  Indexes:                                                              │  ║
+║  │    - idx_metrics_timestamp (for time-series queries)                   │  ║
+║  │    - idx_metrics_status_time (for status filtering)                    │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  Output:                                                                     ║
+║    - Dashboard web (PipelineHealth page)                                     ║
+║    - API endpoints (/api/metrics/*)                                          ║
+║    - Logs (verbose format per debugging)                                     ║
+║                                                                              ║
+║  File coinvolti:                                                             ║
+║  - src/metrics/collector.py          -> MetricsCollector                     ║
+║  - src/database/models.py            -> PipelineMetricsSnapshot              ║
+║  - src/api/routes/metrics.py         -> API endpoints                        ║
+║  - web/src/pages/PipelineHealth.tsx  -> Dashboard UI                         ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         A6. SCHEDULER TASKS (MAINTENANCE)                    ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Obiettivo: Task di manutenzione schedulati che mantengono il sistema        ║
+║             pulito e funzionante.                                            ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ TASK SEMPRE ATTIVI                                                     │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  cleanup_stale_processing (ogni 30 min)                                │  ║
+║  │    - Rilascia strategy bloccate in processing > 30 min                 │  ║
+║  │    - Resetta processing_by = NULL, processing_started_at = NULL        │  ║
+║  │    - Previene deadlock da crash                                        │  ║
+║  │                                                                        │  ║
+║  │  cleanup_old_failed (ogni 24h)                                         │  ║
+║  │    - Elimina FAILED strategies > 7 giorni                              │  ║
+║  │    - Libera spazio DB                                                  │  ║
+║  │    - Nota: ora le FAILED vengono DELETE, questo e' legacy              │  ║
+║  │                                                                        │  ║
+║  │  generate_daily_report (ogni 24h)                                      │  ║
+║  │    - Log status counts per ogni status                                 │  ║
+║  │    - Log live strategies count                                         │  ║
+║  │    - Audit trail per debugging                                         │  ║
+║  │                                                                        │  ║
+║  │  refresh_data_cache (ogni 4h)                                          │  ║
+║  │    - Preload BTC data per tutti i TF configurati                       │  ║
+║  │    - Mantiene cache calda per backtester                               │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ TASK CONFIGURABILI                                                     │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  cleanup_zombie_processes                                              │  ║
+║  │    - Killa processi zombie (es. vite dev server duplicati)             │  ║
+║  │    - Protegge processi gestiti da supervisor                           │  ║
+║  │                                                                        │  ║
+║  │  daily_restart_services                                                │  ║
+║  │    - Restart di tutti i servizi sixbtc (tranne scheduler)              │  ║
+║  │    - Solo all'ora configurata (restart_hour)                           │  ║
+║  │    - Previene memory leaks, stale connections                          │  ║
+║  │                                                                        │  ║
+║  │  renew_agent_wallets                                                   │  ║
+║  │    - Rinnova credenziali agent wallet in scadenza                      │  ║
+║  │    - Window: renewal_days_before_expiry (default 30)                   │  ║
+║  │    - Crea nuovo agent wallet via HL API                                │  ║
+║  │    - Salva in Credential table                                         │  ║
+║  │                                                                        │  ║
+║  │  check_subaccount_funds                                                │  ║
+║  │    - Verifica balance subaccount                                       │  ║
+║  │    - Se < min_operational_usd -> topup da master                       │  ║
+║  │    - Policy: MAI transfer tra subaccount                               │  ║
+║  │    - Rispetta master_reserve_usd                                       │  ║
+║  │                                                                        │  ║
+║  │  cleanup_tmp_dir                                                       │  ║
+║  │    - Pulisce /tmp da file vecchi                                       │  ║
+║  │    - max_age_hours (default 24)                                        │  ║
+║  │    - Skip file di sistema                                              │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  Config (config.yaml):                                                       ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │  scheduler:                                                            │  ║
+║  │    tasks:                                                              │  ║
+║  │      cleanup_zombie_processes:                                         │  ║
+║  │        enabled: false                                                  │  ║
+║  │        interval_hours: 1                                               │  ║
+║  │                                                                        │  ║
+║  │      daily_restart_services:                                           │  ║
+║  │        enabled: false                                                  │  ║
+║  │        interval_hours: 24                                              │  ║
+║  │        restart_hour: 3        # 03:00 UTC                              │  ║
+║  │                                                                        │  ║
+║  │      renew_agent_wallets:                                              │  ║
+║  │        enabled: true                                                   │  ║
+║  │        interval_hours: 24                                              │  ║
+║  │        run_hour: 3                                                     │  ║
+║  │                                                                        │  ║
+║  │      check_subaccount_funds:                                           │  ║
+║  │        enabled: true                                                   │  ║
+║  │        interval_hours: 24                                              │  ║
+║  │        run_hour: 4                                                     │  ║
+║  │                                                                        │  ║
+║  │      cleanup_tmp_dir:                                                  │  ║
+║  │        enabled: false                                                  │  ║
+║  │        interval_hours: 24                                              │  ║
+║  │        run_hour: 5                                                     │  ║
+║  │        max_age_hours: 24                                               │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  File coinvolti:                                                             ║
+║  - src/scheduler/main_continuous.py -> ContinuousSchedulerProcess            ║
+║  - src/scheduler/task_tracker.py    -> Tracking esecuzione task              ║
+║  - src/credentials/agent_manager.py -> AgentManager                          ║
+║  - src/funds/manager.py             -> FundManager                           ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         A7. POOL MANAGER (LEADERBOARD)                       ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Obiettivo: Gestire il pool ACTIVE con logica leaderboard (max N strategie). ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ POOL RULES                                                             │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  Config:                                                               │  ║
+║  │    max_size: 300       # Massimo strategie in ACTIVE                   │  ║
+║  │    min_score: 40       # Score minimo per entrare                      │  ║
+║  │                                                                        │  ║
+║  │  Regole di ingresso:                                                   │  ║
+║  │                                                                        │  ║
+║  │    Rule 1: score < min_score                                           │  ║
+║  │            -> RETIRED (non entra mai)                                  │  ║
+║  │                                                                        │  ║
+║  │    Rule 2: pool NOT full AND score >= min_score                        │  ║
+║  │            -> ACTIVE (entra direttamente)                              │  ║
+║  │                                                                        │  ║
+║  │    Rule 3: pool FULL AND score > min(pool)                             │  ║
+║  │            -> EVICT worst + ACTIVE (prende il posto)                   │  ║
+║  │                                                                        │  ║
+║  │    Rule 4: pool FULL AND score <= min(pool)                            │  ║
+║  │            -> RETIRED (non abbastanza buona)                           │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ API                                                                    │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  PoolManager.try_enter_pool(strategy_id, score)                        │  ║
+║  │    -> (success: bool, reason: str)                                     │  ║
+║  │    - Thread-safe (lock per evitare race condition)                     │  ║
+║  │    - Applica le 4 regole sopra                                         │  ║
+║  │                                                                        │  ║
+║  │  PoolManager.revalidate_after_retest(strategy_id, new_score)           │  ║
+║  │    -> (still_active: bool, reason: str)                                │  ║
+║  │    - Chiamato dopo re-backtest                                         │  ║
+║  │    - Se score degradato troppo -> RETIRED                              │  ║
+║  │                                                                        │  ║
+║  │  PoolManager.get_pool_stats()                                          │  ║
+║  │    -> {count, min_score, max_score, avg_score, available_slots}        │  ║
+║  │                                                                        │  ║
+║  │  PoolManager.get_worst_strategy_in_pool()                              │  ║
+║  │    -> (id, name, score) or None                                        │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  Config (config.yaml):                                                       ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │  active_pool:                                                          │  ║
+║  │    max_size: 300                                                       │  ║
+║  │    min_score: 40                                                       │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  File coinvolti:                                                             ║
+║  - src/scorer/pool_manager.py -> PoolManager                                 ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                   RIEPILOGO FLUSSI AUSILIARI                                 ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │                                                                        │  ║
+║  │  DATA LAYER (background, scheduled)                                    │  ║
+║  │  ─────────────────────────────────────────                             │  ║
+║  │  A1. CoinRegistry + PairsUpdater    2x/day (04:00, 16:00 UTC)          │  ║
+║  │  A2. BinanceDownloader              2x/day (04:05, 16:05 UTC)          │  ║
+║  │                                                                        │  ║
+║  │  POOL MAINTENANCE (on-demand)                                          │  ║
+║  │  ─────────────────────────────────────────                             │  ║
+║  │  A3. Re-Backtest ACTIVE             quando backtester idle + stale     │  ║
+║  │  A7. Pool Manager                   ad ogni pool entry attempt         │  ║
+║  │                                                                        │  ║
+║  │  LIVE TRADING SUPPORT (continuous)                                     │  ║
+║  │  ─────────────────────────────────────────                             │  ║
+║  │  A4. TradeSync                      ogni 15s (Monitor cycle)           │  ║
+║  │                                                                        │  ║
+║  │  MONITORING (continuous)                                               │  ║
+║  │  ─────────────────────────────────────────                             │  ║
+║  │  A5. Metrics Collector              ogni 60s                           │  ║
+║  │                                                                        │  ║
+║  │  MAINTENANCE (scheduled)                                               │  ║
+║  │  ─────────────────────────────────────────                             │  ║
+║  │  A6. Scheduler Tasks                vari intervalli (30min - 24h)      │  ║
+║  │                                                                        │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
