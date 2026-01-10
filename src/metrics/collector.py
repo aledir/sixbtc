@@ -207,104 +207,96 @@ class MetricsCollector:
             - timing_by_source: Average generation time (ms) by source
             - leverage: Dict with min, max, avg leverage
         """
-        # Total generated
-        total = session.execute(
-            select(func.count(StrategyEvent.id))
-            .where(and_(
-                StrategyEvent.stage == 'generation',
-                StrategyEvent.event_type == 'created',
-                StrategyEvent.timestamp >= since
-            ))
-        ).scalar() or 0
-
-        # By source (generation_mode) - uses new field in event_data
-        by_source_result = session.execute(
+        # Single atomic query for all counts using CTE to avoid race conditions
+        # All breakdowns are calculated from the same snapshot of data
+        stats_result = session.execute(
             text("""
+                WITH base AS (
+                    SELECT
+                        id,
+                        event_data,
+                        duration_ms
+                    FROM strategy_events
+                    WHERE timestamp >= :since
+                      AND stage = 'generation'
+                      AND event_type = 'created'
+                ),
+                -- Total count
+                total_count AS (
+                    SELECT COUNT(*) as cnt FROM base
+                ),
+                -- By source
+                by_source AS (
+                    SELECT
+                        COALESCE(event_data->>'generation_mode',
+                            CASE
+                                WHEN (event_data->>'pattern_based')::boolean = true THEN 'pattern'
+                                ELSE 'ai_free'
+                            END
+                        ) as source,
+                        COUNT(*) as cnt
+                    FROM base
+                    GROUP BY 1
+                ),
+                -- By type
+                by_type AS (
+                    SELECT
+                        event_data->>'strategy_type' as stype,
+                        COUNT(*) as cnt
+                    FROM base
+                    WHERE event_data->>'strategy_type' IS NOT NULL
+                    GROUP BY 1
+                ),
+                -- By direction
+                by_direction AS (
+                    SELECT
+                        COALESCE(event_data->>'direction', 'UNKNOWN') as direction,
+                        COUNT(*) as cnt
+                    FROM base
+                    GROUP BY 1
+                ),
+                -- By timeframe
+                by_timeframe AS (
+                    SELECT
+                        event_data->>'timeframe' as tf,
+                        COUNT(*) as cnt
+                    FROM base
+                    WHERE event_data->>'timeframe' IS NOT NULL
+                    GROUP BY 1
+                )
                 SELECT
-                    COALESCE(event_data->>'generation_mode',
-                        CASE
-                            WHEN (event_data->>'pattern_based')::boolean = true THEN 'pattern'
-                            ELSE 'ai_free'
-                        END
-                    ) as source,
-                    COUNT(*) as count
-                FROM strategy_events
-                WHERE timestamp >= :since
-                  AND stage = 'generation'
-                  AND event_type = 'created'
-                GROUP BY 1
+                    'total' as category, 'total' as key, cnt
+                FROM total_count
+                UNION ALL
+                SELECT 'source' as category, source as key, cnt FROM by_source
+                UNION ALL
+                SELECT 'type' as category, stype as key, cnt FROM by_type WHERE stype IS NOT NULL
+                UNION ALL
+                SELECT 'direction' as category, direction as key, cnt FROM by_direction
+                UNION ALL
+                SELECT 'timeframe' as category, tf as key, cnt FROM by_timeframe WHERE tf IS NOT NULL
             """),
             {'since': since}
         ).all()
 
+        # Parse results
+        total = 0
         by_source = {'pattern': 0, 'ai_free': 0, 'ai_assigned': 0}
-        for source, count in by_source_result:
-            if source in by_source:
-                by_source[source] = count
-
-        # By strategy type (MOM, REV, TRN, etc.)
-        by_type_result = session.execute(
-            text("""
-                SELECT
-                    event_data->>'strategy_type' as stype,
-                    COUNT(*) as count
-                FROM strategy_events
-                WHERE timestamp >= :since
-                  AND stage = 'generation'
-                  AND event_type = 'created'
-                  AND event_data->>'strategy_type' IS NOT NULL
-                GROUP BY 1
-                ORDER BY count DESC
-            """),
-            {'since': since}
-        ).all()
-
         by_type = {}
-        for stype, count in by_type_result:
-            if stype:
-                by_type[stype] = count
-
-        # By direction (LONG, SHORT, BIDIR)
-        by_direction_result = session.execute(
-            text("""
-                SELECT
-                    COALESCE(event_data->>'direction', 'UNKNOWN') as direction,
-                    COUNT(*) as count
-                FROM strategy_events
-                WHERE timestamp >= :since
-                  AND stage = 'generation'
-                  AND event_type = 'created'
-                GROUP BY 1
-            """),
-            {'since': since}
-        ).all()
-
         by_direction = {'LONG': 0, 'SHORT': 0, 'BIDIR': 0}
-        for direction, count in by_direction_result:
-            if direction in by_direction:
-                by_direction[direction] = count
-
-        # By timeframe (15m, 30m, 1h, 4h, 1d)
-        by_timeframe_result = session.execute(
-            text("""
-                SELECT
-                    event_data->>'timeframe' as tf,
-                    COUNT(*) as count
-                FROM strategy_events
-                WHERE timestamp >= :since
-                  AND stage = 'generation'
-                  AND event_type = 'created'
-                  AND event_data->>'timeframe' IS NOT NULL
-                GROUP BY 1
-                ORDER BY count DESC
-            """),
-            {'since': since}
-        ).all()
-
         by_timeframe = {}
-        for tf, count in by_timeframe_result:
-            if tf:
-                by_timeframe[tf] = count
+
+        for category, key, cnt in stats_result:
+            if category == 'total':
+                total = cnt
+            elif category == 'source' and key in by_source:
+                by_source[key] = cnt
+            elif category == 'type' and key:
+                by_type[key] = cnt
+            elif category == 'direction' and key in by_direction:
+                by_direction[key] = cnt
+            elif category == 'timeframe' and key:
+                by_timeframe[key] = cnt
 
         # Average timing by source
         timing_result = session.execute(
@@ -1375,11 +1367,14 @@ class MetricsCollector:
         g = queue_depths.get('GENERATED', 0)
         val = funnel["validated"]
         val_failed = funnel["validation_failed"]
-        gen = funnel["generated"]
+        # Use gen_total from generator_stats for consistency (same source as [1. GENERATOR])
+        gen = gen_total
 
         logger.info(f'[2. VALIDATOR] queue: {g} waiting')
         val_failed_str = f", {val_failed} failed" if val_failed > 0 else ""
-        logger.info(f'[2. VALIDATOR] 24h: {val}/{gen} passed syntax+AST+execution ({fmt_pct(funnel["validated_pct"])}){val_failed_str}')
+        # Recalculate validated_pct using consistent denominator
+        validated_pct = int(round(100 * val / gen)) if gen > 0 else None
+        logger.info(f'[2. VALIDATOR] 24h: {val}/{gen} passed syntax+AST+execution ({fmt_pct(validated_pct)}){val_failed_str}')
         logger.info(f'[2. VALIDATOR] timing: {fmt_time(timing.get("validation"))} avg | failures: {failures["validation"]}')
 
         # =====================================================================
