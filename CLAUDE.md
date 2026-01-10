@@ -1,6 +1,17 @@
 # SixBTC - AI-Powered Trading System Development Guide
 
-**Last Updated**: 2026-01-07 | **Python**: 3.11+ | **Core**: Numba-JIT Backtester + Hyperliquid SDK
+**Last Updated**: 2026-01-10 | **Python**: 3.11+ | **Core**: Numba-JIT Backtester + Hyperliquid SDK
+
+---
+
+## 🚀 STARTUP - READ FIRST
+
+**At the start of EVERY new chat session**, read `PIPELINE.md` to understand the current pipeline architecture. This file contains the detailed flow of strategy generation, validation, backtesting, and deployment.
+
+```bash
+# First action in every new session:
+Read /home/bitwolf/sixbtc/PIPELINE.md
+```
 
 ---
 
@@ -896,6 +907,7 @@ Before pushing ANY code:
 - [ ] Strategies inherit from StrategyCore
 - [ ] Database operations use SQLAlchemy models
 - [ ] Logging uses ASCII only (no emojis)
+- [ ] **PIPELINE.md updated** if code/config changes affect pipeline behavior
 
 ---
 

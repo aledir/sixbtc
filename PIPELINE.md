@@ -19,7 +19,7 @@ Pipeline Completa Aggiornata:
 ┌─────────────────────────────────────────────────────────────────┐
 │ 3. PARAMETRIC OPTIMIZATION (backtester - STEP 1)                │
 ├─────────────────────────────────────────────────────────────────┤
-│ • Testa ~450 combo SL × TP × leverage × exit_bars               │
+│ • Testa ~1015 combo SL × TP × leverage × exit_bars              │
 │ • Threshold filter: sharpe≥0.3, WR≥0.35, exp≥0.002, DD≤0.50     │
 │ • Robustness filter: ≥50% neighbors passano threshold           │
 │ • Se 0 combo passano → FAILED + DELETE                          │
@@ -96,7 +96,7 @@ Pipeline Completa Aggiornata:
 
 
 
-  ╔══════════════════════════════════════════════════════════════════════════════╗
+╔══════════════════════════════════════════════════════════════════════════════╗
 ║                              1. GENERATOR                                    ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║                                                                              ║
@@ -153,7 +153,7 @@ Pipeline Completa Aggiornata:
 ║  │           - 1 strategy base (backtester fa parametric optimization)    │  ║
 ║  │                                                                        │  ║
 ║  │ Parametri base: NESSUNO (strategy base senza params specifici)         │  ║
-║  │   - Backtester fa ~450 combo optimization (SL × TP × lev × exit)       │  ║
+║  │   - Backtester fa ~1015 combo optimization (SL × TP × lev × exit)      │  ║
 ║  │                                                                        │  ║
 ║  │ Coins: gestiti dal backtester (top N per volume, scroll-down)          │  ║
 ║  │                                                                        │  ║
@@ -207,137 +207,137 @@ Pipeline Completa Aggiornata:
 
 
 
-  ╔══════════════════════════════════════════════════════════════════════════════╗
-  ║                              2. VALIDATOR                                    ║
-  ╠══════════════════════════════════════════════════════════════════════════════╣
-  ║                                                                              ║
-  ║  Input: Strategy con status=GENERATED                                        ║
-  ║  Output: status=VALIDATED (o DELETE se fallisce)                             ║
-  ║                                                                              ║
-  ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-  ║  │ STEP 1: SYNTAX VALIDATION                                     <100ms   │  ║
-  ║  ├────────────────────────────────────────────────────────────────────────┤  ║
-  ║  │                                                                        │  ║
-  ║  │ Controlli:                                                             │  ║
-  ║  │   1. Python syntax valido (ast.parse)                                  │  ║
-  ║  │   2. Import obbligatori:                                               │  ║
-  ║  │      - pandas (o pd)                                                   │  ║
-  ║  │      - StrategyCore, Signal da src.strategies.base                     │  ║
-  ║  │   3. Esattamente 1 classe che eredita da StrategyCore                  │  ║
-  ║  │   4. Nome classe valido:                                               │  ║
-  ║  │      - Strategy_TYPE_hash (es: Strategy_MOM_abc123)                    │  ║
-  ║  │      - PatStrat_TYPE_hash (es: PatStrat_REV_def456)                    │  ║
-  ║  │   5. Metodo generate_signal(df) deve esistere                          │  ║
-  ║  │                                                                        │  ║
-  ║  │ Warnings (non bloccanti):                                              │  ║
-  ║  │   - generate_signal senza return statement                             │  ║
-  ║  │   - generate_signal con < 3 statements                                 │  ║
-  ║  │   - Hardcoded timeframe ('5m', '15m', ecc.)                            │  ║
-  ║  │                                                                        │  ║
-  ║  │ Errori tipici:                                                         │  ║
-  ║  │   [X] "Syntax error at line 15: invalid syntax"                        │  ║
-  ║  │   [X] "Missing required import: Signal"                                │  ║
-  ║  │   [X] "No class inheriting from StrategyCore found"                    │  ║
-  ║  │   [X] "Invalid class name format: bad_name"                            │  ║
-  ║  │                                                                        │  ║
-  ║  │ FAIL -> DELETE strategy                                                │  ║
-  ║  └────────────────────────────────────────────────────────────────────────┘  ║
-  ║                                      |                                       ║
-  ║                                      v                                       ║
-  ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-  ║  │ STEP 2: LOOKAHEAD AST DETECTION                                <50ms   │  ║
-  ║  ├────────────────────────────────────────────────────────────────────────┤  ║
-  ║  │                                                                        │  ║
-  ║  │ Static code analysis (AST parsing) per pattern che usano dati futuri   │  ║
-  ║  │                                                                        │  ║
-  ║  │ Pattern cercati:                                                       │  ║
-  ║  │                                                                        │  ║
-  ║  │   Pattern 1: rolling(center=True)                                      │  ║
-  ║  │   [X] df['close'].rolling(20, center=True).mean()                      │  ║
-  ║  │   [OK] df['close'].rolling(20).mean()                                  │  ║
-  ║  │                                                                        │  ║
-  ║  │   Pattern 2: shift(-N) con valori negativi                             │  ║
-  ║  │   [X] df['close'].shift(-5)    # 5 bar nel futuro                      │  ║
-  ║  │   [OK] df['close'].shift(5)     # 5 bar nel passato                    │  ║
-  ║  │                                                                        │  ║
-  ║  │   Pattern 3: expanding(center=True)                                    │  ║
-  ║  │   [X] df['close'].expanding(center=True).max()                         │  ║
-  ║  │   [OK] df['close'].expanding().max()                                   │  ║
-  ║  │                                                                        │  ║
-  ║  │   Pattern 4: iloc[i + offset] con offset positivo                      │  ║
-  ║  │   [X] df.iloc[i + 5]   # Potrebbe accedere al futuro in loop           │  ║
-  ║  │   [OK] df.iloc[i - 5]   # Look back                                    │  ║
-  ║  │                                                                        │  ║
-  ║  │ FAIL -> DELETE strategy                                                │  ║
-  ║  └────────────────────────────────────────────────────────────────────────┘  ║
-  ║                                      |                                       ║
-  ║                                      v                                       ║
-  ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-  ║  │ STEP 3: EXECUTION VALIDATION                               100-500ms   │  ║
-  ║  ├────────────────────────────────────────────────────────────────────────┤  ║
-  ║  │                                                                        │  ║
-  ║  │ Runtime validation su dati sintetici (500 bar)                         │  ║
-  ║  │                                                                        │  ║
-  ║  │ Fasi:                                                                  │  ║
-  ║  │   3a. Module Loading                                                   │  ║
-  ║  │       - Scrive codice in file temporaneo                               │  ║
-  ║  │       - Carica come modulo Python (importlib)                          │  ║
-  ║  │       - Verifica subclass di StrategyCore                              │  ║
-  ║  │                                                                        │  ║
-  ║  │   3b. Instantiation                                                    │  ║
-  ║  │       - Crea istanza: strategy = StrategyClass()                       │  ║
-  ║  │       - Se fallisce: TypeError, missing arguments, ecc.                │  ║
-  ║  │                                                                        │  ║
-  ║  │   3c. Signal Generation Test                                           │  ║
-  ║  │       - Two-phase approach:                                            │  ║
-  ║  │         1. strategy.calculate_indicators(df)                           │  ║
-  ║  │         2. strategy.generate_signal(df_with_indicators)                │  ║
-  ║  │       - Testa in 5 punti: [50, 100, 200, 300, last_bar]                │  ║
-  ║  │       - Valida: Signal o None, direction in [long, short, close]       │  ║
-  ║  │                                                                        │  ║
-  ║  │   3d. Edge Case Testing                                                │  ║
-  ║  │       - Dati di varie lunghezze: [0, 1, 5, 10, 50, 100, 500]           │  ║
-  ║  │       - Warning se eccezione (non blocking)                            │  ║
-  ║  │                                                                        │  ║
-  ║  │ Errori tipici:                                                         │  ║
-  ║  │   [X] "Failed to load strategy class from code"                        │  ║
-  ║  │   [X] "Failed to instantiate: TypeError: missing argument"             │  ║
-  ║  │   [X] "generate_signal raised exception at bar 100: NameError"         │  ║
-  ║  │   [X] "generate_signal returned str, expected Signal or None"          │  ║
-  ║  │                                                                        │  ║
-  ║  │ Warnings (non bloccanti):                                              │  ║
-  ║  │   [!] "Strategy generated 0 signals on test data"                      │  ║
-  ║  │   [!] "Strategy generated very few signals (2)"                        │  ║
-  ║  │                                                                        │  ║
-  ║  │ FAIL -> DELETE strategy                                                │  ║
-  ║  └────────────────────────────────────────────────────────────────────────┘  ║
-  ║                                      |                                       ║
-  ║                                      v                                       ║
-  ║                          ALL STEPS PASSED                                    ║
-  ║                                      |                                       ║
-  ║                                      v                                       ║
-  ║                      strategy.status = VALIDATED                             ║
-  ║                                      |                                       ║
-  ║                                      v                                       ║
-  ║                         -> Backtester Queue                                  ║
-  ║                                                                              ║
-  ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-  ║  │ NOTE IMPORTANTI                                                        │  ║
-  ║  ├────────────────────────────────────────────────────────────────────────┤  ║
-  ║  │ - Shuffle test (lookahead empirico) e' POST-BACKTEST, non qui          │  ║
-  ║  │ - Deletion immediata se qualsiasi step fallisce                        │  ║
-  ║  │ - Parallel execution: ThreadPoolExecutor (4 workers)                   │  ║
-  ║  │ - Backpressure: se VALIDATED queue > limit, validator rallenta         │  ║
-  ║  │ - Nessun caching: ogni strategia validata indipendentemente            │  ║
-  ║  └────────────────────────────────────────────────────────────────────────┘  ║
-  ║                                                                              ║
-  ║  File coinvolti:                                                             ║
-  ║  - src/validator/syntax_validator.py    -> SyntaxValidator                   ║
-  ║  - src/validator/lookahead_detector.py  -> LookaheadDetector                 ║
-  ║  - src/validator/execution_validator.py -> ExecutionValidator                ║
-  ║  - src/validator/main_continuous.py     -> ValidatorProcess                  ║
-  ║                                                                              ║
-  ╚══════════════════════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                              2. VALIDATOR                                    ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Input: Strategy con status=GENERATED                                        ║
+║  Output: status=VALIDATED (o DELETE se fallisce)                             ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ STEP 1: SYNTAX VALIDATION                                     <100ms   │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │ Controlli:                                                             │  ║
+║  │   1. Python syntax valido (ast.parse)                                  │  ║
+║  │   2. Import obbligatori:                                               │  ║
+║  │      - pandas (o pd)                                                   │  ║
+║  │      - StrategyCore, Signal da src.strategies.base                     │  ║
+║  │   3. Esattamente 1 classe che eredita da StrategyCore                  │  ║
+║  │   4. Nome classe valido:                                               │  ║
+║  │      - Strategy_TYPE_hash (es: Strategy_MOM_abc123)                    │  ║
+║  │      - PatStrat_TYPE_hash (es: PatStrat_REV_def456)                    │  ║
+║  │   5. Metodo generate_signal(df) deve esistere                          │  ║
+║  │                                                                        │  ║
+║  │ Warnings (non bloccanti):                                              │  ║
+║  │   - generate_signal senza return statement                             │  ║
+║  │   - generate_signal con < 3 statements                                 │  ║
+║  │   - Hardcoded timeframe ('5m', '15m', ecc.)                            │  ║
+║  │                                                                        │  ║
+║  │ Errori tipici:                                                         │  ║
+║  │   [X] "Syntax error at line 15: invalid syntax"                        │  ║
+║  │   [X] "Missing required import: Signal"                                │  ║
+║  │   [X] "No class inheriting from StrategyCore found"                    │  ║
+║  │   [X] "Invalid class name format: bad_name"                            │  ║
+║  │                                                                        │  ║
+║  │ FAIL -> DELETE strategy                                                │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                      |                                       ║
+║                                      v                                       ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ STEP 2: LOOKAHEAD AST DETECTION                                <50ms   │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │ Static code analysis (AST parsing) per pattern che usano dati futuri   │  ║
+║  │                                                                        │  ║
+║  │ Pattern cercati:                                                       │  ║
+║  │                                                                        │  ║
+║  │   Pattern 1: rolling(center=True)                                      │  ║
+║  │   [X] df['close'].rolling(20, center=True).mean()                      │  ║
+║  │   [OK] df['close'].rolling(20).mean()                                  │  ║
+║  │                                                                        │  ║
+║  │   Pattern 2: shift(-N) con valori negativi                             │  ║
+║  │   [X] df['close'].shift(-5)    # 5 bar nel futuro                      │  ║
+║  │   [OK] df['close'].shift(5)     # 5 bar nel passato                    │  ║
+║  │                                                                        │  ║
+║  │   Pattern 3: expanding(center=True)                                    │  ║
+║  │   [X] df['close'].expanding(center=True).max()                         │  ║
+║  │   [OK] df['close'].expanding().max()                                   │  ║
+║  │                                                                        │  ║
+║  │   Pattern 4: iloc[i + offset] con offset positivo                      │  ║
+║  │   [X] df.iloc[i + 5]   # Potrebbe accedere al futuro in loop           │  ║
+║  │   [OK] df.iloc[i - 5]   # Look back                                    │  ║
+║  │                                                                        │  ║
+║  │ FAIL -> DELETE strategy                                                │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                      |                                       ║
+║                                      v                                       ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ STEP 3: EXECUTION VALIDATION                               100-500ms   │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │ Runtime validation su dati sintetici (500 bar)                         │  ║
+║  │                                                                        │  ║
+║  │ Fasi:                                                                  │  ║
+║  │   3a. Module Loading                                                   │  ║
+║  │       - Scrive codice in file temporaneo                               │  ║
+║  │       - Carica come modulo Python (importlib)                          │  ║
+║  │       - Verifica subclass di StrategyCore                              │  ║
+║  │                                                                        │  ║
+║  │   3b. Instantiation                                                    │  ║
+║  │       - Crea istanza: strategy = StrategyClass()                       │  ║
+║  │       - Se fallisce: TypeError, missing arguments, ecc.                │  ║
+║  │                                                                        │  ║
+║  │   3c. Signal Generation Test                                           │  ║
+║  │       - Two-phase approach:                                            │  ║
+║  │         1. strategy.calculate_indicators(df)                           │  ║
+║  │         2. strategy.generate_signal(df_with_indicators)                │  ║
+║  │       - Testa in 5 punti: [50, 100, 200, 300, last_bar]                │  ║
+║  │       - Valida: Signal o None, direction in [long, short, close]       │  ║
+║  │                                                                        │  ║
+║  │   3d. Edge Case Testing                                                │  ║
+║  │       - Dati di varie lunghezze: [0, 1, 5, 10, 50, 100, 500]           │  ║
+║  │       - Warning se eccezione (non blocking)                            │  ║
+║  │                                                                        │  ║
+║  │ Errori tipici:                                                         │  ║
+║  │   [X] "Failed to load strategy class from code"                        │  ║
+║  │   [X] "Failed to instantiate: TypeError: missing argument"             │  ║
+║  │   [X] "generate_signal raised exception at bar 100: NameError"         │  ║
+║  │   [X] "generate_signal returned str, expected Signal or None"          │  ║
+║  │                                                                        │  ║
+║  │ Warnings (non bloccanti):                                              │  ║
+║  │   [!] "Strategy generated 0 signals on test data"                      │  ║
+║  │   [!] "Strategy generated very few signals (2)"                        │  ║
+║  │                                                                        │  ║
+║  │ FAIL -> DELETE strategy                                                │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                      |                                       ║
+║                                      v                                       ║
+║                          ALL STEPS PASSED                                    ║
+║                                      |                                       ║
+║                                      v                                       ║
+║                      strategy.status = VALIDATED                             ║
+║                                      |                                       ║
+║                                      v                                       ║
+║                         -> Backtester Queue                                  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ NOTE IMPORTANTI                                                        │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │ - Shuffle test (lookahead empirico) e' POST-BACKTEST, non qui          │  ║
+║  │ - Deletion immediata se qualsiasi step fallisce                        │  ║
+║  │ - Parallel execution: ThreadPoolExecutor (4 workers)                   │  ║
+║  │ - Backpressure: se VALIDATED queue > limit, validator rallenta         │  ║
+║  │ - Nessun caching: ogni strategia validata indipendentemente            │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  File coinvolti:                                                             ║
+║  - src/validator/syntax_validator.py    -> SyntaxValidator                   ║
+║  - src/validator/lookahead_detector.py  -> LookaheadDetector                 ║
+║  - src/validator/execution_validator.py -> ExecutionValidator                ║
+║  - src/validator/main_continuous.py     -> ValidatorProcess                  ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
 
 
@@ -523,6 +523,10 @@ Pipeline Completa Aggiornata:
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
+
+
+
+
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                          4. BACKTEST IS FINALE                               ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
@@ -631,6 +635,13 @@ Pipeline Completa Aggiornata:
 ║  - src/backtester/backtest_engine.py -> BacktestEngine.backtest()            ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+
+
+
+
+
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                           5. BACKTEST OOS                                    ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
@@ -780,22 +791,22 @@ Pipeline Completa Aggiornata:
 
 
 
+
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                      6. SCORE + SHUFFLE + WFA + POOL                         ║
+║                            6. SCORE CALCULATION                              ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║                                                                              ║
-║  Obiettivo: Calcolare score finale, validare anti-lookahead con shuffle      ║
-║             test, verificare WFA, e tentare ingresso nel pool ACTIVE.        ║
+║  Obiettivo: Calcolare lo score finale della strategia combinando metriche    ║
+║             IS, OOS e robustness per il ranking nel pool.                    ║
 ║                                                                              ║
 ║  Input:                                                                      ║
 ║    - backtest_result: BacktestResult con metriche IS                         ║
 ║    - final_result: metriche pesate IS+OOS                                    ║
 ║    - degradation: (is_sharpe - oos_sharpe) / is_sharpe                       ║
-║    - robustness_score: da parametric (neighbor quality)                      ║
-║    - strategy: model con code e base_code_hash                               ║
+║    - robustness_score: da parametric optimization (neighbor quality)         ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ STEP 1: CALCOLO SCORE (6 componenti)                                   │  ║
+║  │ FORMULA SCORE (6 componenti)                                           │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │                                                                        │  ║
 ║  │  BacktestScorer.score_from_backtest_result()                           │  ║
@@ -820,84 +831,207 @@ Pipeline Completa Aggiornata:
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ STEP 2: CHECK SCORE THRESHOLD                                          │  ║
+║  │ SCORE THRESHOLD CHECK                                                  │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │                                                                        │  ║
 ║  │  if score < pool_min_score (40):                                       │  ║
-║  │      -> SKIP shuffle test (no point wasting compute)                   │  ║
+║  │      -> SKIP tutti i test successivi (shuffle, WFA)                    │  ║
 ║  │      -> EventTracker.backtest_score_rejected()                         │  ║
 ║  │      -> return (False, "score_below_threshold:38.5")                   │  ║
+║  │      -> status = RETIRED                                               │  ║
 ║  │                                                                        │  ║
 ║  │  Solo strategie con score >= 40 procedono al shuffle test.             │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
+║  Output:                                                                     ║
+║    - score >= 40 -> procede a SHUFFLE TEST                                   ║
+║    - score < 40  -> RETIRED (no point testing further)                       ║
+║                                                                              ║
+║  File coinvolti:                                                             ║
+║  - src/backtester/main_continuous.py -> _promote_to_active_pool()            ║
+║  - src/scorer/backtest_scorer.py     -> BacktestScorer                       ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                            7. SHUFFLE TEST                                   ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Obiettivo: Rilevare lookahead bias NON catturato dall'AST analysis          ║
+║             tramite test empirico sui dati shuffled.                         ║
+║                                                                              ║
+║  Input:                                                                      ║
+║    - strategy: model con code e base_code_hash                               ║
+║    - score >= 40 (threshold passato)                                         ║
+║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ STEP 3: SHUFFLE TEST (anti-lookahead empirico)                         │  ║
+║  │ LOGICA SHUFFLE TEST                                                    │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │                                                                        │  ║
-║  │  Obiettivo: Rilevare lookahead bias NON catturato dall'AST analysis    │  ║
-║  │                                                                        │  ║
-║  │  Logica:                                                               │  ║
-║  │    1. Carica 30 giorni di BTC data (timeframe minimo)                  │  ║
-║  │    2. Genera segnali su dati ORIGINALI                                 │  ║
-║  │    3. SHUFFLE le righe del DataFrame (rompe correlazioni temporali)    │  ║
-║  │    4. Genera segnali su dati SHUFFLED                                  │  ║
-║  │    5. Confronta: se segnali IDENTICI -> LOOKAHEAD BIAS                 │  ║
+║  │  1. Carica 30 giorni di BTC data (timeframe della strategia)           │  ║
+║  │  2. Genera segnali su dati ORIGINALI                                   │  ║
+║  │  3. SHUFFLE le righe del DataFrame (rompe correlazioni temporali)      │  ║
+║  │  4. Genera segnali su dati SHUFFLED                                    │  ║
+║  │  5. Confronta: se segnali IDENTICI -> LOOKAHEAD BIAS                   │  ║
 ║  │                                                                        │  ║
 ║  │  Perche' funziona:                                                     │  ║
 ║  │    - Strategia legittima: segnali dipendono da SEQUENZA temporale      │  ║
 ║  │    - Shuffle rompe sequenza -> segnali DIVERSI                         │  ║
 ║  │    - Se segnali uguali: sta guardando valori "assoluti", non sequenza  │  ║
 ║  │      (es: df['future_price'] > df['close'])                            │  ║
-║  │                                                                        │  ║
-║  │  CACHING (by base_code_hash):                                          │  ║
-║  │    - Lookahead e' proprieta' del BASE CODE, non dei parametri          │  ║
-║  │    - Se base code passa -> tutte le strategie parametriche passano     │  ║
-║  │    - Cache in ValidationCache table                                    │  ║
-║  │    - Cache HIT: ~0ms, Cache MISS: ~50-100ms                            │  ║
-║  │                                                                        │  ║
-║  │  FAIL -> return (False, "shuffle_test_failed")                         │  ║
-║  │          Strategy NON viene eliminata (potrebbe essere riusata)        │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ STEP 4: WFA FIXED PARAMS (Walk-Forward Validation)                     │  ║
+║  │ CACHING (by base_code_hash)                                            │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │                                                                        │  ║
-║  │  Obiettivo: Verificare che i best params funzionino su tutto il        │  ║
-║  │             periodo storico, non solo su una porzione.                 │  ║
+║  │  - Lookahead e' proprieta' del BASE CODE, non dei parametri            │  ║
+║  │  - Se base code passa -> tutte le strategie parametriche passano       │  ║
+║  │  - Cache in ValidationCache table                                      │  ║
+║  │  - Cache HIT: ~0ms, Cache MISS: ~50-100ms                              │  ║
 ║  │                                                                        │  ║
-║  │  Logica:                                                               │  ║
-║  │    1. Divide dati IS in 4 expanding windows: 25%, 50%, 75%, 100%       │  ║
-║  │    2. Esegue backtest su ogni window con STESSI params (no re-opt)     │  ║
-║  │    3. Verifica che ogni window sia PROFITTEVOLE                        │  ║
+║  │  Lookup: ValidationCache.get(base_code_hash, 'shuffle_test')           │  ║
+║  │    - EXISTS + passed=True  -> skip test, return PASS                   │  ║
+║  │    - EXISTS + passed=False -> skip test, return FAIL                   │  ║
+║  │    - NOT EXISTS -> esegui test, salva risultato                        │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  Output:                                                                     ║
+║    - PASS -> procede a WFA FIXED PARAMS                                      ║
+║    - FAIL -> return (False, "shuffle_test_failed")                           ║
+║              Strategy status = RETIRED (non DELETE, code riusabile)          ║
+║                                                                              ║
+║  File coinvolti:                                                             ║
+║  - src/backtester/main_continuous.py -> _promote_to_active_pool()            ║
+║  - src/validator/lookahead_test.py   -> LookaheadTester.validate()           ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+
+
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          8. WFA FIXED PARAMS                                 ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Obiettivo: Verificare che i best params (da parametric optimization)        ║
+║             funzionino su TUTTO il periodo storico, non solo su una parte.   ║
+║                                                                              ║
+║  Input:                                                                      ║
+║    - strategy con best_params fissi                                          ║
+║    - dati IS completi (120 giorni)                                           ║
+║    - shuffle test passato                                                    ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ EXPANDING WINDOWS (4 finestre)                                         │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │                                                                        │  ║
-║  │  Criterio di successo:                                                 │  ║
-║  │    - Ogni window deve avere expectancy >= min_expectancy (0.002)       │  ║
-║  │    - Tutte e 4 le windows devono passare                               │  ║
+║  │  IS Data (120 giorni):                                                 │  ║
+║  │  ════════════════════════════════════════════════════════════════════  │  ║
 ║  │                                                                        │  ║
-║  │  ┌─────────────────────────────────────────────────────────────────┐   │  ║
-║  │  │  Window 1 (25%):  ███████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   │   │  ║
-║  │  │  Window 2 (50%):  ██████████████████████░░░░░░░░░░░░░░░░░░░░░   │   │  ║
-║  │  │  Window 3 (75%):  ██████████████████████████████████░░░░░░░░░   │   │  ║
-║  │  │  Window 4 (100%): ███████████████████████████████████████████   │   │  ║
-║  │  └─────────────────────────────────────────────────────────────────┘   │  ║
+║  │  Window 1 (25%):  ███████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   │  ║
+║  │                   └── giorni 1-30                                      │  ║
 ║  │                                                                        │  ║
-║  │  Config:                                                               │  ║
-║  │    wfa_validation.enabled: true                                        │  ║
-║  │    wfa_validation.window_percentages: [0.25, 0.50, 0.75, 1.0]          │  ║
-║  │    wfa_validation.min_profitable_windows: 4                            │  ║
+║  │  Window 2 (50%):  ██████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░   │  ║
+║  │                   └── giorni 1-60                                      │  ║
 ║  │                                                                        │  ║
-║  │  FAIL -> return (False, "insufficient_profitable_windows:2/4")         │  ║
-║  │          Strategy status = RETIRED                                     │  ║
+║  │  Window 3 (75%):  █████████████████████████████████░░░░░░░░░░░░░░░░░   │  ║
+║  │                   └── giorni 1-90                                      │  ║
 ║  │                                                                        │  ║
-║  │  Differenza dalla vecchia WFA:                                         │  ║
-║  │    - Vecchia: ri-ottimizzava params per ogni window, check CV          │  ║
-║  │    - Nuova: usa params FISSI, check profitability                      │  ║
+║  │  Window 4 (100%): ██████████████████████████████████████████████████   │  ║
+║  │                   └── giorni 1-120                                     │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ STEP 5: POOL ENTRY (leaderboard logic)                                 │  ║
+║  │ LOGICA WFA FIXED PARAMS                                                │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  Per ogni window:                                                      │  ║
+║  │    1. Slice dati: _slice_data_by_percentage(is_data, pct)              │  ║
+║  │    2. Backtest con params FISSI (NO ri-ottimizzazione!)                │  ║
+║  │    3. Calcola expectancy per la window                                 │  ║
+║  │                                                                        │  ║
+║  │  Criterio di successo:                                                 │  ║
+║  │    - TUTTE e 4 le windows devono avere expectancy >= 0.002 (0.2%)      │  ║
+║  │    - Se anche UNA sola window fallisce -> strategia FAIL               │  ║
+║  │                                                                        │  ║
+║  │  Esempio PASS:                                                         │  ║
+║  │    W1: exp=0.0035, W2: exp=0.0028, W3: exp=0.0041, W4: exp=0.0032      │  ║
+║  │    -> Tutte >= 0.002 -> PASS                                           │  ║
+║  │                                                                        │  ║
+║  │  Esempio FAIL:                                                         │  ║
+║  │    W1: exp=0.0035, W2: exp=0.0012, W3: exp=0.0041, W4: exp=0.0032      │  ║
+║  │    -> W2 < 0.002 -> FAIL ("insufficient_profitable_windows:3/4")       │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ DIFFERENZA DALLA VECCHIA WFA                                           │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │                                                                        │  ║
+║  │  ┌───────────────────────┬───────────────────────────────────────┐     │  ║
+║  │  │ VECCHIA WFA           │ NUOVA WFA (FIXED PARAMS)              │     │  ║
+║  │  ├───────────────────────┼───────────────────────────────────────┤     │  ║
+║  │  │ Ri-ottimizza params   │ Params FISSI (da parametric)          │     │  ║
+║  │  │ ogni window           │                                       │     │  ║
+║  │  ├───────────────────────┼───────────────────────────────────────┤     │  ║
+║  │  │ Check: CV params      │ Check: expectancy >= 0.002            │     │  ║
+║  │  │ (stabilita')          │ (profitability)                       │     │  ║
+║  │  ├───────────────────────┼───────────────────────────────────────┤     │  ║
+║  │  │ ~4200 simulazioni     │ 4 simulazioni (1 per window)          │     │  ║
+║  │  │ (4 × 1050 combo)      │                                       │     │  ║
+║  │  ├───────────────────────┼───────────────────────────────────────┤     │  ║
+║  │  │ Output: optimal_params│ Output: pass/fail                     │     │  ║
+║  │  └───────────────────────┴───────────────────────────────────────┘     │  ║
+║  │                                                                        │  ║
+║  │  Vantaggio: Molto piu' veloce, verifica che i params ottimizzati       │  ║
+║  │             siano generalizzabili su tutto il periodo.                 │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  Config (config.yaml):                                                       ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │  wfa_validation:                                                       │  ║
+║  │    enabled: true                                                       │  ║
+║  │    window_percentages: [0.25, 0.50, 0.75, 1.0]                         │  ║
+║  │    min_expectancy: 0.002       # 0.2% per window                       │  ║
+║  │    min_profitable_windows: 4   # Tutte devono passare                  │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  Output:                                                                     ║
+║    - PASS (4/4 windows) -> procede a POOL ENTRY                              ║
+║    - FAIL (<4 windows)  -> return (False, "insufficient_profitable_windows") ║
+║                           Strategy status = RETIRED                          ║
+║                                                                              ║
+║  File coinvolti:                                                             ║
+║  - src/backtester/main_continuous.py -> _run_wfa_fixed_params()              ║
+║  - src/backtester/main_continuous.py -> _slice_data_by_percentage()          ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+
+
+
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                             9. POOL ENTRY                                    ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Obiettivo: Inserire la strategia validata nel pool ACTIVE (leaderboard)     ║
+║             competendo con le strategie esistenti per score.                 ║
+║                                                                              ║
+║  Input:                                                                      ║
+║    - strategy che ha passato: Score >= 40, Shuffle, WFA                      ║
+║    - score finale calcolato                                                  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ POOL RULES (leaderboard logic)                                         │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │                                                                        │  ║
 ║  │  PoolManager.try_enter_pool(strategy_id, score)                        │  ║
@@ -949,27 +1083,19 @@ Pipeline Completa Aggiornata:
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │                                                                        │  ║
 ║  │  EventTracker.backtest_scored(...)        # Score calcolato            │  ║
-║  │  EventTracker.backtest_score_rejected()   # Score < threshold          │  ║
-║  │  EventTracker.shuffle_test_started(...)   # Shuffle test iniziato      │  ║
 ║  │  EventTracker.shuffle_test_passed(...)    # Shuffle test passato       │  ║
-║  │  EventTracker.shuffle_test_failed(...)    # Shuffle test fallito       │  ║
 ║  │  EventTracker.pool_attempted(...)         # Tentativo ingresso pool    │  ║
 ║  │  EventTracker.pool_entered(...)           # Ingresso pool riuscito     │  ║
 ║  │  EventTracker.pool_rejected(...)          # Ingresso pool rifiutato    │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  Output:                                                                     ║
-║    - (True, reason)  -> strategy.status = ACTIVE, nel pool                   ║
-║    - (False, reason) -> strategy.status = RETIRED, fuori pool                ║
-║                                                                              ║
-║  Se ACTIVE -> procede a ROTATION (prossimo blocco)                           ║
+║    - ENTERED  -> strategy.status = ACTIVE, nel pool, pronta per ROTATION     ║
+║    - REJECTED -> strategy.status = RETIRED, fuori pool                       ║
 ║                                                                              ║
 ║  File coinvolti:                                                             ║
 ║  - src/backtester/main_continuous.py -> _promote_to_active_pool()            ║
-║  - src/backtester/main_continuous.py -> _run_wfa_fixed_params()              ║
-║  - src/scorer/backtest_scorer.py     -> BacktestScorer                       ║
 ║  - src/scorer/pool_manager.py        -> PoolManager.try_enter_pool()         ║
-║  - src/validator/lookahead_test.py   -> LookaheadTester.validate()           ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -979,7 +1105,7 @@ Pipeline Completa Aggiornata:
 
 
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                          7. ROTATION -> LIVE                                 ║
+║                          10. ROTATION -> LIVE                                ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║                                                                              ║
 ║  Obiettivo: Selezionare le migliori strategie dal pool ACTIVE e deployarle   ║
