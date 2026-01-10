@@ -109,6 +109,7 @@ class MetricsCollector:
                 score_stats = self._get_score_stats_24h(session, window_24h)
                 retest_stats = self._get_retest_stats_24h(session, window_24h)
                 live_stats = self._get_live_rotation_stats(session, window_24h)
+                threshold_breakdown = self._get_threshold_breakdown_24h(session, window_24h)
 
                 # Determine overall status
                 status, issue = self._get_status_and_issue(
@@ -140,6 +141,7 @@ class MetricsCollector:
                     pool_by_source=pool_by_source,
                     retest_stats=retest_stats,
                     live_stats=live_stats,
+                    threshold_breakdown=threshold_breakdown,
                 )
 
         except Exception as e:
@@ -699,6 +701,43 @@ class MetricsCollector:
             'mw_ok_pct': pct(mw_ok, shuffle_ok),
             'pool': pool_entered,
             'pool_pct': pct(pool_entered, mw_ok if mw_ok > 0 else shuffle_ok),
+        }
+
+    def _get_threshold_breakdown_24h(self, session, since: datetime) -> Dict[str, int]:
+        """
+        Aggregate threshold breakdown from parametric_failed events.
+
+        Returns dict with failure counts per threshold type:
+        {total, fail_trades, fail_sharpe, fail_wr, fail_exp, fail_dd}
+        """
+        result = session.execute(
+            text("""
+                SELECT
+                    COALESCE(SUM((event_data->'threshold_breakdown'->>'fail_trades')::int), 0) as fail_trades,
+                    COALESCE(SUM((event_data->'threshold_breakdown'->>'fail_sharpe')::int), 0) as fail_sharpe,
+                    COALESCE(SUM((event_data->'threshold_breakdown'->>'fail_wr')::int), 0) as fail_wr,
+                    COALESCE(SUM((event_data->'threshold_breakdown'->>'fail_exp')::int), 0) as fail_exp,
+                    COALESCE(SUM((event_data->'threshold_breakdown'->>'fail_dd')::int), 0) as fail_dd,
+                    COALESCE(SUM((event_data->'threshold_breakdown'->>'total_combos')::int), 0) as total_combos
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'backtest'
+                  AND event_type = 'parametric_failed'
+                  AND event_data->'threshold_breakdown' IS NOT NULL
+            """),
+            {'since': since}
+        ).first()
+
+        if not result or result[5] == 0:
+            return {}
+
+        return {
+            'total': result[5],
+            'fail_trades': result[0],
+            'fail_sharpe': result[1],
+            'fail_wr': result[2],
+            'fail_exp': result[3],
+            'fail_dd': result[4],
         }
 
     def _get_timing_avg_24h(self, session, since: datetime) -> Dict[str, Optional[float]]:
@@ -1278,6 +1317,7 @@ class MetricsCollector:
         pool_by_source: Dict[str, int],
         retest_stats: Dict[str, Any],
         live_stats: Dict[str, Any],
+        threshold_breakdown: Dict[str, int],
     ) -> None:
         """
         Log metrics following the 10-step pipeline structure.
@@ -1315,7 +1355,7 @@ class MetricsCollector:
             logger.info(f'=== PIPELINE STATUS: {status} ===')
 
         # =====================================================================
-        # [1. GENERATOR]
+        # [1/10 GENERATOR]
         # =====================================================================
         gen_total = generator_stats['total']
         gen_by_source = generator_stats['by_source']
@@ -1327,16 +1367,16 @@ class MetricsCollector:
         src_pattern = gen_by_source.get('pattern', 0)
         src_ai_free = gen_by_source.get('ai_free', 0)
         src_ai_assigned = gen_by_source.get('ai_assigned', 0)
-        logger.info(f'[1. GENERATOR] 24h: {gen_total} strategies (pattern={src_pattern}, ai_free={src_ai_free}, ai_assigned={src_ai_assigned})')
+        logger.info(f'[1/10 GENERATOR] 24h: {gen_total} strategies | pattern={src_pattern}, ai_free={src_ai_free}, ai_assigned={src_ai_assigned}')
 
         type_parts = [f'{t}={c}' for t, c in sorted(gen_by_type.items()) if c > 0]
         type_str = ', '.join(type_parts) if type_parts else '--'
-        logger.info(f'[1. GENERATOR] by_type: {type_str}')
+        logger.info(f'[1/10 GENERATOR] types: {type_str}')
 
         dir_long = gen_by_dir.get('LONG', 0)
         dir_short = gen_by_dir.get('SHORT', 0)
         dir_bidir = gen_by_dir.get('BIDIR', 0)
-        logger.info(f'[1. GENERATOR] by_direction: LONG={dir_long}, SHORT={dir_short}, BIDIR={dir_bidir}')
+        logger.info(f'[1/10 GENERATOR] direction: LONG={dir_long}, SHORT={dir_short}, BIDIR={dir_bidir}')
 
         tf_order = ['5m', '15m', '30m', '1h', '2h']
         tf_parts = [f'{tf}={gen_by_tf.get(tf, 0)}' for tf in tf_order if gen_by_tf.get(tf, 0) > 0]
@@ -1344,41 +1384,41 @@ class MetricsCollector:
             if tf not in tf_order and count > 0:
                 tf_parts.append(f'{tf}={count}')
         tf_str = ', '.join(tf_parts) if tf_parts else '--'
-        logger.info(f'[1. GENERATOR] by_timeframe: {tf_str}')
+        logger.info(f'[1/10 GENERATOR] timeframe: {tf_str}')
 
         pat_unique = unused_patterns.get('unique_used', 0)
         pat_total = unused_patterns.get('total_available')
         pat_remaining = unused_patterns.get('remaining')
         pat_in_db = unused_patterns.get('strategies_in_db', 0)
         if pat_total is not None:
-            logger.info(f'[1. GENERATOR] patterns: {pat_unique}/{pat_total} used ({pat_remaining} remaining) -> {pat_in_db} in DB')
+            logger.info(f'[1/10 GENERATOR] patterns: {pat_unique}/{pat_total} used ({pat_remaining} remaining) -> {pat_in_db} in DB')
         else:
-            logger.info(f'[1. GENERATOR] patterns: {pat_unique} used -> {pat_in_db} in DB')
+            logger.info(f'[1/10 GENERATOR] patterns: {pat_unique} used -> {pat_in_db} in DB')
 
         time_pattern = fmt_time(gen_timing.get('pattern'))
         time_ai_free = fmt_time(gen_timing.get('ai_free'))
         time_ai_assigned = fmt_time(gen_timing.get('ai_assigned'))
         gen_failures = generator_stats.get('gen_failures', 0)
-        logger.info(f'[1. GENERATOR] timing: pattern={time_pattern}, ai_free={time_ai_free}, ai_assigned={time_ai_assigned} | failures: {gen_failures}')
+        logger.info(f'[1/10 GENERATOR] timing: pattern={time_pattern}, ai_free={time_ai_free}, ai_assigned={time_ai_assigned} | failures: {gen_failures}')
 
         # =====================================================================
-        # [2. VALIDATOR]
+        # [2/10 VALIDATOR]
         # =====================================================================
         g = queue_depths.get('GENERATED', 0)
         val = funnel["validated"]
         val_failed = funnel["validation_failed"]
-        # Use gen_total from generator_stats for consistency (same source as [1. GENERATOR])
+        # Use gen_total from generator_stats for consistency (same source as [1/10 GENERATOR])
         gen = gen_total
 
-        logger.info(f'[2. VALIDATOR] queue: {g} waiting')
-        val_failed_str = f", {val_failed} failed" if val_failed > 0 else ""
+        logger.info(f'[2/10 VALIDATOR] queue: {g} waiting')
+        val_failed_str = f" | failed: {val_failed}" if val_failed > 0 else ""
         # Recalculate validated_pct using consistent denominator
         validated_pct = int(round(100 * val / gen)) if gen > 0 else None
-        logger.info(f'[2. VALIDATOR] 24h: {val}/{gen} passed syntax+AST+execution ({fmt_pct(validated_pct)}){val_failed_str}')
-        logger.info(f'[2. VALIDATOR] timing: {fmt_time(timing.get("validation"))} avg | failures: {failures["validation"]}')
+        logger.info(f'[2/10 VALIDATOR] 24h: {val}/{gen} passed ({fmt_pct(validated_pct)}){val_failed_str}')
+        logger.info(f'[2/10 VALIDATOR] timing: {fmt_time(timing.get("validation"))} avg')
 
         # =====================================================================
-        # [3. PARAMETRIC OPTIMIZATION]
+        # [3/10 PARAMETRIC]
         # =====================================================================
         v = queue_depths.get('VALIDATED', 0)
         bt_waiting = backpressure["bt_waiting"]
@@ -1396,13 +1436,30 @@ class MetricsCollector:
         else:
             strategies_per_base = "--"
 
-        logger.info(f'[3. PARAMETRIC OPTIMIZATION] queue: {bt_waiting} waiting, {bt_processing} running')
-        logger.info(f'[3. PARAMETRIC OPTIMIZATION] 24h: {param_failed + (bases_with_output or 0)} bases tested, {combinations} combos')
-        logger.info(f'[3. PARAMETRIC OPTIMIZATION] passed: {bases_with_output or 0} bases -> {param_passed} strategies ({strategies_per_base}/base)')
-        logger.info(f'[3. PARAMETRIC OPTIMIZATION] timing: {fmt_time(timing.get("backtest"))}/base | failures: {param_failed} (no valid combo)')
+        total_bases = param_failed + (bases_with_output or 0)
+        logger.info(f'[3/10 PARAMETRIC] queue: {bt_waiting} waiting, {bt_processing} running')
+        logger.info(f'[3/10 PARAMETRIC] 24h: {total_bases} bases tested, {combinations} combos')
+
+        # Show threshold breakdown if available
+        if threshold_breakdown:
+            tb_total = threshold_breakdown.get('total', 0)
+            if tb_total > 0:
+                def tb_pct(n: int) -> str:
+                    return f"{100*n//tb_total}%" if tb_total > 0 else "--"
+                ft = threshold_breakdown.get('fail_trades', 0)
+                fs = threshold_breakdown.get('fail_sharpe', 0)
+                fw = threshold_breakdown.get('fail_wr', 0)
+                fe = threshold_breakdown.get('fail_exp', 0)
+                fd = threshold_breakdown.get('fail_dd', 0)
+                logger.info(f'[3/10 PARAMETRIC] threshold_filter (combos):')
+                logger.info(f'[3/10 PARAMETRIC]   trades<10: {ft} ({tb_pct(ft)}) | sharpe<0.3: {fs} ({tb_pct(fs)})')
+                logger.info(f'[3/10 PARAMETRIC]   wr<0.35: {fw} ({tb_pct(fw)}) | exp<0.002: {fe} ({tb_pct(fe)}) | dd>0.5: {fd} ({tb_pct(fd)})')
+
+        logger.info(f'[3/10 PARAMETRIC] passed: {bases_with_output or 0} bases -> {param_passed} strategies ({strategies_per_base}/base)')
+        logger.info(f'[3/10 PARAMETRIC] timing: {fmt_time(timing.get("backtest"))}/base | failures: {param_failed}')
 
         # =====================================================================
-        # [4. BACKTEST IN-SAMPLE]
+        # [4/10 IS_BACKTEST]
         # =====================================================================
         is_count = is_stats.get('count', 0)
         is_sharpe = fmt_float(is_stats.get('avg_sharpe'))
@@ -1410,11 +1467,11 @@ class MetricsCollector:
         is_exp = fmt_float(is_stats.get('avg_exp'), 3) if is_stats.get('avg_exp') else "--"
         is_trades = fmt_float(is_stats.get('avg_trades'), 0) if is_stats.get('avg_trades') else "--"
 
-        logger.info(f'[4. BACKTEST IN-SAMPLE] 24h: {is_count} strategies tested')
-        logger.info(f'[4. BACKTEST IN-SAMPLE] avg_metrics: sharpe={is_sharpe}, wr={is_wr}, exp={is_exp}, trades={is_trades}')
+        logger.info(f'[4/10 IS_BACKTEST] 24h: {is_count} strategies tested')
+        logger.info(f'[4/10 IS_BACKTEST] metrics: sharpe={is_sharpe}, wr={is_wr}, exp={is_exp}, trades={is_trades}')
 
         # =====================================================================
-        # [5. BACKTEST OUT-OF-SAMPLE]
+        # [5/10 OOS_BACKTEST]
         # =====================================================================
         oos_count = oos_stats.get('count', 0)
         avg_degrad = oos_stats.get('avg_degradation')
@@ -1422,11 +1479,11 @@ class MetricsCollector:
         oos_worse = oos_stats.get('oos_worse', 0)
 
         degrad_str = f"{avg_degrad*100:.0f}%" if avg_degrad is not None else "--"
-        logger.info(f'[5. BACKTEST OUT-OF-SAMPLE] 24h: {oos_count} strategies tested')
-        logger.info(f'[5. BACKTEST OUT-OF-SAMPLE] avg_degradation: {degrad_str} | oos_better: {oos_better} | oos_worse: {oos_worse}')
+        logger.info(f'[5/10 OOS_BACKTEST] 24h: {oos_count} strategies tested')
+        logger.info(f'[5/10 OOS_BACKTEST] degradation: {degrad_str} | oos_better={oos_better}, oos_worse={oos_worse}')
 
         # =====================================================================
-        # [6. SCORE CALCULATION]
+        # [6/10 SCORE]
         # =====================================================================
         score_ok = funnel["score_ok"]
         score_rejected = failures["score_reject"]
@@ -1434,33 +1491,33 @@ class MetricsCollector:
         max_score = fmt_float(score_stats.get('max_score'))
         avg_score = fmt_float(score_stats.get('avg_score'))
 
-        logger.info(f'[6. SCORE CALCULATION] 24h: {score_ok}/{param_passed} passed min_score {self.pool_min_score} ({fmt_pct(funnel["score_ok_pct"])})')
-        logger.info(f'[6. SCORE CALCULATION] score_range: {min_score} to {max_score} (avg {avg_score}) | rejected: {score_rejected}')
+        logger.info(f'[6/10 SCORE] 24h: {score_ok}/{param_passed} passed min_score={self.pool_min_score} ({fmt_pct(funnel["score_ok_pct"])})')
+        logger.info(f'[6/10 SCORE] range: {min_score} to {max_score} (avg {avg_score}) | rejected: {score_rejected}')
 
         # =====================================================================
-        # [7. SHUFFLE TEST]
+        # [7/10 SHUFFLE]
         # =====================================================================
         shuf = funnel["shuffle_ok"]
         shuffle_fail = failures["shuffle_fail"]
         shuffle_cached = failures.get("shuffle_cached", 0)
 
-        logger.info(f'[7. SHUFFLE TEST] 24h: {shuf}/{score_ok} passed ({fmt_pct(funnel["shuffle_ok_pct"])})')
-        logger.info(f'[7. SHUFFLE TEST] timing: {fmt_time(timing.get("shuffle"))} | failures: {shuffle_fail} (bias) | cached: {shuffle_cached}')
+        logger.info(f'[7/10 SHUFFLE] 24h: {shuf}/{score_ok} passed ({fmt_pct(funnel["shuffle_ok_pct"])})')
+        logger.info(f'[7/10 SHUFFLE] timing: {fmt_time(timing.get("shuffle"))} | bias_failures: {shuffle_fail} | cached: {shuffle_cached}')
 
         # =====================================================================
-        # [8. WFA FIXED PARAMS]
+        # [8/10 WFA]
         # =====================================================================
         mw = funnel["mw_ok"]
         mw_failed = funnel["mw_failed"]
         mw_started = funnel["mw_started"]
         mw_in_progress = max(0, mw_started - mw - mw_failed)
 
-        mw_in_progress_str = f", {mw_in_progress} in progress" if mw_in_progress > 0 else ""
-        logger.info(f'[8. WFA FIXED PARAMS] 24h: {mw}/{shuf} passed 4-window consistency ({fmt_pct(funnel["mw_ok_pct"])}){mw_in_progress_str}')
-        logger.info(f'[8. WFA FIXED PARAMS] timing: {fmt_time(timing.get("multiwindow"))} | failures: {mw_failed} (CV > 1.5)')
+        mw_in_progress_str = f" | in_progress: {mw_in_progress}" if mw_in_progress > 0 else ""
+        logger.info(f'[8/10 WFA] 24h: {mw}/{shuf} passed 4-window ({fmt_pct(funnel["mw_ok_pct"])}){mw_in_progress_str}')
+        logger.info(f'[8/10 WFA] timing: {fmt_time(timing.get("multiwindow"))} | cv_failures: {mw_failed}')
 
         # =====================================================================
-        # [9. POOL]
+        # [9/10 POOL]
         # =====================================================================
         pool_size = pool_stats["size"]
         pool_limit = pool_stats["limit"]
@@ -1470,24 +1527,24 @@ class MetricsCollector:
         pool_optimized = pool_by_source.get('optimized', 0)
         pool_entered = funnel["pool"]
 
-        logger.info(f'[9. POOL] size: {pool_size}/{pool_limit} | 24h_added: {pool_entered}')
-        logger.info(f'[9. POOL] by_source: pattern={pool_pattern}, ai_free={pool_ai_free}, ai_assigned={pool_ai_assigned}, optimized={pool_optimized}')
-        logger.info(f'[9. POOL] score_range: {fmt_float(pool_stats["score_min"])} to {fmt_float(pool_stats["score_max"])} (avg {fmt_float(pool_stats["score_avg"])})')
+        logger.info(f'[9/10 POOL] size: {pool_size}/{pool_limit} | 24h_added: {pool_entered}')
+        logger.info(f'[9/10 POOL] sources: pattern={pool_pattern}, ai_free={pool_ai_free}, ai_assigned={pool_ai_assigned}, optimized={pool_optimized}')
+        logger.info(f'[9/10 POOL] scores: {fmt_float(pool_stats["score_min"])} to {fmt_float(pool_stats["score_max"])} (avg {fmt_float(pool_stats["score_avg"])})')
 
         expectancy_str = f'{pool_quality["expectancy_avg"]*100:.1f}%' if pool_quality["expectancy_avg"] else "--"
-        logger.info(f'[9. POOL] quality: sharpe={fmt_float(pool_quality["sharpe_avg"])}, wr={fmt_pct_float(pool_quality["winrate_avg"])}, exp={expectancy_str}, dd={fmt_pct_float(pool_quality["dd_avg"])}')
+        logger.info(f'[9/10 POOL] quality: sharpe={fmt_float(pool_quality["sharpe_avg"])}, wr={fmt_pct_float(pool_quality["winrate_avg"])}, exp={expectancy_str}, dd={fmt_pct_float(pool_quality["dd_avg"])}')
 
-        logger.info(f'[9. POOL] retest_24h: tested={retest_stats["tested"]}, passed={retest_stats["passed"]}, evicted={retest_stats["retired"]}')
+        logger.info(f'[9/10 POOL] retest: tested={retest_stats["tested"]}, passed={retest_stats["passed"]}, evicted={retest_stats["retired"]}')
 
         # =====================================================================
-        # [10. LIVE]
+        # [10/10 LIVE]
         # =====================================================================
         live_count = live_stats["live"]
         live_limit = live_stats["limit"]
         avg_age_str = f'{live_stats["avg_age_days"]:.1f}d' if live_stats["avg_age_days"] else "--"
 
-        logger.info(f'[10. LIVE] active: {live_count}/{live_limit} (avg_age: {avg_age_str})')
-        logger.info(f'[10. LIVE] 24h: deployed={live_stats["deployed_24h"]}, retired={live_stats["retired_24h"]}')
+        logger.info(f'[10/10 LIVE] active: {live_count}/{live_limit} (avg_age: {avg_age_str})')
+        logger.info(f'[10/10 LIVE] 24h: deployed={live_stats["deployed_24h"]}, retired={live_stats["retired_24h"]}')
 
     # =========================================================================
     # PUBLIC API METHODS (for external use)

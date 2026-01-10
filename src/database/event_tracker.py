@@ -363,9 +363,16 @@ class EventTracker:
         best_sharpe: Optional[float] = None,
         best_win_rate: Optional[float] = None,
         combinations_tested: Optional[int] = None,
+        threshold_breakdown: Optional[dict] = None,
         duration_ms: Optional[int] = None
     ) -> bool:
-        """Emit event when parametric backtest finds no valid parameters."""
+        """
+        Emit event when parametric backtest finds no valid parameters.
+
+        Args:
+            threshold_breakdown: Dict with failure counts per threshold:
+                {total_combos, fail_trades, fail_sharpe, fail_wr, fail_exp, fail_dd}
+        """
         return EventTracker.emit(
             event_type="parametric_failed",
             stage="backtest",
@@ -377,7 +384,8 @@ class EventTracker:
             reason=reason,
             best_sharpe=best_sharpe,
             best_win_rate=best_win_rate,
-            combinations_tested=combinations_tested
+            combinations_tested=combinations_tested,
+            threshold_breakdown=threshold_breakdown
         )
 
     # =========================================================================

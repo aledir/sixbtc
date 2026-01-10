@@ -1161,10 +1161,21 @@ class ContinuousBacktesterProcess:
                         f"WR={row['win_rate']:.1%} Trades={row['total_trades']} | FAILS: {fail_str}"
                     )
 
-                # Emit event for metrics tracking
+                # Emit event for metrics tracking with threshold breakdown
                 if strategy_id and strategy_name:
                     from src.database.event_tracker import EventTracker
                     duration_ms = int((time.time() - parametric_start_time) * 1000)
+
+                    # Build threshold breakdown for metrics aggregation
+                    threshold_breakdown = {
+                        'total_combos': n_tested,
+                        'fail_trades': n_tested - pass_trades,
+                        'fail_sharpe': n_tested - pass_sharpe,
+                        'fail_wr': n_tested - pass_wr,
+                        'fail_exp': n_tested - pass_exp,
+                        'fail_dd': n_tested - pass_dd,
+                    }
+
                     EventTracker.backtest_parametric_failed(
                         strategy_id=strategy_id,
                         strategy_name=strategy_name,
@@ -1173,6 +1184,7 @@ class ContinuousBacktesterProcess:
                         best_sharpe=float(best_sharpe),
                         best_win_rate=float(best_wr),
                         combinations_tested=n_tested,
+                        threshold_breakdown=threshold_breakdown,
                         duration_ms=duration_ms
                     )
 
