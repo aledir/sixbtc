@@ -88,12 +88,12 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
 
     EXIT STRATEGY:
     - Take Profit at target magnitude ({magnitude}%)
-    - Stop Loss at 3× magnitude ({sl_pct_display}%) - Asymmetric R:R 1:3
+    - Stop Loss at {rr_ratio}× magnitude ({sl_pct_display}%) - Asymmetric R:R 1:{rr_ratio}
     - Time limit at {holding_bars} bars (backstop if TP not hit)
 
     RISK MANAGEMENT:
     Pattern-discovery validated this pattern has {edge:.1f}% edge.
-    Asymmetric SL (3×TP) lets winners run while cutting only catastrophic losses.
+    SL:TP ratio of {rr_ratio}:1 from pattern-discovery recommendations.
     Expected profit per trade = magnitude × edge = {magnitude}% × {edge:.1f}% ≈ {expected_profit:.2f}%
 
     Generated via Direct Embedding (Mode A) - No AI translation.
@@ -252,14 +252,15 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
 
             # Convert magnitude to decimal for tp_pct (5% -> 0.05)
             tp_pct = magnitude / 100.0
-            # SL = 3× TP (asymmetric, lets winners run, cuts big losses)
-            # Pattern-discovery validates that the pattern has positive edge
-            # so we want to stay in trades longer and only exit on big moves
-            sl_pct = tp_pct * 3.0
+
+            # Get RR ratio from pattern-discovery (or default to 2.0)
+            # suggested_rr_ratio is the SL:TP ratio that pattern-discovery recommends
+            rr_ratio = pattern.suggested_rr_ratio or 2.0
+            sl_pct = tp_pct * rr_ratio
 
             # For docstring display
             edge_pct = pattern.test_edge * 100
-            sl_pct_display = magnitude * 3.0
+            sl_pct_display = magnitude * rr_ratio
             expected_profit = magnitude * edge_pct / 100  # magnitude × edge
 
             # Build complete strategy code
@@ -285,6 +286,7 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
                 sl_pct=sl_pct,
                 sl_pct_display=sl_pct_display,
                 expected_profit=expected_profit,
+                rr_ratio=rr_ratio,
             )
 
             # Validate generated code
