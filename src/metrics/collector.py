@@ -1391,9 +1391,11 @@ class MetricsCollector:
         pat_remaining = unused_patterns.get('remaining')
         pat_in_db = unused_patterns.get('strategies_in_db', 0)
         if pat_total is not None:
-            logger.info(f'[1/10 GENERATOR] patterns: {pat_unique}/{pat_total} used ({pat_remaining} remaining) -> {pat_in_db} in DB')
+            # Format: "33 base patterns -> 79 strategies | 0 unused"
+            unused_str = f" | {pat_remaining} unused" if pat_remaining and pat_remaining > 0 else ""
+            logger.info(f'[1/10 GENERATOR] patterns: {pat_unique} base -> {pat_in_db} strategies{unused_str}')
         else:
-            logger.info(f'[1/10 GENERATOR] patterns: {pat_unique} used -> {pat_in_db} in DB')
+            logger.info(f'[1/10 GENERATOR] patterns: {pat_unique} base -> {pat_in_db} strategies')
 
         time_pattern = fmt_time(gen_timing.get('pattern'))
         time_ai_free = fmt_time(gen_timing.get('ai_free'))

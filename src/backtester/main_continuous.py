@@ -1167,13 +1167,14 @@ class ContinuousBacktesterProcess:
                     duration_ms = int((time.time() - parametric_start_time) * 1000)
 
                     # Build threshold breakdown for metrics aggregation
+                    # Convert to int() to avoid np.int64 JSON serialization issues
                     threshold_breakdown = {
-                        'total_combos': n_tested,
-                        'fail_trades': n_tested - pass_trades,
-                        'fail_sharpe': n_tested - pass_sharpe,
-                        'fail_wr': n_tested - pass_wr,
-                        'fail_exp': n_tested - pass_exp,
-                        'fail_dd': n_tested - pass_dd,
+                        'total_combos': int(n_tested),
+                        'fail_trades': int(n_tested - pass_trades),
+                        'fail_sharpe': int(n_tested - pass_sharpe),
+                        'fail_wr': int(n_tested - pass_wr),
+                        'fail_exp': int(n_tested - pass_exp),
+                        'fail_dd': int(n_tested - pass_dd),
                     }
 
                     EventTracker.backtest_parametric_failed(
