@@ -927,15 +927,23 @@ class ContinuousBacktesterProcess:
 
             if execution_type:
                 # Use execution-type aligned space
-                # For close_based: TP=0, optimize around time exit
+                # For close_based: TP=0, optimize around time exit with ATR-based SL
                 # For touch_based: optimize around TP, time exit as backstop
                 base_magnitude = base_tp_pct if base_tp_pct > 0 else 0.02
+                atr_signal_median = getattr(strategy_instance, 'atr_signal_median', None)
                 space = self.parametric_backtester.build_execution_type_space(
                     execution_type=execution_type,
                     base_magnitude=base_magnitude,
                     base_exit_bars=base_exit_bars,
+                    atr_signal_median=atr_signal_median,
                 )
-                logger.info(f"Using execution-type aligned space: {execution_type}")
+                if atr_signal_median:
+                    logger.info(
+                        f"Using execution-type aligned space: {execution_type} "
+                        f"(ATR={atr_signal_median:.2%})"
+                    )
+                else:
+                    logger.info(f"Using execution-type aligned space: {execution_type}")
             else:
                 # Fallback: use pattern-centered space
                 space = self.parametric_backtester.build_pattern_centered_space(

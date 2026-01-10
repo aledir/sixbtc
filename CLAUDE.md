@@ -892,6 +892,33 @@ curl "http://localhost:8001/api/v1/patterns?tier=1"
 # Response includes atr_signal_* fields for all patterns
 ```
 
+### ATR-Based Stop Loss for Close-Based Patterns
+
+For `close_based` patterns (time-based exit), the SL is calculated using ATR instead of target magnitude:
+
+```python
+# In parametric_backtest.py build_execution_type_space():
+if execution_type == 'close_based':
+    if atr_signal_median:
+        # ATR-based SL: volatility-aware protection
+        sl_values = [atr_signal_median * mult for mult in [2.0, 3.0, 4.0, 5.0]]
+    else:
+        # Fallback: wider magnitude-based (less accurate)
+        sl_values = [base_magnitude * mult for mult in [4.0, 6.0, 8.0, 10.0]]
+```
+
+**Why ATR-based SL?**
+- Pattern-discovery validates close_based patterns with no SL (only time exit)
+- Real trading needs SL for risk management
+- Using magnitude-based SL can be too tight or too loose
+- ATR reflects actual volatility when pattern fired → appropriate SL level
+
+**Example:**
+- Pattern `return_24h_gt_pos6`: magnitude=3%, atr_signal_median=1.13%
+- Old SL (magnitude×2-5): [6%, 9%, 12%, 15%]
+- New SL (ATR×2-5): [2.3%, 3.4%, 4.5%, 5.6%]
+- The new values are tighter but more aligned with actual volatility
+
 ---
 
 ## ✅ GOLDEN CHECKLIST

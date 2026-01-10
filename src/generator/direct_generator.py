@@ -104,6 +104,10 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
     exit_after_bars = {holding_bars}
     signal_column = 'entry_signal'
 
+    # Execution type alignment (for parametric space selection)
+    execution_type = '{execution_type}'
+    atr_signal_median = {atr_signal_median}  # ATR at pattern signal (price-normalized)
+
     # Indicator columns added by calculate_indicators()
     indicator_columns = ['atr', 'entry_signal']
 
@@ -342,6 +346,7 @@ class PatStrat_{strategy_type}_{strategy_id}(StrategyCore):
                 execution_type=execution_type,
                 exit_strategy_description=exit_strategy_description,
                 atr_filter_code=self._build_atr_filter_code(pattern),
+                atr_signal_median=pattern.atr_signal_median if pattern.atr_signal_median else 'None',
             )
 
             # Validate generated code

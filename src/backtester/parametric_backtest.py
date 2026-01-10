@@ -784,6 +784,7 @@ class ParametricBacktester:
         execution_type: str,
         base_magnitude: float,
         base_exit_bars: int,
+        atr_signal_median: Optional[float] = None,
     ) -> Dict[str, List]:
         """
         Build parameter space constrained by execution type.
@@ -801,12 +802,14 @@ class ParametricBacktester:
         - Pattern predicts price at CLOSE of period
         - Time exit is PRIMARY (must be > 0)
         - TP is DISABLED (always 0)
-        - Optimize exit_bars around validated holding period
+        - SL based on ATR volatility (not magnitude) to avoid premature stops
 
         Args:
             execution_type: 'touch_based' or 'close_based'
             base_magnitude: Target magnitude as decimal (e.g., 0.02 for 2%)
             base_exit_bars: Holding period in bars
+            atr_signal_median: Median ATR when pattern fires (price-normalized).
+                               Used for close_based SL calculation.
 
         Returns:
             Parameter space dict with sl_pct, tp_pct, exit_bars, leverage
@@ -850,12 +853,47 @@ class ParametricBacktester:
             # TP disabled, time exit is primary
             tp_values = [0.0]  # Only zero - no TP
 
-            # SL wider for breathing room during holding period
-            sl_multipliers = [2.0, 3.0, 4.0, 5.0]
-            sl_values = sorted(set([
-                round(base_magnitude * mult, 4)
-                for mult in sl_multipliers
-            ]))
+            # SL based on VOLATILITY, not magnitude
+            # For close_based, we hold until time exit - need SL wide enough
+            # to avoid getting stopped by normal price fluctuations.
+            #
+            # ATR-based SL rationale:
+            # - Pattern was validated with no SL (just time exit)
+            # - Real trading needs SL for risk management
+            # - SL should be based on expected volatility during holding period
+            # - Use ATR * holding_period_factor as baseline
+            #
+            # Without ATR: fallback to wider magnitude multipliers
+            if atr_signal_median and atr_signal_median > 0:
+                # ATR-based SL: pattern fired at this volatility level
+                # Scale by holding period: 24h ~= 1.5x ATR swing expected
+                # Multipliers: 2x to 5x ATR for sufficient breathing room
+                sl_multipliers = [2.0, 3.0, 4.0, 5.0]
+                sl_base = atr_signal_median
+                sl_values = sorted(set([
+                    round(sl_base * mult, 4)
+                    for mult in sl_multipliers
+                ]))
+                logger.info(
+                    f"Built close_based space (ATR-based SL): "
+                    f"TP=[0.00%] (DISABLED), "
+                    f"SL={[f'{p:.1%}' for p in sl_values]} (ATR={atr_signal_median:.2%}), "
+                    f"exit={base_exit_bars} bars"
+                )
+            else:
+                # Fallback: use wider magnitude multipliers
+                # These are less accurate but better than tight SL
+                sl_multipliers = [4.0, 6.0, 8.0, 10.0]
+                sl_values = sorted(set([
+                    round(base_magnitude * mult, 4)
+                    for mult in sl_multipliers
+                ]))
+                logger.info(
+                    f"Built close_based space (magnitude-based SL, no ATR): "
+                    f"TP=[0.00%] (DISABLED), "
+                    f"SL={[f'{p:.1%}' for p in sl_values]} (wider), "
+                    f"exit={base_exit_bars} bars"
+                )
 
             # Exit MUST exist (no zero - time exit is primary)
             exit_multipliers = [0.5, 0.75, 1.0, 1.25, 1.5]
@@ -863,13 +901,6 @@ class ParametricBacktester:
                 max(1, int(base_exit_bars * mult))
                 for mult in exit_multipliers
             ]))
-
-            logger.info(
-                f"Built close_based space: "
-                f"TP=[0.00%] (DISABLED - time exit is primary), "
-                f"SL={[f'{p:.1%}' for p in sl_values]} (wider), "
-                f"exit={exit_values} (NO zero - must have time exit)"
-            )
 
         # Standard leverage values
         leverage_values = LEVERAGE_VALUES.copy()

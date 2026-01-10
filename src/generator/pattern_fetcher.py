@@ -83,6 +83,12 @@ class Pattern:
     # Execution type alignment
     execution_type: str = "close_based"  # 'touch_based' or 'close_based'
 
+    # ATR statistics (volatility when pattern signals fire)
+    atr_signal_median: Optional[float] = None  # Median ATR normalized by price
+    atr_signal_std: Optional[float] = None     # Std dev of ATR at signals
+    atr_signal_min: Optional[float] = None     # Min ATR at signals
+    atr_signal_max: Optional[float] = None     # Max ATR at signals
+
     def get_high_edge_coins(
         self,
         min_edge: float = 0.10,
@@ -429,6 +435,12 @@ class PatternFetcher:
 
             # Execution type alignment
             execution_type=data.get('execution_type', 'close_based'),
+
+            # ATR statistics (volatility when pattern signals fire)
+            atr_signal_median=data.get('atr_signal_median'),
+            atr_signal_std=data.get('atr_signal_std'),
+            atr_signal_min=data.get('atr_signal_min'),
+            atr_signal_max=data.get('atr_signal_max'),
         )
 
     def get_stats(self) -> dict:
@@ -536,6 +548,11 @@ class PatternFetcher:
                 original_pattern_id=pattern.id,
                 is_virtual=True,
                 execution_type=target.execution_type,
+                # Propagate ATR statistics from parent pattern
+                atr_signal_median=pattern.atr_signal_median,
+                atr_signal_std=pattern.atr_signal_std,
+                atr_signal_min=pattern.atr_signal_min,
+                atr_signal_max=pattern.atr_signal_max,
             )
             virtual_patterns.append(virtual)
 

@@ -386,10 +386,18 @@ Pipeline Completa Aggiornata:
 ║  │ │ CLOSE_BASED SPACE                                                │  │  ║
 ║  │ ├───────────────────────────────────────────────────────────────────┤  │  ║
 ║  │ │ TP:   [0] SOLO (disabilitato - time exit è primario)             │  │  ║
-║  │ │ SL:   [200%, 300%, 400%, 500%] di magnitude (wider per respiro)  │  │  ║
+║  │ │ SL:   ATR-based: [200%, 300%, 400%, 500%] di atr_signal_median   │  │  ║
+║  │ │       Fallback:  [400%, 600%, 800%, 1000%] di magnitude          │  │  ║
 ║  │ │ EXIT: [50%, 75%, 100%, 125%, 150%] di holding_bars (NO zero)     │  │  ║
 ║  │ │ LEV:  [1, 2, 3, 5, 10, 20, 40]                                   │  │  ║
 ║  │ │ Combinazioni: 1 × 4 × 5 × 7 = 140                                │  │  ║
+║  │ │                                                                  │  │  ║
+║  │ │ Rationale SL ATR-based:                                          │  │  ║
+║  │ │ - Pattern validato con TP/SL infiniti (solo time exit)           │  │  ║
+║  │ │ - SL deve proteggere da perdite catastrofiche, non da noise      │  │  ║
+║  │ │ - atr_signal_median riflette volatilità storica quando pattern   │  │  ║
+║  │ │   ha fired → SL proporzionato alla condizione di mercato         │  │  ║
+║  │ │ - Multipliers 2-5x ATR danno spazio per oscillazioni normali     │  │  ║
 ║  │ └───────────────────────────────────────────────────────────────────┘  │  ║
 ║  │                                                                        │  ║
 ║  │ File: target_selector.py (selezione), parametric_backtest.py (spazio)  │  ║
