@@ -799,6 +799,90 @@ After testing phase passes:
 
 ---
 
+## 📊 PATTERN-DISCOVERY API - ATR STATISTICS
+
+### Overview
+
+Pattern-discovery now provides **ATR statistics** for each pattern, calculated during walk-forward validation. These statistics describe the volatility conditions when the pattern historically fired signals.
+
+### New Fields in PatternResponse
+
+```python
+# From pattern-discovery API: GET /api/v1/patterns
+{
+    "name": "return_24h_gt_pos6",
+    "tier": 1,
+    "test_edge": 0.045,
+    # ... existing fields ...
+
+    # NEW: ATR statistics (price-normalized, e.g., 0.03 = 3% of price)
+    "atr_signal_median": 0.0113,  # Median ATR when pattern signals fire
+    "atr_signal_std": 0.0081,     # Std dev of ATR at signals
+    "atr_signal_min": 0.0014,     # Min ATR observed at signals
+    "atr_signal_max": 0.3884,     # Max ATR observed at signals
+}
+```
+
+### What ATR Statistics Mean
+
+- **atr_signal_median**: The typical volatility when this pattern fires. If a pattern has `atr_signal_median = 0.02` (2%), it means historically the pattern triggered when ATR was around 2% of price.
+
+- **atr_signal_std**: How variable the volatility conditions are. High std = pattern fires in both calm and volatile markets. Low std = pattern is specific to certain volatility regimes.
+
+- **atr_signal_min/max**: The range of volatility where the pattern has been observed to work.
+
+### Usage in SixBTC - Volatility Quality Filter
+
+Use ATR statistics to skip signals in abnormally low volatility (where edge may not exist):
+
+```python
+# In direct_generator template or strategy code
+def generate_signal(self, df: pd.DataFrame) -> Signal | None:
+    entry_condition = self._check_entry(df)
+
+    if entry_condition:
+        # Calculate current ATR (price-normalized)
+        atr = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+        atr_normalized = atr / df['close']
+        current_atr = atr_normalized.iloc[-1]
+
+        # Skip if current ATR < 50% of pattern's historical median
+        # Pattern was validated on data with higher volatility
+        atr_threshold = {atr_signal_median} * 0.5
+
+        if current_atr < atr_threshold:
+            return None  # Low volatility - skip signal
+
+        return Signal(...)
+```
+
+### Why This Matters
+
+1. **Empirical vs Arbitrary**: Instead of hardcoding `atr_threshold = 1.0`, use the pattern's actual historical volatility profile.
+
+2. **Pattern-Specific**: A momentum pattern might need high volatility (`atr_signal_median = 0.03`), while a mean-reversion pattern might work in calmer markets (`atr_signal_median = 0.01`).
+
+3. **Quality Filter**: If current market is much calmer than when the pattern was validated, the edge may not exist.
+
+### Recommended Thresholds
+
+| Scenario | Threshold | Use Case |
+|----------|-----------|----------|
+| Conservative | `atr_signal_median * 0.7` | Skip only extreme low volatility |
+| Standard | `atr_signal_median * 0.5` | Skip when ATR is half the norm |
+| Aggressive | `atr_signal_median * 0.3` | Only skip very dead markets |
+
+### API Endpoint
+
+```bash
+# Get patterns with ATR statistics
+curl "http://localhost:8001/api/v1/patterns?tier=1"
+
+# Response includes atr_signal_* fields for all patterns
+```
+
+---
+
 ## ✅ GOLDEN CHECKLIST
 
 Before pushing ANY code:
