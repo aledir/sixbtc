@@ -446,7 +446,7 @@ class ContinuousGeneratorProcess:
         """
         Detect trading direction from strategy code.
 
-        Analyzes Signal() calls to determine if strategy trades:
+        Analyzes class attributes and Signal() calls to determine if strategy trades:
         - LONG: Only long positions
         - SHORT: Only short positions
         - BIDIR: Both directions
@@ -455,8 +455,22 @@ class ContinuousGeneratorProcess:
             Direction string: "LONG", "SHORT", or "BIDIR"
         """
         code_lower = code.lower()
-        has_long = "direction='long'" in code_lower or 'direction="long"' in code_lower
-        has_short = "direction='short'" in code_lower or 'direction="short"' in code_lower
+
+        # Check both Signal() calls and class attribute definitions
+        # Pattern strategies use: direction = 'long' (class attribute)
+        # AI strategies may use: direction='long' (in Signal call)
+        has_long = (
+            "direction='long'" in code_lower or
+            'direction="long"' in code_lower or
+            "direction = 'long'" in code_lower or
+            'direction = "long"' in code_lower
+        )
+        has_short = (
+            "direction='short'" in code_lower or
+            'direction="short"' in code_lower or
+            "direction = 'short'" in code_lower or
+            'direction = "short"' in code_lower
+        )
 
         if has_long and has_short:
             return "BIDIR"
