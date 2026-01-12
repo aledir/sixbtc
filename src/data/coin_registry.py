@@ -215,8 +215,9 @@ class CoinRegistry:
             if coin.is_active and coin.volume_24h >= min_vol
         ]
 
-        # Sort by volume descending
-        pairs.sort(key=lambda c: c.volume_24h, reverse=True)
+        # Sort by volume descending, then symbol ascending for deterministic ordering
+        # (when two coins have equal volume, sort alphabetically by symbol)
+        pairs.sort(key=lambda c: (-c.volume_24h, c.symbol))
 
         symbols = [c.symbol for c in pairs]
 

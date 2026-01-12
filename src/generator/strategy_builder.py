@@ -152,7 +152,7 @@ class StrategyBuilder:
             'pattern_discovery': {
                 'api_url': 'http://localhost:8001',
                 'tier_filter': 1,
-                'min_quality_score': 0.75
+                'min_quality_score': 0.0  # Tier1 patterns already validated
             }
         }
 
@@ -457,7 +457,8 @@ class StrategyBuilder:
         timeframe: str,
         use_patterns: bool = True,
         patterns: Optional[list] = None,
-        max_strategies: Optional[int] = None
+        max_strategies: Optional[int] = None,
+        force_source: Optional[str] = None
     ) -> list[GeneratedStrategy]:
         """
         Generate strategies using configured sources.
@@ -473,10 +474,31 @@ class StrategyBuilder:
             use_patterns: Whether to use pattern-discovery patterns
             patterns: Pre-selected patterns (if provided, uses first one)
             max_strategies: Maximum number of strategies to generate (backpressure)
+            force_source: Force specific source ('pattern', 'ai_free', 'ai_assigned')
+                         Bypasses normal source selection logic
 
         Returns:
             List of GeneratedStrategy objects
         """
+        # Handle forced source (from round-robin selection)
+        if force_source:
+            if force_source == 'pattern':
+                pattern = patterns[0] if patterns else None
+                if not pattern:
+                    logger.debug("No pattern provided for forced pattern source")
+                    return []
+                base_result = self.generate_from_pattern(pattern)
+                if base_result:
+                    base_result.timeframe = pattern.timeframe
+                    return [base_result]
+                return []
+            elif force_source == 'ai_free':
+                return self._generate_ai_free(strategy_type, timeframe)
+            elif force_source == 'ai_assigned':
+                return self._generate_ai_assigned(strategy_type, timeframe)
+            else:
+                logger.warning(f"Unknown force_source: {force_source}")
+                return []
         # ==================================================================
         # SOURCE 1: Pattern-based generation (generation_mode='pattern')
         # ==================================================================

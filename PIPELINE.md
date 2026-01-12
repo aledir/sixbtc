@@ -28,20 +28,22 @@ Pipeline Completa Aggiornata:
 ┌─────────────────────────────────────────────────────────────────┐
 │ 4. BACKTEST IN-SAMPLE (backtester - STEP 2)                     │
 ├─────────────────────────────────────────────────────────────────┤
-│ • Backtest 120 giorni con best params                           │
-│ • Portfolio simulation realistico (margin, max 10 pos, fees)    │
-│ • Calcola metriche IS: sharpe, win_rate, expectancy, DD, trades │
-│ • Min trades check (timeframe-dependent)                        │
+│ • Backtest 120 giorni con best params (BacktestEngine)          │
+│ • Filtra con 5 threshold (stessi di PARAMETRIC):                │
+│   - sharpe >= 0.3, win_rate >= 35%, expectancy >= 0.002         │
+│   - max_drawdown <= 50%, trades >= min_trades_is[tf]            │
+│ • Se fallisce qualsiasi threshold → REJECTED + DELETE           │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │ 5. BACKTEST OUT-OF-SAMPLE (backtester - STEP 3)                 │
 ├─────────────────────────────────────────────────────────────────┤
-│ • Backtest 30 giorni OOS con STESSI params                      │
-│ • Degradation check: (1 - OOS_sharpe/IS_sharpe) ≤ 50%           │
-│ • OOS sharpe ≥ 0 (positivo)                                     │
-│ • 0 trades OOS = OK (pattern dormiente)                         │
-│ • Calcola recency bonus/penalty                                 │
+│ • Backtest 60 giorni OOS con STESSI params                      │
+│ • Filtra con 5 threshold (stessi di IS):                        │
+│   - sharpe >= 0.3, win_rate >= 35%, expectancy >= 0.002         │
+│   - max_drawdown <= 50%, trades >= min_trades_oos[tf]           │
+│ • Degradation check: (IS_sharpe - OOS_sharpe) / IS_sharpe ≤ 50% │
+│ • Se fallisce qualsiasi threshold → REJECTED + DELETE           │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
@@ -99,14 +101,24 @@ Pipeline Completa Aggiornata:
 ║                              1. GENERATOR                                    ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║                                                                              ║
-║  Decision Flow:                                                              ║
+║  Decision Flow: ROUND-ROBIN                                                  ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ _should_use_patterns() → pattern disponibili?                          │  ║
-║  │    YES → genera PATTERN                                                │  ║
-║  │    NO  → if both AI sources enabled:                                   │  ║
-║  │            random(ai_free_ratio) → AI_FREE (70%) o AI_ASSIGNED (30%)   │  ║
-║  │          else:                                                         │  ║
-║  │            usa l'unica source enabled                                  │  ║
+║  │ Enabled sources (da config): [pattern, unger, ai_free, ai_assigned]   │  ║
+║  │                                                                        │  ║
+║  │ Ogni ciclo:                                                            │  ║
+║  │   source = enabled_sources[index % len(enabled_sources)]               │  ║
+║  │   index += 1                                                           │  ║
+║  │                                                                        │  ║
+║  │   Ciclo 1: pattern   → se esaurito, skip                               │  ║
+║  │   Ciclo 2: unger     → se no regime coins, skip                        │  ║
+║  │   Ciclo 3: ai_free   → se AI limit, skip                               │  ║
+║  │   Ciclo 4: ai_assigned → se AI limit, skip                             │  ║
+║  │   Ciclo 5: pattern   → (ricomincia)                                    │  ║
+║  │   ...                                                                  │  ║
+║  │                                                                        │  ║
+║  │ Config per controllare il mix:                                         │  ║
+║  │   - Solo gratis: disabilita ai_free + ai_assigned                      │  ║
+║  │   - Solo AI: disabilita pattern + unger                                │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
@@ -156,7 +168,7 @@ Pipeline Completa Aggiornata:
 ║  │                                                                        │  ║
 ║  │ Coins: gestiti dal backtester (top N per volume, scroll-down)          │  ║
 ║  │                                                                        │  ║
-║  │ Prefisso: Strategy_TYPE_8charID (es: Strategy_REV_c4b9f1e7)            │  ║
+║  │ Prefisso: AIFStrat_TYPE_8charID (es: AIFStrat_REV_c4b9f1e7)            │  ║
 ║  │ DB: template_id=uuid, pattern_based=False                              │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
@@ -182,25 +194,54 @@ Pipeline Completa Aggiornata:
 ║  │                                                                        │  ║
 ║  │ Coins: gestiti dal backtester (top N per volume, scroll-down)          │  ║
 ║  │                                                                        │  ║
-║  │ Prefisso: Strategy_TYPE_8charID (es: Strategy_MOM_f2e5d8a1)            │  ║
+║  │ Prefisso: AIAStrat_TYPE_8charID (es: AIAStrat_MOM_f2e5d8a1)            │  ║
 ║  │ DB: template_id=uuid, pattern_based=False + UsedIndicatorCombination   │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ UNGER (generation_mode='unger')                                        │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │ Fonte: Cataloghi Unger v2 + Market Regime Detector                     │  ║
+║  │                                                                        │  ║
+║  │ Cataloghi (src/generator/unger/catalogs/):                             │  ║
+║  │   - 128 Entry Conditions (9 categorie)                                 │  ║
+║  │   - 92 Entry Filters (6 categorie)                                     │  ║
+║  │   - 15 Exit Conditions                                                 │  ║
+║  │   - 5 SL Types + 5 TP Types + 6 Trailing Configs                       │  ║
+║  │   - 11 Exit Mechanisms                                                 │  ║
+║  │   - Space totale: ~15-30 milioni di strategie                          │  ║
+║  │                                                                        │  ║
+║  │ Generazione regime-aware:                                              │  ║
+║  │   1. RegimeDetector analizza tutti i coin (90 giorni, daily)           │  ║
+║  │   2. Raggruppa per (type, direction):                                  │  ║
+║  │      - TREND: breakout, crossover, volatility entries                  │  ║
+║  │      - REVERSAL: mean_reversion, threshold, candlestick entries        │  ║
+║  │      - MIXED: tutte le categorie                                       │  ║
+║  │   3. Per ogni gruppo: top N coin per volume                            │  ║
+║  │   4. Genera strategie coerenti col regime                              │  ║
+║  │                                                                        │  ║
+║  │ Parametri: embedded nel codice (da catalogo, non AI)                   │  ║
+║  │ AI calls: 0 (tutto da catalogo)                                        │  ║
+║  │                                                                        │  ║
+║  │ Prefisso: UngStrat_TYPE_8charID (es: UngStrat_CRS_a7f3d8b2)            │  ║
+║  │ DB: pattern_coins=[...], ai_provider='unger', pattern_based=False      │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  Output: Strategy record con status=GENERATED                                ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
 ║  │ TABELLA COMPARATIVA                                                    │  ║
-║  ├──────────────┬──────────────┬───────────────┬──────────────────────────┤  ║
-║  │              │   PATTERN    │   AI_FREE     │      AI_ASSIGNED         │  ║
-║  ├──────────────┼──────────────┼───────────────┼──────────────────────────┤  ║
-║  │ Prefisso     │ PatStrat_    │ Strategy_     │ Strategy_                │  ║
-║  │ Indicatori   │ Da formula   │ AI sceglie    │ IndicatorCombinator      │  ║
-║  │ Params base  │ Da pattern   │ Nessuno       │ Nessuno                  │  ║
-║  │ Coins        │ Per-edge     │ Backtester    │ Backtester               │  ║
-║  │ AI calls     │ 0 o 1        │ 1             │ 1                        │  ║
-║  │ Timeframe    │ Dal pattern  │ Random        │ Random                   │  ║
-║  │ RR ratio     │ suggested_rr │ -             │ -                        │  ║
-║  └──────────────┴──────────────┴───────────────┴──────────────────────────┘  ║
+║  ├────────────┬────────────┬────────────┬────────────┬────────────────────┤  ║
+║  │            │  PATTERN   │  AI_FREE   │ AI_ASSIGNED│      UNGER         │  ║
+║  ├────────────┼────────────┼────────────┼────────────┼────────────────────┤  ║
+║  │ Prefisso   │ PatStrat_  │ AIFStrat_  │ AIAStrat_  │ UngStrat_          │  ║
+║  │ Indicatori │ Da formula │ AI sceglie │ Combinator │ Da catalogo        │  ║
+║  │ Params     │ Da pattern │ Nessuno    │ Nessuno    │ Da catalogo        │  ║
+║  │ Coins      │ Per-edge   │ Backtester │ Backtester │ Per-regime         │  ║
+║  │ AI calls   │ 0 o 1      │ 1          │ 1          │ 0                  │  ║
+║  │ Timeframe  │ Dal pattern│ Random     │ Random     │ Random             │  ║
+║  │ Costo      │ Gratis/1   │ 1 call     │ 1 call     │ Gratis             │  ║
+║  └────────────┴────────────┴────────────┴────────────┴────────────────────┘  ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -223,9 +264,11 @@ Pipeline Completa Aggiornata:
 ║  │      - pandas (o pd)                                                   │  ║
 ║  │      - StrategyCore, Signal da src.strategies.base                     │  ║
 ║  │   3. Esattamente 1 classe che eredita da StrategyCore                  │  ║
-║  │   4. Nome classe valido:                                               │  ║
-║  │      - Strategy_TYPE_hash (es: Strategy_MOM_abc123)                    │  ║
-║  │      - PatStrat_TYPE_hash (es: PatStrat_REV_def456)                    │  ║
+║  │   4. Nome classe valido (prefisso 3 lettere):                          │  ║
+║  │      - PatStrat_TYPE_hash (es: PatStrat_MOM_abc123)                    │  ║
+║  │      - UngStrat_TYPE_hash (es: UngStrat_CRS_def456)                    │  ║
+║  │      - AIFStrat_TYPE_hash (es: AIFStrat_REV_789abc)                    │  ║
+║  │      - AIAStrat_TYPE_hash (es: AIAStrat_TRN_fedcba)                    │  ║
 ║  │   5. Metodo generate_signal(df) deve esistere                          │  ║
 ║  │                                                                        │  ║
 ║  │ Warnings (non bloccanti):                                              │  ║
@@ -465,6 +508,11 @@ Pipeline Completa Aggiornata:
 ║  │   notional = risk_amount / sl_pct                                      │  ║
 ║  │   margin_needed = notional / actual_leverage                           │  ║
 ║  │                                                                        │  ║
+║  │ Diversification Cap (dynamic):                                         │  ║
+║  │   max_margin_per_trade = equity / max_open_positions                   │  ║
+║  │   if margin_needed > max_margin_per_trade → cap to max_margin          │  ║
+║  │   Es: max_positions=10 → max 10% equity per trade → 10 trade possibili │  ║
+║  │                                                                        │  ║
 ║  │ Leverage Cap (per-coin):                                               │  ║
 ║  │   actual_lev = min(strategy_leverage, coin.max_leverage)               │  ║
 ║  │   Es: BTC max=50x → usa fino a 40x, SHIB max=5x → usa max 5x           │  ║
@@ -622,16 +670,23 @@ Pipeline Completa Aggiornata:
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ VALIDAZIONE IS                                                         │  ║
+║  │ VALIDAZIONE IS (5 THRESHOLD - stessi di PARAMETRIC)                   │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │                                                                        │  ║
-║  │  Controllo minimo:                                                     │  ║
-║  │    if is_result['total_trades'] == 0:                                  │  ║
-║  │        DELETE strategy ("No trades in IS")                             │  ║
+║  │  IS applica gli STESSI 5 threshold di PARAMETRIC:                      │  ║
 ║  │                                                                        │  ║
-║  │  Nota: Altri threshold (sharpe, win_rate, ecc.) sono gia' stati        │  ║
-║  │        verificati durante PARAMETRIC OPTIMIZATION. Qui si controlla    │  ║
-║  │        solo che il backtest finale produca trade.                      │  ║
+║  │    1. sharpe >= 0.3                                                    │  ║
+║  │    2. win_rate >= 35%                                                  │  ║
+║  │    3. expectancy >= 0.002                                              │  ║
+║  │    4. max_drawdown <= 50%                                              │  ║
+║  │    5. trades >= min_trades_is[timeframe]                               │  ║
+║  │                                                                        │  ║
+║  │  Se fallisce qualsiasi threshold:                                      │  ║
+║  │    DELETE strategy (reason: "IS sharpe/wr/exp/dd/trades too low/high") │  ║
+║  │                                                                        │  ║
+║  │  Nota: Questo cattura discrepanze tra kernel PARAMETRIC e BacktestEngine│  ║
+║  │        (~2-3% delle strategie potrebbero avere metriche leggermente    │  ║
+║  │        diverse a causa di differenze nell'allineamento dati)           │  ║
 ║  │                                                                        │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
@@ -673,22 +728,22 @@ Pipeline Completa Aggiornata:
 ║                           5. BACKTEST OOS                                    ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║                                                                              ║
-║  Obiettivo: Testare la strategia su dati OUT-OF-SAMPLE (30 giorni recenti)   ║
+║  Obiettivo: Testare la strategia su dati OUT-OF-SAMPLE (60 giorni recenti)   ║
 ║             per verificare che non sia overfittata sui dati IS.              ║
 ║                                                                              ║
 ║  Input:                                                                      ║
 ║    - strategy_instance con best params da parametric                         ║
-║    - oos_data: 30 giorni piu' recenti (Dict symbol -> DataFrame)             ║
+║    - oos_data: 60 giorni piu' recenti (Dict symbol -> DataFrame)             ║
 ║    - is_result: metriche dal backtest IS                                     ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
 ║  │ TIMELINE DATI                                                          │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │                                                                        │  ║
-║  │  150 giorni totali:                                                    │  ║
+║  │  180 giorni totali:                                                    │  ║
 ║  │  ════════════════════════════════════════════════════════════════════  │  ║
 ║  │                                                                        │  ║
-║  │  [--- IN-SAMPLE (120 giorni) ---][-- OOS (30 giorni) --]               │  ║
+║  │  [--- IN-SAMPLE (120 giorni) ---][-- OOS (60 giorni) --]               │  ║
 ║  │  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^               │  ║
 ║  │  Parametric optimization          Validazione anti-overfit             │  ║
 ║  │                                                                        │  ║
@@ -715,39 +770,33 @@ Pipeline Completa Aggiornata:
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ _validate_oos(): VALIDAZIONE ANTI-OVERFITTING                          │  ║
+║  │ _validate_oos(): 5 THRESHOLD + DEGRADATION CHECK                      │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │                                                                        │  ║
-║  │  Step 1: Controllo IS (prerequisito)                                   │  ║
-║  │    - is_trades >= min_trades_is[timeframe]                             │  ║
-║  │    - is_sharpe >= min_sharpe (0.3, da config)                          │  ║
-║  │    Se fallisce -> REJECT (IS non ha edge)                              │  ║
+║  │  OOS applica gli STESSI 5 threshold di IS:                             │  ║
 ║  │                                                                        │  ║
-║  │  Step 2: Controllo OOS trades                                          │  ║
-║  │    - oos_trades >= min_trades_oos[timeframe]                           │  ║
-║  │    Se fallisce -> REJECT (dati insufficienti)                          │  ║
+║  │    1. oos_trades >= min_trades_oos[timeframe]                          │  ║
+║  │    2. oos_sharpe >= 0.3 (stesso di IS, non 0.0)                        │  ║
+║  │    3. oos_win_rate >= 35%                                              │  ║
+║  │    4. oos_expectancy >= 0.002                                          │  ║
+║  │    5. oos_max_drawdown <= 50%                                          │  ║
 ║  │                                                                        │  ║
-║  │  Step 3: Calcolo degradation                                           │  ║
+║  │  Piu' check degradation (anti-overfitting):                            │  ║
 ║  │                                                                        │  ║
 ║  │              is_sharpe - oos_sharpe                                    │  ║
-║  │    degrad = ──────────────────────────                                 │  ║
+║  │    degrad = ────────────────────────── <= 50%                          │  ║
 ║  │                    is_sharpe                                           │  ║
 ║  │                                                                        │  ║
 ║  │    degrad > 0: OOS peggiore di IS (normale)                            │  ║
 ║  │    degrad < 0: OOS migliore di IS (bonus!)                             │  ║
-║  │    degrad = 0: Performance identica                                    │  ║
+║  │    degrad > 50%: REJECT ("Overfitted")                                 │  ║
 ║  │                                                                        │  ║
-║  │  Step 4: Check overfitting                                             │  ║
-║  │    - Se degradation > oos_max_degradation (50%) -> REJECT              │  ║
-║  │    - Motivo: "Overfitted: OOS 60% worse than IS"                       │  ║
-║  │                                                                        │  ║
-║  │  Step 5: Check OOS Sharpe minimo                                       │  ║
-║  │    - oos_sharpe >= oos_min_sharpe (0.0, da config)                     │  ║
-║  │    - Deve essere almeno non negativo                                   │  ║
-║  │                                                                        │  ║
-║  │  Step 6: Calcolo OOS bonus/penalty                                     │  ║
+║  │  Calcolo OOS bonus/penalty (per score finale):                         │  ║
 ║  │    - OOS >= IS: bonus = min(0.20, |degrad| * 0.5)                      │  ║
 ║  │    - OOS < IS:  penalty = -degrad * 0.10                               │  ║
+║  │                                                                        │  ║
+║  │  NOTA: I check IS sono gia' stati fatti prima di chiamare questa       │  ║
+║  │        funzione, quindi qui si controllano SOLO le metriche OOS.       │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
@@ -771,11 +820,13 @@ Pipeline Completa Aggiornata:
 ║  │ MOTIVI DI REJECT                                                       │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │                                                                        │  ║
-║  │  [X] "IS trades insufficient: 45 < 100 (for 1h)"                       │  ║
-║  │  [X] "IS Sharpe too low: 0.25 < 0.3"                                   │  ║
-║  │  [X] "OOS trades insufficient: 8 < 10 (for 1h)"                        │  ║
+║  │  OOS threshold failures:                                               │  ║
+║  │  [X] "OOS trades insufficient: 8 < 30 (for 15m)"                       │  ║
+║  │  [X] "OOS sharpe too low: 0.15 < 0.3"                                  │  ║
+║  │  [X] "OOS win_rate too low: 30.0% < 35.0%"                             │  ║
+║  │  [X] "OOS expectancy too low: 0.0010 < 0.002"                          │  ║
+║  │  [X] "OOS drawdown too high: 55.0% > 50%"                              │  ║
 ║  │  [X] "Overfitted: OOS 65% worse than IS"                               │  ║
-║  │  [X] "OOS Sharpe too low: -0.15 < 0.0"                                 │  ║
 ║  │                                                                        │  ║
 ║  │  REJECT -> DELETE strategy                                             │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
@@ -1545,7 +1596,7 @@ Non fanno parte del flusso GENERATED -> LIVE, ma sono essenziali per il funziona
 ║  │  STEP 2: _retest_strategy()                                            │  ║
 ║  │    - Solo assigned TF (non tutti i TF come primo backtest)             │  ║
 ║  │    - Stessi parametri (no parametric optimization)                     │  ║
-║  │    - IS (120 giorni) + OOS (30 giorni) backtest                        │  ║
+║  │    - IS (120 giorni) + OOS (60 giorni) backtest                        │  ║
 ║  │                                                                        │  ║
 ║  │  STEP 3: Validation                                                    │  ║
 ║  │    - Same OOS validation as initial backtest                           │  ║

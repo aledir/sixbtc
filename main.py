@@ -387,11 +387,17 @@ def backtest(ctx, backtest_all, strategy, symbol, timeframe, lookback_days, work
                     module = importlib.util.module_from_spec(spec)
                     spec.loader.exec_module(module)
 
-                    # Find StrategyCore subclass
+                    # Find StrategyCore subclass (all prefixes)
                     strategy_class = None
                     for name in dir(module):
                         obj = getattr(module, name)
-                        if isinstance(obj, type) and name.startswith('Strategy_'):
+                        if isinstance(obj, type) and (
+                            name.startswith('Strategy_') or
+                            name.startswith('PatStrat_') or
+                            name.startswith('UngStrat_') or
+                            name.startswith('AIFStrat_') or
+                            name.startswith('AIAStrat_')
+                        ):
                             strategy_class = obj
                             break
 

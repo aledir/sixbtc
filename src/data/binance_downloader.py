@@ -728,7 +728,15 @@ class BinanceDataDownloader:
             symbols = self.get_common_symbols()
 
         # Get timeframes from config (root level 'timeframes' key)
-        timeframes = self.config.get_required('timeframes')
+        timeframes = list(self.config.get_required('timeframes'))
+
+        # Add regime timeframe if regime detection is enabled
+        regime_config = self.config._raw_config.get('regime', {})
+        if regime_config.get('enabled', False):
+            regime_tf = regime_config.get('timeframe', '1d')
+            if regime_tf not in timeframes:
+                timeframes.append(regime_tf)
+                logger.info(f"Adding {regime_tf} timeframe for regime detection")
 
         # Download all combinations
         results = {}
@@ -1538,7 +1546,13 @@ Examples:
     if args.timeframes:
         tf_list = args.timeframes
     else:
-        tf_list = downloader.config.get_required('timeframes')
+        tf_list = list(downloader.config.get_required('timeframes'))
+        # Add regime timeframe if enabled
+        regime_config = downloader.config._raw_config.get('regime', {})
+        if regime_config.get('enabled', False):
+            regime_tf = regime_config.get('timeframe', '1d')
+            if regime_tf not in tf_list:
+                tf_list.append(regime_tf)
 
     console.print(f"\n[bold cyan]Binance Data Downloader[/bold cyan]")
     console.print(f"Symbols: {len(symbol_list)} ({', '.join(symbol_list[:5])}{'...' if len(symbol_list) > 5 else ''})")

@@ -29,6 +29,7 @@ import pandas as pd
 from numba import jit, prange
 
 from src.backtester.parametric_constants import PARAM_SPACE, LEVERAGE_VALUES
+from src.utils.risk_calculator import calculate_safe_leverage
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +211,13 @@ def _simulate_single_param_set(
 
                 # Step 3: Calculate margin needed
                 margin_needed = notional / actual_lev
+
+                # Step 3b: Apply dynamic cap (diversification)
+                # Each trade uses at most 1/max_positions of equity
+                max_margin_per_trade = equity / max_positions
+                if margin_needed > max_margin_per_trade:
+                    margin_needed = max_margin_per_trade
+                    notional = margin_needed * actual_lev  # Adjust notional
 
                 # Step 4: Check margin available (simulate exchange rejection)
                 margin_available = equity - margin_used
@@ -517,14 +525,19 @@ class ParametricBacktester:
         """
         Generate all parameter sets (each will create a strategy).
 
-        Filters out invalid combinations:
-        - tp_pct=0 AND exit_bars=0: No exit condition except SL (invalid)
-        - tp_pct>0 AND sl_pct/tp_pct > 2.0: SL:TP ratio > 2:1 (requires unrealistic WR)
+        TWO VALID MODES based on execution semantics:
 
-        Rationale for 2:1 max ratio:
-        - Break-even WR = SL/(SL+TP)
-        - 2:1 ratio → 67% WR (achievable)
-        - 6:1 ratio → 86% WR (impossible)
+        1. TOUCH_BASED (TP > 0): Pattern predicts price will TOUCH level
+           - Filter: TP > SL for favorable R:R (break-even WR < 50%)
+           - exit_bars can be 0 (TP is primary exit)
+
+        2. CLOSE_BASED (TP = 0): Pattern predicts price at CLOSE of period
+           - Filter: exit_bars > 0 (time exit is primary)
+           - SL is for risk management only, not R:R optimization
+
+        Common filters:
+        - tp_pct=0 AND exit_bars=0: No exit condition except SL (invalid)
+        - ANTI-LIQUIDATION: leverage must be safe given SL distance
         """
         all_combos = itertools.product(
             self.parameter_space['sl_pct'],
@@ -532,13 +545,43 @@ class ParametricBacktester:
             self.parameter_space['leverage'],
             self.parameter_space['exit_bars'],
         )
-        # Filter invalid combinations
-        return [
-            (sl, tp, lev, exit_b)
-            for sl, tp, lev, exit_b in all_combos
-            if not (tp == 0 and exit_b == 0)  # Must have an exit condition
-            and (tp == 0 or sl / tp <= 2.0)   # Max 2:1 SL:TP ratio when TP>0
-        ]
+
+        valid_sets = []
+        liquidation_filtered = 0
+
+        for sl, tp, lev, exit_b in all_combos:
+            # FILTER 1: Must have an exit condition (not just SL)
+            if tp == 0 and exit_b == 0:
+                continue
+
+            # FILTER 2: Mode-specific validation
+            if tp > 0:
+                # TOUCH_BASED mode: require favorable R:R (TP > SL)
+                if tp <= sl:
+                    continue
+            # CLOSE_BASED mode (tp == 0): exit_bars > 0 already guaranteed by FILTER 1
+
+            # FILTER 3: ANTI-LIQUIDATION
+            # Ensure SL triggers BEFORE liquidation (with 10% buffer)
+            # Uses conservative max_leverage=20 (covers most coins)
+            # Formula: safe_leverage = 1 / (sl_distance + maintenance_margin_rate)
+            max_safe_lev = calculate_safe_leverage(
+                sl_pct=sl,
+                max_leverage=20,  # Conservative: most coins are 20-40x max
+                buffer_pct=10.0,  # 10% buffer between SL and liquidation
+            )
+            if lev > max_safe_lev:
+                liquidation_filtered += 1
+                continue  # Skip: would be liquidated before SL triggers
+
+            valid_sets.append((sl, tp, lev, exit_b))
+
+        if liquidation_filtered > 0:
+            logger.debug(
+                f"Anti-liquidation filter removed {liquidation_filtered} combinations"
+            )
+
+        return valid_sets
 
     def _calculate_score(self, result: ParametricResult) -> float:
         """Calculate composite score matching classifier logic"""
@@ -688,72 +731,85 @@ class ParametricBacktester:
         """
         Build parameter space centered on pattern's values.
 
-        REASONING FOR EACH PARAMETER:
+        HYPOTHESIS B: Favorable R:R (max 1.5:1 SL:TP ratio)
 
-        TP (Take Profit) - 6 values:
-        - 0: No TP, rely on time exit only (requires exit_bars > 0)
-        - Pattern's magnitude represents expected move
-        - More conservative (0.5x-0.75x): Exit early, more trades complete
-        - Pattern value (1.0x): Validated target
-        - More aggressive (1.25x-1.5x): Let winners run, fewer completions
-        - Range: 0 + 50%-150%, step 25%
+        TP (Take Profit) - 5 values (NO zero):
+        - Pattern's magnitude is the expected move
+        - Range 75%-200% of magnitude
+        - Higher values let winners run further
+        - NO TP=0: always take profit, don't rely on time exit alone
 
-        SL (Stop Loss) - 5 values:
-        - Must allow trade to "breathe" but limit losses
-        - Too tight (0.5x): Hit by market noise
-        - Pattern value (1.0x): Calculated from historical volatility
-        - Wider (1.5x-2.0x): Fewer false stops, larger losses when wrong
-        - Range 50%-200%, step 25-50%
+        SL (Stop Loss) - 3 values:
+        - Based on magnitude (NOT pre-calculated SL)
+        - Range 100%-150% of magnitude
+        - Moderate SL allows breathing room
+        - Combined with 1.5:1 max ratio filter
 
-        EXIT BARS (Time Exit) - 5 values:
+        EXIT BARS (Time Exit) - 3 values:
         - Pattern's holding_period is statistically optimal
-        - Shorter (0.5x): Exit before momentum exhausts
-        - Longer (1.5x-2.0x): Give trade more time
-        - Zero (0): Disable time exit, rely only on SL/TP
-        - Range 0 + 50%-200%
+        - Range 50%-150% of base
+        - NO zero: always have time exit as backstop
 
-        LEVERAGE - 3 values:
-        - Independent of pattern, reflects risk appetite
-        - 1x: Conservative
-        - 2x: Moderate
-        - 3x: Aggressive
-        - No 4x+ to avoid excessive risk
+        LEVERAGE - 3 values: [1, 2, 3]
 
-        TOTAL: 6 x 5 x 5 x 3 = 450 combinations
-        FILTERED:
-        - tp=0 AND exit=0 (no exit condition)
-        - SL:TP ratio > 2:1 when TP>0 (unrealistic WR requirement)
-        RESULT: ~230-240 valid combinations (actual count depends on base values)
+        R:R FILTERING:
+        - Max SL:TP ratio = 1.5:1 (needs ~60% WR to break even)
+        - Patterns with 55-65% WR can be profitable
 
-        Example filtering (base_tp=2%, base_sl=6%):
-        - SL=12% (2.0×), TP=2% (1.0×) → 6:1 ratio → BLOCKED (needs 86% WR)
-        - SL=6% (1.0×), TP=3% (1.5×) → 2:1 ratio → OK (needs 67% WR)
+        TOTAL: 5 x 3 x 3 x 3 = 135 combinations
+        After R:R filter: ~60-80 valid combinations
 
         Args:
             base_tp_pct: Pattern's target magnitude (e.g., 0.06 for 6%)
-            base_sl_pct: Pattern's stop loss (e.g., 0.18 for 18%)
+            base_sl_pct: Pattern's stop loss (ignored, we use magnitude)
             base_exit_bars: Pattern's holding period in bars
-            base_leverage: Starting leverage (not used, leverage is fixed 1-3)
+            base_leverage: Starting leverage (not used)
 
         Returns:
             Parameter space dict suitable for set_parameter_space()
         """
-        # TP: 0 (disabled) + 50% to 150% of base, 6 values
-        # 0 = no TP, rely on time exit only (requires exit_bars > 0)
-        tp_multipliers = [0.5, 0.75, 1.0, 1.25, 1.5]
-        tp_pcts = [0] + sorted(set([round(base_tp_pct * m, 4) for m in tp_multipliers]))
+        # Use magnitude as base for SL (pattern's expected move)
+        # If base_tp_pct is 0 or too small, use a default magnitude
+        magnitude = base_tp_pct if base_tp_pct >= 0.01 else 0.03  # Default 3% if missing
 
-        # SL: 50% to 200% of base, 5 values
-        sl_multipliers = [0.5, 0.75, 1.0, 1.5, 2.0]
-        sl_pcts = sorted(set([round(base_sl_pct * m, 4) for m in sl_multipliers]))
+        if base_tp_pct < 0.01:
+            logger.warning(f"base_tp_pct={base_tp_pct:.4f} too small, using default magnitude=3%")
 
-        # Exit bars: 0 (disabled) + 50% to 200% of base, 5 values total
-        exit_multipliers = [0.5, 1.0, 1.5, 2.0]
-        exit_bars = sorted(set([max(1, int(base_exit_bars * m)) for m in exit_multipliers]))
-        exit_bars = [0] + exit_bars  # Add 0 = no time exit
+        # FAVORABLE R:R APPROACH:
+        # For ~55% WR patterns to be profitable, TP must be > SL
+        # Break-even WR = SL / (SL + TP)
+        # With TP = 1.5x SL: break-even = 1/(1+1.5) = 40% WR
+        # With 55% WR and TP=1.5x SL: Exp = 0.55*1.5 - 0.45*1 = +0.375 per unit risked
 
-        # Leverage: use LEVERAGE_VALUES from constants (capped per-coin at runtime)
-        leverages = LEVERAGE_VALUES.copy()
+        # SL: based on magnitude (the pattern's expected move)
+        # Range from 1x to 2.5x magnitude to give room for volatility
+        sl_multipliers = [1.0, 1.5, 2.0, 2.5]
+        sl_pcts = sorted(set([round(magnitude * m, 4) for m in sl_multipliers]))
+        # Ensure minimum SL of 1% and max of 10%
+        sl_pcts = [max(0.01, min(0.10, sl)) for sl in sl_pcts]
+        sl_pcts = sorted(set(sl_pcts))
+
+        # TP: MUST be larger than SL for favorable R:R
+        # TP = SL * [1.5, 2.0, 2.5] gives favorable risk/reward
+        # We'll generate all combos and filter for TP > SL
+        tp_multipliers = [1.5, 2.0, 2.5, 3.0]  # Applied to SL to get TP
+        # Generate TP values based on SL range
+        base_sl = magnitude  # Use magnitude as reference
+        tp_pcts = sorted(set([round(base_sl * sl_m * tp_m, 4)
+                              for sl_m in sl_multipliers
+                              for tp_m in tp_multipliers]))
+        # Ensure reasonable TP range (2% to 15%)
+        tp_pcts = [max(0.02, min(0.15, tp)) for tp in tp_pcts]
+        tp_pcts = sorted(set(tp_pcts))
+
+        # Exit bars: Include 0 (no time exit - only SL/TP) plus longer periods
+        # With favorable R:R (TP > SL), we WANT trades to resolve via SL/TP not time
+        # exit_bars=0 forces this, higher values give more time to hit targets
+        exit_multipliers = [0, 2.0, 4.0, 8.0]  # 0=no time exit, then 2x-8x base
+        exit_bars = sorted(set([int(base_exit_bars * m) for m in exit_multipliers]))
+
+        # Leverage: conservative range
+        leverages = [1, 2, 3]
 
         space = {
             'sl_pct': sl_pcts,
@@ -762,19 +818,16 @@ class ParametricBacktester:
             'exit_bars': exit_bars,
         }
 
-        # Calculate valid combinations estimate (actual count depends on ratio filtering)
-        # Note: _generate_parameter_sets() will apply additional filters:
-        # - tp=0 AND exit=0 (no exit)
-        # - SL:TP ratio > 2:1 (unrealistic WR)
-        total = len(sl_pcts) * len(tp_pcts) * len(leverages) * len(exit_bars)
-        estimate = total // 2  # Rough estimate after all filters (~50% pass)
+        # Count combos where TP > SL (favorable R:R)
+        favorable_combos = sum(1 for sl in sl_pcts for tp in tp_pcts if tp > sl)
+        total_combos = favorable_combos * len(leverages) * len(exit_bars)
 
         logger.info(
-            f"Built pattern-centered space: "
-            f"TP={[f'{p:.1%}' for p in tp_pcts]}, "
+            f"Built pattern-centered space (Favorable R:R): "
             f"SL={[f'{p:.1%}' for p in sl_pcts]}, "
+            f"TP={[f'{p:.1%}' for p in tp_pcts]}, "
             f"exit={exit_bars}, lev={leverages} "
-            f"({estimate} estimated valid combinations after filtering)"
+            f"({total_combos} combos with TP>SL)"
         )
 
         return space
@@ -866,9 +919,11 @@ class ParametricBacktester:
             # Without ATR: fallback to wider magnitude multipliers
             if atr_signal_median and atr_signal_median > 0:
                 # ATR-based SL: pattern fired at this volatility level
-                # Scale by holding period: 24h ~= 1.5x ATR swing expected
-                # Multipliers: 2x to 5x ATR for sufficient breathing room
-                sl_multipliers = [2.0, 3.0, 4.0, 5.0]
+                # For close_based, the edge manifests at TIME EXIT (e.g., 24h)
+                # SL must be wide enough to survive normal volatility until then
+                # Typical 24h price swing: 3-5x daily ATR
+                # Multipliers: 4x to 10x ATR for sufficient breathing room
+                sl_multipliers = [4.0, 6.0, 8.0, 10.0]
                 sl_base = atr_signal_median
                 sl_values = sorted(set([
                     round(sl_base * mult, 4)

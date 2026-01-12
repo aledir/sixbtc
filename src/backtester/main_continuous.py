@@ -36,6 +36,7 @@ from src.database.models import ValidationCache
 from src.backtester.backtest_engine import BacktestEngine
 from src.backtester.data_loader import BacktestDataLoader
 from src.backtester.parametric_backtest import ParametricBacktester
+from src.strategies.base import StopLossType
 # NOTE: MultiWindowValidator removed - replaced by WFA with parameter re-optimization
 from src.data.coin_registry import get_registry, get_active_pairs
 from src.scorer import BacktestScorer, PoolManager
@@ -628,7 +629,8 @@ class ContinuousBacktesterProcess:
                     # Initial parametric to find best combo
                     parametric_results = self._run_parametric_backtest(
                         strategy_instance, is_data, assigned_tf, is_pattern_based,
-                        strategy_id=strategy_id, strategy_name=strategy_name
+                        strategy_id=strategy_id, strategy_name=strategy_name,
+                        base_code_hash=base_code_hash
                     )
 
                     if not parametric_results:
@@ -650,18 +652,47 @@ class ContinuousBacktesterProcess:
                     all_parametric_results = parametric_results
 
                     # Apply best params from parametric to strategy instance
+                    # CRITICAL: Force sl_type to PERCENTAGE for consistency with parametric
+                    # (parametric uses fixed SL%, not ATR-based)
+                    strategy_instance.sl_type = StopLossType.PERCENTAGE
                     strategy_instance.sl_pct = initial_params.get('sl_pct', 0.02)
                     strategy_instance.tp_pct = initial_params.get('tp_pct', 0.03)
                     strategy_instance.leverage = initial_params.get('leverage', 1)
                     strategy_instance.exit_after_bars = initial_params.get('exit_bars', 0)
 
+                    # DEBUG: Log strategy params before IS backtest
+                    logger.info(
+                        f"[{strategy_name}] IS params: sl_pct={strategy_instance.sl_pct:.2%}, "
+                        f"tp_pct={strategy_instance.tp_pct:.2%}, leverage={strategy_instance.leverage}, "
+                        f"exit_bars={strategy_instance.exit_after_bars}, sl_type={strategy_instance.sl_type}"
+                    )
+
                     # STEP 2: Final IS backtest with best params for metrics
+                    is_start_time = time.time()  # Track IS phase timing (excludes parametric)
                     is_result = self._run_multi_symbol_backtest(
                         strategy_instance, is_data, assigned_tf
                     )
 
+                    # DEBUG: Compare parametric vs IS trades
+                    parametric_trades = initial_best.get('total_trades', 0)
+                    is_trades = is_result.get('total_trades', 0)
+                    is_sharpe = is_result.get('sharpe_ratio', 0)
+                    is_signals = is_result.get('total_signals', 0)
+                    # Get parametric signals from the initial run
+                    parametric_signals = initial_best.get('total_signals', 0)
+                    logger.info(
+                        f"[{strategy_name}] DEBUG: Parametric signals={parametric_signals}, "
+                        f"IS signals={is_signals}, Parametric trades={parametric_trades}, IS trades={is_trades}"
+                    )
+                    if abs(parametric_trades - is_trades) > 50 or is_sharpe < 0:
+                        logger.warning(
+                            f"[{strategy_name}] DISCREPANCY: Parametric={parametric_trades} trades, "
+                            f"IS={is_trades} trades, IS_Sharpe={is_sharpe:.2f}"
+                        )
+
                 else:
                     # Standard: use strategy's original parameters (no WFA)
+                    is_start_time = time.time()  # Track IS phase timing
                     is_result = self._run_multi_symbol_backtest(
                         strategy_instance, is_data, assigned_tf
                     )
@@ -675,8 +706,77 @@ class ContinuousBacktesterProcess:
                 self._delete_strategy(strategy_id, "No trades in IS")
                 return (False, f"No trades in IS period for {assigned_tf}")
 
+            # Validate IS thresholds (same as PARAMETRIC)
+            # This catches any discrepancies between PARAMETRIC kernel and BacktestEngine
+            is_sharpe = is_result.get('sharpe_ratio', 0)
+            is_win_rate = is_result.get('win_rate', 0)
+            is_expectancy = is_result.get('expectancy', 0)
+            is_max_drawdown = is_result.get('max_drawdown', 0)
+            is_trades = is_result.get('total_trades', 0)
+            min_trades_is_tf = self.min_trades_is.get(assigned_tf, self.min_trades)
+
+            # CUMULATIVE threshold check (like PARAMETRIC) - count ALL violations
+            fail_types = {
+                'sharpe': 1 if is_sharpe < self.min_sharpe else 0,
+                'wr': 1 if is_win_rate < self.min_win_rate else 0,
+                'exp': 1 if is_expectancy < self.min_expectancy else 0,
+                'dd': 1 if is_max_drawdown > self.max_drawdown else 0,
+                'trades': 1 if is_trades < min_trades_is_tf else 0,
+            }
+
+            if sum(fail_types.values()) > 0:
+                # Build reason listing ALL failed thresholds
+                reasons = []
+                if fail_types['sharpe']:
+                    reasons.append(f"sharpe={is_sharpe:.2f}<{self.min_sharpe}")
+                if fail_types['wr']:
+                    reasons.append(f"wr={is_win_rate:.1%}<{self.min_win_rate:.1%}")
+                if fail_types['exp']:
+                    reasons.append(f"exp={is_expectancy:.4f}<{self.min_expectancy}")
+                if fail_types['dd']:
+                    reasons.append(f"dd={is_max_drawdown:.1%}>{self.max_drawdown:.0%}")
+                if fail_types['trades']:
+                    reasons.append(f"trades={is_trades}<{min_trades_is_tf}")
+                reason = "IS failed: " + ", ".join(reasons)
+
+                from src.database.event_tracker import EventTracker
+                is_duration_ms = int((time.time() - is_start_time) * 1000)
+                EventTracker.backtest_is_failed(
+                    strategy_id=strategy_id,
+                    strategy_name=strategy_name,
+                    timeframe=assigned_tf,
+                    reason=reason,
+                    fail_types=fail_types,
+                    is_sharpe=is_sharpe,
+                    is_win_rate=is_win_rate,
+                    is_trades=is_trades,
+                    is_expectancy=is_expectancy,
+                    is_max_drawdown=is_max_drawdown,
+                    base_code_hash=base_code_hash,
+                    duration_ms=is_duration_ms,
+                )
+                self._delete_strategy(strategy_id, reason)
+                return (False, reason)
+
+            # IS passed - emit event with timing before proceeding to OOS
+            is_duration_ms = int((time.time() - is_start_time) * 1000)
+            from src.database.event_tracker import EventTracker
+            EventTracker.backtest_is_passed(
+                strategy_id=strategy_id,
+                strategy_name=strategy_name,
+                timeframe=assigned_tf,
+                is_sharpe=is_sharpe,
+                is_win_rate=is_win_rate,
+                is_trades=is_trades,
+                is_expectancy=is_expectancy,
+                is_max_drawdown=is_max_drawdown,
+                duration_ms=is_duration_ms,
+                base_code_hash=base_code_hash,
+            )
+
             # Run OUT-OF-SAMPLE period backtest (validation)
             # Use min_bars=20 for OOS (30 days on 1d = only 30 bars)
+            oos_start_time = time.time()  # Track OOS phase timing
             oos_result = None
             try:
                 if oos_data and len(oos_data) >= 5:
@@ -692,8 +792,49 @@ class ContinuousBacktesterProcess:
             validation = self._validate_oos(is_result, oos_result, assigned_tf)
 
             if not validation['passed']:
+                # Emit event with IS/OOS metrics BEFORE deleting (for aggregate stats)
+                from src.database.event_tracker import EventTracker
+                oos_duration_ms = int((time.time() - oos_start_time) * 1000)
+                EventTracker.backtest_oos_failed(
+                    strategy_id=strategy_id,
+                    strategy_name=strategy_name,
+                    timeframe=assigned_tf,
+                    reason=validation['reason'],
+                    fail_types=validation.get('fail_types', {'sharpe': 0, 'wr': 0, 'exp': 0, 'dd': 0, 'trades': 0, 'degradation': 0}),
+                    is_sharpe=is_result.get('sharpe_ratio', 0),
+                    is_win_rate=is_result.get('win_rate', 0),
+                    is_trades=is_result.get('total_trades', 0),
+                    is_expectancy=is_result.get('expectancy', 0),
+                    oos_sharpe=oos_result.get('sharpe_ratio') if oos_result else None,
+                    oos_win_rate=oos_result.get('win_rate') if oos_result else None,
+                    oos_trades=oos_result.get('total_trades') if oos_result else None,
+                    oos_expectancy=oos_result.get('expectancy') if oos_result else None,
+                    oos_max_drawdown=oos_result.get('max_drawdown') if oos_result else None,
+                    base_code_hash=base_code_hash,
+                    duration_ms=oos_duration_ms,
+                )
+                # Delete strategy (event persists for metrics)
                 self._delete_strategy(strategy_id, validation['reason'])
                 return (False, f"OOS validation failed: {validation['reason']}")
+
+            # OOS passed - emit event with timing before proceeding to scoring
+            oos_duration_ms = int((time.time() - oos_start_time) * 1000)
+            EventTracker.backtest_oos_passed(
+                strategy_id=strategy_id,
+                strategy_name=strategy_name,
+                timeframe=assigned_tf,
+                is_sharpe=is_result.get('sharpe_ratio', 0),
+                is_win_rate=is_result.get('win_rate', 0),
+                is_trades=is_result.get('total_trades', 0),
+                is_expectancy=is_result.get('expectancy', 0),
+                oos_sharpe=oos_result.get('sharpe_ratio', 0),
+                oos_win_rate=oos_result.get('win_rate', 0),
+                oos_trades=oos_result.get('total_trades', 0),
+                oos_expectancy=oos_result.get('expectancy', 0),
+                oos_max_drawdown=oos_result.get('max_drawdown', 0),
+                duration_ms=oos_duration_ms,
+                base_code_hash=base_code_hash,
+            )
 
             # Combine IS + OOS into final result
             final_result = self._calculate_final_metrics(
@@ -709,15 +850,13 @@ class ContinuousBacktesterProcess:
             # Store OOS data (needed for additional parametric validation)
             oos_data_stored = oos_data
 
-            # Save in-sample backtest result
+            # Save backtest results (only for strategies that pass OOS validation)
             is_backtest_id = self._save_backtest_result(
                 strategy_id, is_result, pairs, assigned_tf,
                 period_type='in_sample',
                 period_days=self.is_days
             )
 
-            # Save out-of-sample backtest result (ALWAYS save, even with 0 trades)
-            # 0 trades is DATA (pattern dormant in recent period), not failure
             oos_backtest_id = None
             if oos_result:
                 oos_backtest_id = self._save_backtest_result(
@@ -802,7 +941,9 @@ class ContinuousBacktesterProcess:
                                 f"TF={assigned_tf}, Score={backtest_result.get('final_score', 0):.1f}"
                             )
                         else:
-                            # Strategy didn't make it into pool (score too low)
+                            # Strategy didn't make it into pool (score too low, shuffle failed, or WFA failed)
+                            # Mark as FAILED (not delete) to preserve BacktestResults for metrics
+                            self.processor.mark_failed(strategy_id, pool_reason, delete=False)
                             return (
                                 False,
                                 f"Rejected from ACTIVE pool: {pool_reason}"
@@ -866,6 +1007,46 @@ class ContinuousBacktesterProcess:
             logger.error(f"Portfolio backtest failed: {e}\n{traceback.format_exc()}")
             return {'total_trades': 0}
 
+    def _emit_empty_parametric_stats(
+        self,
+        base_code_hash: str,
+        strategy_name: str,
+        timeframe: str,
+        start_time: float,
+        reason: str = "unknown"
+    ) -> None:
+        """
+        Emit parametric_stats event with zero counts for early failures.
+
+        This ensures ALL strategies get a parametric_stats event for consistent
+        metrics aggregation, even if they fail before completing parametric backtest.
+        """
+        if not base_code_hash:
+            return
+
+        from src.database.event_tracker import EventTracker
+        duration_ms = int((time.time() - start_time) * 1000)
+
+        empty_stats = {
+            'total': 0,
+            'passed': 0,
+            'failed': 0,
+            'fail_reasons': {'sharpe': 0, 'trades': 0, 'wr': 0, 'exp': 0, 'dd': 0},
+            'failed_avg': {'sharpe': 0, 'wr': 0, 'exp': 0, 'trades': 0},
+            'passed_avg': {'sharpe': 0, 'wr': 0, 'exp': 0, 'trades': 0},
+            'early_exit_reason': reason,
+        }
+
+        EventTracker.backtest_parametric_stats(
+            base_code_hash=base_code_hash,
+            strategy_name=strategy_name or "unknown",
+            timeframe=timeframe,
+            combo_stats=empty_stats,
+            duration_ms=duration_ms
+        )
+
+        logger.debug(f"[{strategy_name}] Emitted empty parametric_stats: {reason}")
+
     def _run_parametric_backtest(
         self,
         strategy_instance,
@@ -873,7 +1054,8 @@ class ContinuousBacktesterProcess:
         timeframe: str,
         is_pattern_based: bool = False,
         strategy_id=None,
-        strategy_name: str = None
+        strategy_name: str = None,
+        base_code_hash: str = None
     ) -> List[Dict]:
         """
         Run parametric backtest generating strategies with different SL/TP/leverage/exit.
@@ -918,36 +1100,34 @@ class ContinuousBacktesterProcess:
 
         # Build parameter space based on strategy origin
         if is_pattern_based:
-            # PATTERN STRATEGY: center on validated pattern values
-            base_tp_pct = getattr(strategy_instance, 'tp_pct', 0.05)
-            base_sl_pct = getattr(strategy_instance, 'sl_pct', 0.15)
-            base_exit_bars = getattr(strategy_instance, 'exit_after_bars', 20)
-            base_leverage = getattr(strategy_instance, 'leverage', 1)
+            # PATTERN STRATEGY: use execution_type-aware parameter space
+            # This respects the pattern's validated semantics:
+            # - touch_based: TP is primary exit (optimize around magnitude)
+            # - close_based: TIME EXIT is primary (TP=0, SL based on ATR)
 
-            # Check for execution_type to use aligned parameter space
+            base_tp_pct = getattr(strategy_instance, 'tp_pct', 0.05)
+            base_exit_bars = getattr(strategy_instance, 'exit_after_bars', 20)
             execution_type = getattr(strategy_instance, 'execution_type', None)
+            atr_signal_median = getattr(strategy_instance, 'atr_signal_median', None)
 
             if execution_type:
-                # Use execution-type aligned space
-                # For close_based: TP=0, optimize around time exit with ATR-based SL
-                # For touch_based: optimize around TP, time exit as backstop
-                base_magnitude = base_tp_pct if base_tp_pct > 0 else 0.02
-                atr_signal_median = getattr(strategy_instance, 'atr_signal_median', None)
+                # Use execution_type-aware space (respects pattern semantics)
+                logger.info(
+                    f"Pattern execution_type={execution_type}, "
+                    f"magnitude={base_tp_pct:.2%}, exit_bars={base_exit_bars}, "
+                    f"atr_median={atr_signal_median}"
+                )
                 space = self.parametric_backtester.build_execution_type_space(
                     execution_type=execution_type,
-                    base_magnitude=base_magnitude,
+                    base_magnitude=base_tp_pct,
                     base_exit_bars=base_exit_bars,
                     atr_signal_median=atr_signal_median,
                 )
-                if atr_signal_median:
-                    logger.info(
-                        f"Using execution-type aligned space: {execution_type} "
-                        f"(ATR={atr_signal_median:.2%})"
-                    )
-                else:
-                    logger.info(f"Using execution-type aligned space: {execution_type}")
             else:
-                # Fallback: use pattern-centered space
+                # Fallback to pattern-centered (legacy patterns without execution_type)
+                base_sl_pct = getattr(strategy_instance, 'sl_pct', 0.15)
+                base_leverage = getattr(strategy_instance, 'leverage', 1)
+                logger.debug("Pattern without execution_type, using pattern_centered_space")
                 space = self.parametric_backtester.build_pattern_centered_space(
                     base_tp_pct=base_tp_pct,
                     base_sl_pct=base_sl_pct,
@@ -967,20 +1147,36 @@ class ContinuousBacktesterProcess:
         }
 
         if not valid_data:
+            # Emit parametric_stats with zero counts for metrics consistency
+            self._emit_empty_parametric_stats(
+                base_code_hash, strategy_name, timeframe, parametric_start_time,
+                reason="no_valid_data"
+            )
             return []
 
         # Sort symbols for consistent ordering
         symbols = sorted(valid_data.keys())
         n_symbols = len(symbols)
 
-        # Find common index (intersection of all symbol indices)
+        # Find common index (intersection of all symbol TIMESTAMPS, not RangeIndex!)
+        # CRITICAL: DataFrames have timestamp as COLUMN, not index
+        # We must use timestamp intersection like the engine does
         common_index = None
         for symbol in symbols:
             df = valid_data[symbol]
-            if common_index is None:
-                common_index = df.index
+            if 'timestamp' in df.columns:
+                # Use timestamp column for proper alignment
+                ts_index = pd.DatetimeIndex(df['timestamp'])
+                if common_index is None:
+                    common_index = ts_index
+                else:
+                    common_index = common_index.intersection(ts_index)
             else:
-                common_index = common_index.intersection(df.index)
+                # Fallback to existing index if no timestamp column
+                if common_index is None:
+                    common_index = df.index
+                else:
+                    common_index = common_index.intersection(df.index)
 
         if len(common_index) < 100:
             logger.warning(f"Insufficient common data for parametric backtest: {len(common_index)} bars")
@@ -1000,7 +1196,14 @@ class ContinuousBacktesterProcess:
         dir_value = 1 if direction == 'long' else -1
 
         for j, symbol in enumerate(symbols):
-            df = valid_data[symbol].loc[common_index].copy()
+            raw_df = valid_data[symbol]
+            if 'timestamp' in raw_df.columns:
+                # Filter by timestamp to match common_index (which is DatetimeIndex)
+                df = raw_df[raw_df['timestamp'].isin(common_index)].copy()
+                df = df.reset_index(drop=True)  # Ensure clean RangeIndex for numpy ops
+            else:
+                # Fallback to loc if index-based
+                df = raw_df.loc[common_index].copy()
 
             # Calculate indicators and extract signals
             try:
@@ -1028,8 +1231,18 @@ class ContinuousBacktesterProcess:
         total_signals = entries_2d.sum()
         if total_signals == 0:
             logger.info(f"[{strategy_name}] No entry signals found for parametric backtest")
+            # Emit parametric_stats with zero counts for metrics consistency
+            self._emit_empty_parametric_stats(
+                base_code_hash, strategy_name, timeframe, parametric_start_time,
+                reason="no_signals"
+            )
             return []
 
+        # DEBUG: Log parametric config for comparison with engine
+        logger.info(
+            f"[{strategy_name}] Parametric config: risk_pct={self.parametric_backtester.risk_pct:.4f}, "
+            f"max_positions={self.parametric_backtester.max_positions}"
+        )
         logger.info(
             f"[{strategy_name}] Running parametric: {n_bars} bars, {n_symbols} symbols, "
             f"{total_signals} signals, {self.parametric_backtester._count_strategies()} candidates"
@@ -1060,7 +1273,16 @@ class ContinuousBacktesterProcess:
             )
         except Exception as e:
             logger.error(f"Parametric backtest failed: {e}")
+            # Emit parametric_stats with zero counts for metrics consistency
+            self._emit_empty_parametric_stats(
+                base_code_hash, strategy_name, timeframe, parametric_start_time,
+                reason=f"exception:{str(e)[:50]}"
+            )
             return []
+
+        # Use IS min_trades for the timeframe (aligned with subsequent IS validation)
+        # This prevents testing combos that will fail IS trades check anyway
+        min_trades_tf = self.min_trades_is.get(timeframe, self.min_trades)
 
         # Filter by threshold - save ALL strategies that pass
         valid_results = results_df[
@@ -1068,11 +1290,82 @@ class ContinuousBacktesterProcess:
             (results_df['win_rate'] >= self.min_win_rate) &
             (results_df['expectancy'] >= self.min_expectancy) &
             (results_df['max_drawdown'] <= self.max_drawdown) &
-            (results_df['total_trades'] >= self.min_trades)
+            (results_df['total_trades'] >= min_trades_tf)
         ].copy()
 
         # Track total combinations tested (for metrics)
         combinations_tested = len(results_df)
+
+        # Calculate combo stats for metrics (CUMULATIVE - each combo counted for ALL violated thresholds)
+        n_total = len(results_df)
+        n_passed = len(valid_results)
+        n_failed = n_total - n_passed
+
+        # Failed combos = those NOT in valid_results
+        failed_results = results_df[
+            ~((results_df['sharpe'] >= self.min_sharpe) &
+              (results_df['win_rate'] >= self.min_win_rate) &
+              (results_df['expectancy'] >= self.min_expectancy) &
+              (results_df['max_drawdown'] <= self.max_drawdown) &
+              (results_df['total_trades'] >= min_trades_tf))
+        ]
+
+        # CUMULATIVE threshold violations (each combo counted for EACH threshold it violates)
+        cum_fail_sharpe = int((results_df['sharpe'] < self.min_sharpe).sum())
+        cum_fail_trades = int((results_df['total_trades'] < min_trades_tf).sum())
+        cum_fail_wr = int((results_df['win_rate'] < self.min_win_rate).sum())
+        cum_fail_exp = int((results_df['expectancy'] < self.min_expectancy).sum())
+        cum_fail_dd = int((results_df['max_drawdown'] > self.max_drawdown).sum())
+
+        # Avg metrics for failed combos
+        if len(failed_results) > 0:
+            failed_avg = {
+                'sharpe': float(failed_results['sharpe'].mean()),
+                'wr': float(failed_results['win_rate'].mean()),
+                'exp': float(failed_results['expectancy'].mean()),
+                'trades': float(failed_results['total_trades'].mean()),
+            }
+        else:
+            failed_avg = {'sharpe': 0, 'wr': 0, 'exp': 0, 'trades': 0}
+
+        # Avg metrics for passed combos
+        if len(valid_results) > 0:
+            passed_avg = {
+                'sharpe': float(valid_results['sharpe'].mean()),
+                'wr': float(valid_results['win_rate'].mean()),
+                'exp': float(valid_results['expectancy'].mean()),
+                'trades': float(valid_results['total_trades'].mean()),
+            }
+        else:
+            passed_avg = {'sharpe': 0, 'wr': 0, 'exp': 0, 'trades': 0}
+
+        # Build combo_stats dict for event tracking
+        combo_stats = {
+            'total': n_total,
+            'passed': n_passed,
+            'failed': n_failed,
+            'fail_reasons': {
+                'sharpe': cum_fail_sharpe,
+                'trades': cum_fail_trades,
+                'wr': cum_fail_wr,
+                'exp': cum_fail_exp,
+                'dd': cum_fail_dd,
+            },
+            'failed_avg': failed_avg,
+            'passed_avg': passed_avg,
+        }
+
+        # Emit parametric_stats event for metrics aggregation (ALWAYS, regardless of results)
+        if base_code_hash:
+            from src.database.event_tracker import EventTracker
+            duration_ms = int((time.time() - parametric_start_time) * 1000)
+            EventTracker.backtest_parametric_stats(
+                base_code_hash=base_code_hash,
+                strategy_name=strategy_name or "unknown",
+                timeframe=timeframe,
+                combo_stats=combo_stats,
+                duration_ms=duration_ms
+            )
 
         # Convert to list of dicts matching expected format
         # Use float() to convert np.float64 to native Python float (required for DB)
@@ -1097,6 +1390,10 @@ class ContinuousBacktesterProcess:
                 'params': params,
                 # Track combinations tested (same for all results from this base strategy)
                 'combinations_tested': combinations_tested,
+                # Track total signals for debugging
+                'total_signals': int(total_signals),
+                # Combo stats for metrics aggregation
+                'combo_stats': combo_stats,
             }
             results.append(result)
 
@@ -1105,7 +1402,8 @@ class ContinuousBacktesterProcess:
             logger.info(
                 f"[{strategy_name}] Parametric: {len(results)} strategies | "
                 f"Best: Sharpe={best['sharpe_ratio']:.2f}, Trades={best['total_trades']}, "
-                f"SL={best['params']['sl_pct']:.1%}, TP={best['params']['tp_pct']:.1%}"
+                f"SL={best['params']['sl_pct']:.1%}, TP={best['params']['tp_pct']:.1%}, "
+                f"Exit={best['params']['exit_bars']}"
             )
         else:
             # Explain WHY no results passed thresholds
@@ -1120,23 +1418,23 @@ class ContinuousBacktesterProcess:
                     f"[{strategy_name}] Parametric: 0/{n_tested} passed | "
                     f"Best: Sharpe={best_sharpe:.2f} (need {self.min_sharpe}), "
                     f"WR={best_wr:.1%} (need {self.min_win_rate:.1%}), "
-                    f"Trades={max_trades} (need {self.min_trades}), "
+                    f"Trades={max_trades} (need {min_trades_tf}), "
                     f"Exp={best_expectancy:.4f} (need {self.min_expectancy}), "
                     f"DD={min_dd:.1%} (need <{self.max_drawdown:.0%})"
                 )
 
-                # DEBUG: Show failure breakdown per threshold
-                pass_sharpe = (results_df['sharpe'] >= self.min_sharpe).sum()
-                pass_wr = (results_df['win_rate'] >= self.min_win_rate).sum()
-                pass_trades = (results_df['total_trades'] >= self.min_trades).sum()
-                pass_exp = (results_df['expectancy'] >= self.min_expectancy).sum()
-                pass_dd = (results_df['max_drawdown'] <= self.max_drawdown).sum()
+                # Log cumulative fail reasons (from combo_stats already computed)
+                fr = combo_stats['fail_reasons']
+                fa = combo_stats['failed_avg']
                 logger.info(
-                    f"[{strategy_name}]   Breakdown: Sharpe>={self.min_sharpe}: {pass_sharpe}/{n_tested}, "
-                    f"WR>={self.min_win_rate:.0%}: {pass_wr}/{n_tested}, "
-                    f"Trades>={self.min_trades}: {pass_trades}/{n_tested}, "
-                    f"Exp>=0: {pass_exp}/{n_tested}, "
-                    f"DD<={self.max_drawdown:.0%}: {pass_dd}/{n_tested}"
+                    f"[{strategy_name}]   Fail reasons (cumulative): "
+                    f"sharpe: {fr['sharpe']}, trades: {fr['trades']}, "
+                    f"wr: {fr['wr']}, exp: {fr['exp']}, dd: {fr['dd']}"
+                )
+                logger.info(
+                    f"[{strategy_name}]   Failed avg: "
+                    f"sharpe={fa['sharpe']:.2f}, wr={fa['wr']:.1%}, "
+                    f"exp={fa['exp']:.4f}, trades={fa['trades']:.0f}"
                 )
 
                 # DEBUG: Show top 5 combos by score and why they fail
@@ -1147,7 +1445,7 @@ class ContinuousBacktesterProcess:
                         fails.append(f"Sharpe={row['sharpe']:.2f}")
                     if row['win_rate'] < self.min_win_rate:
                         fails.append(f"WR={row['win_rate']:.1%}")
-                    if row['total_trades'] < self.min_trades:
+                    if row['total_trades'] < min_trades_tf:
                         fails.append(f"Trades={row['total_trades']}")
                     if row['expectancy'] < self.min_expectancy:
                         fails.append(f"Exp={row['expectancy']:.4f}")
@@ -1161,21 +1459,10 @@ class ContinuousBacktesterProcess:
                         f"WR={row['win_rate']:.1%} Trades={row['total_trades']} | FAILS: {fail_str}"
                     )
 
-                # Emit event for metrics tracking with threshold breakdown
+                # Emit event for metrics tracking with combo_stats (CUMULATIVE)
                 if strategy_id and strategy_name:
                     from src.database.event_tracker import EventTracker
                     duration_ms = int((time.time() - parametric_start_time) * 1000)
-
-                    # Build threshold breakdown for metrics aggregation
-                    # Convert to int() to avoid np.int64 JSON serialization issues
-                    threshold_breakdown = {
-                        'total_combos': int(n_tested),
-                        'fail_trades': int(n_tested - pass_trades),
-                        'fail_sharpe': int(n_tested - pass_sharpe),
-                        'fail_wr': int(n_tested - pass_wr),
-                        'fail_exp': int(n_tested - pass_exp),
-                        'fail_dd': int(n_tested - pass_dd),
-                    }
 
                     EventTracker.backtest_parametric_failed(
                         strategy_id=strategy_id,
@@ -1185,7 +1472,7 @@ class ContinuousBacktesterProcess:
                         best_sharpe=float(best_sharpe),
                         best_win_rate=float(best_wr),
                         combinations_tested=n_tested,
-                        threshold_breakdown=threshold_breakdown,
+                        combo_stats=combo_stats,
                         duration_ms=duration_ms
                     )
 
@@ -1198,84 +1485,77 @@ class ContinuousBacktesterProcess:
         timeframe: str
     ) -> Dict:
         """
-        Validate out-of-sample performance for anti-overfitting check
+        Validate out-of-sample performance with 5 thresholds + degradation check.
 
-        OOS validation serves TWO purposes:
-        1. Anti-overfitting: reject if OOS crashes vs IS
-        2. Recency: good OOS = strategy in form now
+        OOS validation applies the SAME 5 thresholds as IS:
+        1. sharpe >= min_sharpe (0.3)
+        2. win_rate >= min_win_rate (35%)
+        3. expectancy >= min_expectancy (0.002)
+        4. max_drawdown <= max_drawdown (50%)
+        5. trades >= min_trades_oos[timeframe]
 
-        CRITICAL: IS must have positive Sharpe first - if IS Sharpe
-        is negative or below threshold, strategy has no edge regardless of OOS.
+        Plus degradation check: (is_sharpe - oos_sharpe) / is_sharpe <= 50%
+
+        Note: IS thresholds are already validated before this function is called,
+        so we only check OOS metrics here.
 
         Args:
-            is_result: In-sample period backtest results
+            is_result: In-sample period backtest results (for degradation calc)
             oos_result: Out-of-sample period backtest results
             timeframe: Strategy timeframe for min_trades lookup
 
         Returns:
-            Dict with 'passed', 'reason', 'degradation', 'oos_bonus'
+            Dict with 'passed', 'reason', 'fail_types', 'degradation', 'oos_bonus'
         """
-        is_sharpe = is_result.get('sharpe_ratio', 0)
-        is_trades = is_result.get('total_trades', 0)
-
-        # Get min trades for this timeframe
-        min_is = self.min_trades_is.get(timeframe, 300)
         min_oos = self.min_trades_oos.get(timeframe, 30)
 
-        # CRITICAL: IS must have enough trades for statistical significance
-        if is_trades < min_is:
-            return {
-                'passed': False,
-                'reason': f'IS trades insufficient: {is_trades} < {min_is} (for {timeframe})',
-                'degradation': 0.0,
-                'oos_bonus': 0.0,
-            }
-
-        # CRITICAL: IS must show edge first
-        # If IS Sharpe is negative, strategy has no edge - reject early
-        if is_sharpe < self.min_sharpe:
-            return {
-                'passed': False,
-                'reason': f'IS Sharpe too low: {is_sharpe:.2f} < {self.min_sharpe}',
-                'degradation': 0.0,
-                'oos_bonus': 0.0,
-            }
-
-        # Check OOS trades - REJECT if below minimum (no longer just penalty)
+        # Get OOS metrics
         oos_trades = oos_result.get('total_trades', 0) if oos_result else 0
-        if oos_trades < min_oos:
-            return {
-                'passed': False,
-                'reason': f'OOS trades insufficient: {oos_trades} < {min_oos} (for {timeframe})',
-                'degradation': 0.0,
-                'oos_bonus': 0.0,
-            }
+        oos_sharpe = oos_result.get('sharpe_ratio', 0) if oos_result else 0
+        oos_win_rate = oos_result.get('win_rate', 0) if oos_result else 0
+        oos_expectancy = oos_result.get('expectancy', 0) if oos_result else 0
+        oos_max_drawdown = oos_result.get('max_drawdown', 0) if oos_result else 0
 
-        oos_sharpe = oos_result.get('sharpe_ratio', 0)
+        # Get IS sharpe for degradation check
+        is_sharpe = is_result.get('sharpe_ratio', 0)
 
-        # Calculate degradation (how much worse is OOS vs IS)
-        # Guard against division by zero when is_sharpe is exactly 0
-        if is_sharpe == 0:
-            # No edge in IS = cannot calculate degradation meaningfully
-            # Treat as neutral (no degradation, no bonus)
-            degradation = 0.0
-        else:
+        # Calculate degradation
+        if is_sharpe > 0:
             degradation = (is_sharpe - oos_sharpe) / is_sharpe
+        else:
+            degradation = 0.0
 
-        # Anti-overfitting check: reject if OOS crashes vs IS
-        if degradation > self.oos_max_degradation:
+        # CUMULATIVE threshold check (like PARAMETRIC) - count ALL violations
+        fail_types = {
+            'sharpe': 1 if oos_sharpe < self.min_sharpe else 0,
+            'wr': 1 if oos_win_rate < self.min_win_rate else 0,
+            'exp': 1 if oos_expectancy < self.min_expectancy else 0,
+            'dd': 1 if oos_max_drawdown > self.max_drawdown else 0,
+            'trades': 1 if oos_trades < min_oos else 0,
+            'degradation': 1 if (is_sharpe > 0 and degradation > self.oos_max_degradation) else 0,
+        }
+
+        if sum(fail_types.values()) > 0:
+            # Build reason listing ALL failed thresholds
+            reasons = []
+            if fail_types['sharpe']:
+                reasons.append(f"sharpe={oos_sharpe:.2f}<{self.min_sharpe}")
+            if fail_types['wr']:
+                reasons.append(f"wr={oos_win_rate:.1%}<{self.min_win_rate:.1%}")
+            if fail_types['exp']:
+                reasons.append(f"exp={oos_expectancy:.4f}<{self.min_expectancy}")
+            if fail_types['dd']:
+                reasons.append(f"dd={oos_max_drawdown:.1%}>{self.max_drawdown:.0%}")
+            if fail_types['trades']:
+                reasons.append(f"trades={oos_trades}<{min_oos}")
+            if fail_types['degradation']:
+                reasons.append(f"degradation={degradation:.0%}>{self.oos_max_degradation:.0%}")
+            reason = "OOS failed: " + ", ".join(reasons)
+
             return {
                 'passed': False,
-                'reason': f'Overfitted: OOS {degradation:.0%} worse than IS',
-                'degradation': degradation,
-                'oos_bonus': 0.0,
-            }
-
-        # Check minimum OOS Sharpe (must also show edge in recent period)
-        if oos_sharpe < self.oos_min_sharpe:
-            return {
-                'passed': False,
-                'reason': f'OOS Sharpe too low: {oos_sharpe:.2f} < {self.oos_min_sharpe}',
+                'reason': reason,
+                'fail_types': fail_types,
                 'degradation': degradation,
                 'oos_bonus': 0.0,
             }
@@ -1292,6 +1572,7 @@ class ContinuousBacktesterProcess:
         return {
             'passed': True,
             'reason': 'OOS validated',
+            'fail_types': {'sharpe': 0, 'wr': 0, 'exp': 0, 'dd': 0, 'trades': 0, 'degradation': 0},
             'degradation': degradation,
             'oos_bonus': oos_bonus,
         }
@@ -1668,7 +1949,6 @@ class ContinuousBacktesterProcess:
                     # Multi-pair/TF fields
                     symbols_tested=pairs,
                     timeframe_tested=timeframe,
-                    is_assigned_tf=True,  # Always True - each strategy has one assigned TF
                     per_symbol_results=result.get('symbol_breakdown', {}),
 
                     # Dual-period fields
@@ -1774,7 +2054,7 @@ class ContinuousBacktesterProcess:
             # Rename class if new name provided
             if new_class_name:
                 updated = re.sub(
-                    r'class\s+((?:Strategy|PatStrat)_\w+)\s*\(',
+                    r'class\s+((?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat)_\w+)\s*\(',
                     f'class {new_class_name}(',
                     updated
                 )
@@ -1822,9 +2102,9 @@ class ContinuousBacktesterProcess:
             return None
 
     def _extract_class_name(self, code: str) -> Optional[str]:
-        """Extract class name from strategy code (supports Strategy_ and PatStrat_)"""
+        """Extract class name from strategy code (supports all prefixes)"""
         import re
-        match = re.search(r'class\s+((?:Strategy|PatStrat)_\w+)\s*\(', code)
+        match = re.search(r'class\s+((?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat)_\w+)\s*\(', code)
         return match.group(1) if match else None
 
     def _load_strategy_instance(self, code: str, class_name: str):
@@ -1870,8 +2150,12 @@ class ContinuousBacktesterProcess:
                 Path(temp_path).unlink(missing_ok=True)
 
     def _delete_strategy(self, strategy_id, reason: str):
-        """Delete failed strategy"""
+        """Delete failed strategy (removes from DB entirely)"""
         self.processor.mark_failed(strategy_id, reason, delete=True)
+
+    def _fail_strategy(self, strategy_id, reason: str):
+        """Mark strategy as FAILED but keep in DB (preserves BacktestResults for metrics)"""
+        self.processor.mark_failed(strategy_id, reason, delete=False)
 
     # ========================================================================
     # RE-BACKTEST METHODS (for ACTIVE pool freshness)

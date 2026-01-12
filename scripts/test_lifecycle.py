@@ -183,10 +183,16 @@ def test_lifecycle():
         exec_globals = {}
         exec(code, exec_globals)
 
-        # Find strategy class
+        # Find strategy class (all prefixes)
         strategy_class = None
         for name, obj in exec_globals.items():
-            if name.startswith('Strategy_') and isinstance(obj, type):
+            if isinstance(obj, type) and (
+                name.startswith('Strategy_') or
+                name.startswith('PatStrat_') or
+                name.startswith('UngStrat_') or
+                name.startswith('AIFStrat_') or
+                name.startswith('AIAStrat_')
+            ):
                 strategy_class = obj
                 break
 

@@ -892,6 +892,71 @@ class StrategyEvent(Base):
 
 
 # ==============================================================================
+# MARKET REGIME (Unger Method)
+# ==============================================================================
+
+class MarketRegime(Base):
+    """
+    Market regime detection results using Unger's breakout vs reversal method.
+
+    Updated daily by scheduler. Used by Unger Generator to create
+    regime-coherent strategies.
+
+    Regime types:
+    - TREND: Breakout test profitable, reversal loses
+    - REVERSAL: Reversal test profitable, breakout loses
+    - MIXED: No clear regime signal
+    """
+    __tablename__ = 'market_regimes'
+
+    # Primary key - symbol (one regime per symbol)
+    symbol = Column(String(20), primary_key=True)
+
+    # Regime classification
+    regime_type = Column(String(10), nullable=False, index=True)
+    # One of: "TREND", "REVERSAL", "MIXED"
+
+    strength = Column(Float, nullable=False)
+    # Confidence 0-1, higher = stronger signal
+
+    direction = Column(String(10), nullable=False)
+    # "BOTH", "LONG", or "SHORT"
+
+    # Test results (percentage PnL)
+    breakout_pnl = Column(Float, nullable=False)
+    breakout_long_pnl = Column(Float, nullable=False)
+    breakout_short_pnl = Column(Float, nullable=False)
+
+    reversal_pnl = Column(Float, nullable=False)
+    reversal_long_pnl = Column(Float, nullable=False)
+    reversal_short_pnl = Column(Float, nullable=False)
+
+    # Derived score (breakout - reversal, positive = trend)
+    regime_score = Column(Float, nullable=False)
+
+    # Analysis parameters
+    window_days = Column(Integer, nullable=False)
+    # Number of days analyzed (e.g., 90)
+
+    # Timestamps
+    calculated_at = Column(DateTime(timezone=True), nullable=False,
+                           default=lambda: datetime.now(UTC))
+    # When regime was calculated
+
+    __table_args__ = (
+        Index('idx_regime_type', 'regime_type'),
+        Index('idx_regime_strength', 'strength'),
+        Index('idx_regime_calculated', 'calculated_at'),
+    )
+
+    def __repr__(self):
+        return (
+            f"<MarketRegime({self.symbol}: {self.regime_type}, "
+            f"strength={self.strength:.2f}, score={self.regime_score:+.2f})>"
+        )
+
+
+# ==============================================================================
 # UTILITY FUNCTIONS
 # ==============================================================================
 

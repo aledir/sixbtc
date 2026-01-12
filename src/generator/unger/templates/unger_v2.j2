@@ -1,0 +1,256 @@
+"""
+Unger Strategy v2: {{ entry.name }}
+Timeframe: {{ timeframe }}
+Direction: {{ direction }}
+Exit Mechanism: {{ exit_mechanism.name }}
+Generated: {{ generated_at }}
+"""
+
+from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType
+import pandas as pd
+import numpy as np
+
+
+class {{ class_name }}(StrategyCore):
+    """
+    Entry: {{ entry.name }} ({{ entry.category }})
+    Filters: {{ filters | length }}
+    Exit: {{ exit_mechanism.description }}
+    SL: {{ sl_config.name }}
+    {% if tp_config %}TP: {{ tp_config.name }}{% endif %}
+    {% if trailing %}Trailing: {{ trailing.name }}{% endif %}
+    """
+
+    # Direction
+    direction = '{{ direction | lower }}'
+
+    # Parametric placeholders (expanded by backtester)
+    SL_PCT = {{ sl_params.get('sl_pct', 0.02) }}
+    LOOKBACK = {{ entry.lookback_required }}
+    {% if exit_params and exit_params.get('N') %}
+    EXIT_BARS = {{ exit_params.get('N', 20) }}
+    {% endif %}
+
+    # Stop Loss Type
+    {% if sl_config.sl_type == 'pct' %}
+    sl_type = StopLossType.PERCENTAGE
+    sl_pct = SL_PCT
+    {% elif sl_config.sl_type == 'atr' %}
+    sl_type = StopLossType.ATR
+    atr_stop_multiplier = {{ sl_params.get('atr_mult', 2.0) }}
+    {% elif sl_config.sl_type == 'structure' %}
+    sl_type = StopLossType.STRUCTURE
+    {% endif %}
+
+
+    {% if trailing %}
+    # Trailing Stop
+    trailing_stop_pct = {{ trailing_params.get('trail_pct', 0.01) }}
+    trailing_activation_pct = {{ trailing_params.get('act_pct', 0.01) }}
+    {% endif %}
+
+    {% if exit_params and exit_params.get('N') %}
+    # Time-based exit
+    exit_after_bars = EXIT_BARS
+    {% endif %}
+
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Pre-calculate indicators for vectorized backtesting."""
+        df = df.copy()
+
+        {% if 'RSI' in entry.indicators_used or (exit_condition and 'RSI' in exit_condition.indicators_used) %}
+        # RSI
+        delta = df['close'].diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean()
+        df['rsi'] = 100 - (100 / (1 + gain / (loss + 1e-10)))
+        {% endif %}
+
+        {% if 'MA' in entry.indicators_used %}
+        # Moving Averages
+        {% if entry_params.get('fast') %}
+        df['ma_fast'] = df['close'].rolling({{ entry_params.get('fast', 10) }}).mean()
+        df['ma_slow'] = df['close'].rolling({{ entry_params.get('slow', 20) }}).mean()
+        {% elif entry_params.get('N') %}
+        df['ma'] = df['close'].rolling({{ entry_params.get('N', 20) }}).mean()
+        {% else %}
+        df['ma'] = df['close'].rolling(20).mean()
+        {% endif %}
+        {% endif %}
+
+        {% if 'EMA' in entry.indicators_used %}
+        # Exponential Moving Averages
+        df['ema_fast'] = df['close'].ewm(span={{ entry_params.get('fast', 12) }}, adjust=False).mean()
+        df['ema_slow'] = df['close'].ewm(span={{ entry_params.get('slow', 26) }}, adjust=False).mean()
+        {% endif %}
+
+        {% if 'MACD' in entry.indicators_used or (exit_condition and 'MACD' in exit_condition.indicators_used) %}
+        # MACD
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        df['macd'] = ema12 - ema26
+        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+        {% endif %}
+
+        {% if 'BB' in entry.indicators_used %}
+        # Bollinger Bands
+        df['bb_mid'] = df['close'].rolling(20).mean()
+        df['bb_std'] = df['close'].rolling(20).std()
+        df['bb_upper'] = df['bb_mid'] + 2 * df['bb_std']
+        df['bb_lower'] = df['bb_mid'] - 2 * df['bb_std']
+        {% endif %}
+
+        {% if 'ATR' in entry.indicators_used or sl_config.sl_type == 'atr' or (tp_config and tp_config.tp_type == 'atr') %}
+        # ATR
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['atr'] = tr.rolling(14).mean()
+        {% endif %}
+
+        {% if 'STOCH' in entry.indicators_used %}
+        # Stochastic
+        low_min = df['low'].rolling(14).min()
+        high_max = df['high'].rolling(14).max()
+        df['stoch_k'] = 100 * (df['close'] - low_min) / (high_max - low_min + 1e-10)
+        df['stoch_d'] = df['stoch_k'].rolling(3).mean()
+        {% endif %}
+
+        {% if 'CCI' in entry.indicators_used %}
+        # CCI
+        tp = (df['high'] + df['low'] + df['close']) / 3
+        df['cci'] = (tp - tp.rolling(20).mean()) / (0.015 * tp.rolling(20).std())
+        {% endif %}
+
+        {% if 'ADX' in entry.indicators_used or (exit_condition and 'ADX' in exit_condition.indicators_used) %}
+        # ADX
+        high_diff = df['high'].diff()
+        low_diff = -df['low'].diff()
+        plus_dm = ((high_diff > low_diff) & (high_diff > 0)) * high_diff
+        minus_dm = ((low_diff > high_diff) & (low_diff > 0)) * low_diff
+        tr = (df['high'] - df['low']).rolling(14).mean()
+        plus_di = 100 * plus_dm.rolling(14).mean() / (tr + 1e-10)
+        minus_di = 100 * minus_dm.rolling(14).mean() / (tr + 1e-10)
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        df['adx'] = dx.rolling(14).mean()
+        {% endif %}
+
+        {% if 'ROC' in entry.indicators_used or (exit_condition and 'ROC' in exit_condition.indicators_used) %}
+        # Rate of Change
+        df['roc'] = (df['close'] - df['close'].shift(10)) / df['close'].shift(10) * 100
+        {% endif %}
+
+        return df
+
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
+        if len(df) < self.LOOKBACK + 10:
+            return None
+
+        # === ENTRY CONDITION: {{ entry.name }} ===
+        {{ entry_logic | indent(8) }}
+
+        {% for filter, filter_params, filter_logic in filters %}
+        # Filter {{ loop.index }}: {{ filter.name }}
+        {{ filter_logic | indent(8) }}
+        entry_condition = entry_condition and filter_pass
+        {% endfor %}
+
+        if not entry_condition:
+            return None
+
+        # === BUILD SIGNAL ===
+        # Determine direction (BIDI entries use entry condition's direction or default to long)
+        {% if direction == 'BIDI' %}
+        {% if entry.direction != 'BIDI' %}
+        signal_direction = '{{ entry.direction | lower }}'
+        {% else %}
+        signal_direction = 'long'  # Default for BIDI entries
+        {% endif %}
+        {% else %}
+        signal_direction = '{{ direction | lower }}'
+        {% endif %}
+
+        signal_kwargs = {
+            'direction': signal_direction,
+            'leverage': 1,
+
+            # Stop Loss
+            {% if sl_config.sl_type == 'pct' %}
+            'sl_type': StopLossType.PERCENTAGE,
+            'sl_pct': self.SL_PCT,
+            {% elif sl_config.sl_type == 'atr' %}
+            'sl_type': StopLossType.ATR,
+            'atr_stop_multiplier': {{ sl_params.get('atr_mult', 2.0) }},
+            {% elif sl_config.sl_type == 'structure' %}
+            'sl_type': StopLossType.STRUCTURE,
+            {% if sl_config.id == 'SL_03' %}
+            {% if direction == 'LONG' %}
+            'sl_price': df['low'].iloc[-{{ sl_params.get('lookback', 5) }}:].min(),
+            {% else %}
+            'sl_price': df['high'].iloc[-{{ sl_params.get('lookback', 5) }}:].max(),
+            {% endif %}
+            {% elif sl_config.id == 'SL_04' %}
+            {% if direction == 'LONG' %}
+            'sl_price': df['low'].iloc[-{{ sl_params.get('swing_lookback', 10) }}:].min(),
+            {% else %}
+            'sl_price': df['high'].iloc[-{{ sl_params.get('swing_lookback', 10) }}:].max(),
+            {% endif %}
+            {% endif %}
+            {% endif %}
+
+            {% if tp_config and tp_params %}
+            # Take Profit
+            {% if tp_config.tp_type == 'pct' %}
+            'tp_type': TakeProfitType.PERCENTAGE,
+            'tp_pct': {{ tp_params.get('tp_pct', 0.04) }},
+            {% elif tp_config.tp_type == 'rr_ratio' %}
+            'tp_type': TakeProfitType.RR_RATIO,
+            'rr_ratio': {{ tp_params.get('rr_ratio', 2.0) }},
+            {% elif tp_config.tp_type == 'atr' %}
+            'tp_type': TakeProfitType.ATR,
+            'atr_take_multiplier': {{ tp_params.get('atr_mult', 3.0) }},
+            {% elif tp_config.tp_type == 'structure' %}
+            {% if direction == 'LONG' %}
+            'tp_price': df['high'].iloc[-{{ tp_params.get('lookback', 20) }}:].max(),
+            {% else %}
+            'tp_price': df['low'].iloc[-{{ tp_params.get('lookback', 20) }}:].min(),
+            {% endif %}
+            {% endif %}
+            {% endif %}
+
+            {% if trailing %}
+            # Trailing Stop
+            'trailing_stop_pct': {{ trailing_params.get('trail_pct', 0.01) }},
+            'trailing_activation_pct': {{ trailing_params.get('act_pct', 0.01) }},
+            {% endif %}
+
+            {% if exit_condition and exit_condition.category == 'time' %}
+            # Time-based Exit
+            'exit_after_bars': {{ exit_params.get('N', 20) }},
+            {% endif %}
+
+            'reason': '{{ entry.name }}{% if filters %} + {{ filters | length }} filters{% endif %}',
+        }
+
+        return Signal(**signal_kwargs)
+
+    {% if exit_condition and exit_condition.category != 'time' and exit_logic %}
+    def should_exit(self, df: pd.DataFrame, position_bars: int) -> bool:
+        """
+        Check dynamic exit conditions.
+        Exit Mechanism: {{ exit_mechanism.name }} ({{ exit_mechanism.logic }})
+        Exit Condition: {{ exit_condition.name }}
+        """
+        # Exit Condition: {{ exit_condition.name }}
+        {{ exit_logic | indent(8) }}
+
+        {% if exit_mechanism.logic == 'AND' %}
+        # AND logic: exit only if both conditions met
+        # (Trailing/TP checked by executor, we just check EC)
+        return exit_signal
+        {% else %}
+        # OR logic: exit if exit_signal (TP/TS checked separately by executor)
+        return exit_signal
+        {% endif %}
+    {% endif %}

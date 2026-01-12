@@ -90,14 +90,16 @@ class StrategyProcessor:
             # Atomic claim using FOR UPDATE SKIP LOCKED
             # This query:
             # 1. Finds strategies with matching status AND no current processor
-            # 2. Locks the first available row (skipping already-locked rows)
-            # 3. Returns the locked row for update
+            # 2. Orders by created_at for deterministic processing order
+            # 3. Locks the first available row (skipping already-locked rows)
+            # 4. Returns the locked row for update
             strategy = (
                 session.query(Strategy)
                 .filter(
                     Strategy.status == status,
                     Strategy.processing_by.is_(None)
                 )
+                .order_by(Strategy.created_at, Strategy.id)  # Deterministic order
                 .with_for_update(skip_locked=True)
                 .first()
             )
@@ -365,29 +367,47 @@ class StrategyProcessor:
         Returns all pattern IDs ever used in strategies to prevent duplicates.
         Pattern exhaustion triggers AI-only generation (not recycling).
 
+        IMPORTANT: Uses events table (not strategies) because events persist
+        even when strategies are deleted. This prevents pattern recycling.
+
         Returns:
             Set of pattern IDs that have been used
         """
         session = self._get_session()
 
         try:
-            # Get all pattern IDs from all strategies (no time filter)
-            strategies = (
-                session.query(Strategy.pattern_ids)
-                .filter(
-                    Strategy.pattern_based == True,
-                    Strategy.pattern_ids.isnot(None)
-                )
-                .all()
-            )
+            from sqlalchemy import text
 
-            # Collect all pattern IDs into a set
-            used_ids = set()
-            for (pattern_ids,) in strategies:
-                if pattern_ids and isinstance(pattern_ids, list):
-                    for pid in pattern_ids:
-                        if pid:
-                            used_ids.add(str(pid))
+            # Get pattern IDs from generation events (persist even when strategies deleted)
+            result = session.execute(
+                text("""
+                    SELECT DISTINCT elem
+                    FROM strategy_events se,
+                         json_array_elements_text((se.event_data->>'pattern_ids')::json) AS elem
+                    WHERE se.stage = 'generation'
+                      AND se.event_type = 'created'
+                      AND se.event_data->>'pattern_ids' IS NOT NULL
+                """)
+            ).fetchall()
+
+            used_ids = {str(row[0]) for row in result if row[0]}
+
+            # Fallback to strategies table if no events have pattern_ids yet
+            # (backward compatibility for strategies generated before event tracking)
+            if not used_ids:
+                strategies = (
+                    session.query(Strategy.pattern_ids)
+                    .filter(
+                        Strategy.pattern_based == True,
+                        Strategy.pattern_ids.isnot(None)
+                    )
+                    .all()
+                )
+                for (pattern_ids,) in strategies:
+                    if pattern_ids and isinstance(pattern_ids, list):
+                        for pid in pattern_ids:
+                            if pid:
+                                used_ids.add(str(pid))
 
             logger.debug(f"Found {len(used_ids)} patterns used (all time)")
             return used_ids

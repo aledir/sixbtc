@@ -55,11 +55,12 @@ class ContinuousGeneratorProcess:
         self.min_interval = generation_config.get('min_interval_seconds', 0)
         self._last_generation_time = datetime.min
 
-        # Pipeline backpressure configuration (new multi-level system)
+        # Pipeline backpressure configuration (hysteresis system)
         pipeline_config = self.config.get('pipeline', {})
         queue_limits = pipeline_config.get('queue_limits', {})
         backpressure_config = pipeline_config.get('backpressure', {})
         monitoring_config = pipeline_config.get('monitoring', {})
+        validated_bp = pipeline_config.get('validated_backpressure', {})
 
         self.generated_limit = queue_limits.get('generated', 100)
         self.check_interval = backpressure_config.get('check_interval', 10)
@@ -68,6 +69,11 @@ class ContinuousGeneratorProcess:
         self.cooldown_increment = backpressure_config.get('cooldown_increment', 2)
         self.log_interval = monitoring_config.get('log_interval', 30)
         self._last_log_time = datetime.min
+
+        # Hysteresis backpressure for VALIDATED queue
+        self.validated_low = validated_bp.get('low_threshold', 20)
+        self.validated_high = validated_bp.get('high_threshold', 50)
+        self._generating = True  # Hysteresis state: True = generating, False = paused
 
         # ThreadPoolExecutor for parallel generation
         self.executor = ThreadPoolExecutor(
@@ -106,9 +112,15 @@ class ContinuousGeneratorProcess:
             self.ai_tracker = None
             logger.info("AI daily limit disabled")
 
+        # Round-robin source selection
+        self._source_index = 0
+        self._enabled_sources = self._get_enabled_sources()
+
         logger.info(
             f"ContinuousGeneratorProcess initialized: "
-            f"{self.parallel_threads} threads, backpressure at {self.generated_limit} GENERATED"
+            f"{self.parallel_threads} threads, "
+            f"backpressure: GEN={self.generated_limit}, VAL=[{self.validated_low}-{self.validated_high}], "
+            f"sources: {self._enabled_sources}"
         )
 
     @property
@@ -120,17 +132,43 @@ class ContinuousGeneratorProcess:
 
     def _check_backpressure(self) -> Tuple[bool, int, int]:
         """
-        Check if we should pause generation due to GENERATED queue buildup.
+        Check if we should pause generation using hysteresis logic.
 
-        Only checks GENERATED queue - validator handles VALIDATED queue.
-        Uses progressive cooldown based on how much over limit.
+        Hysteresis prevents oscillation between generating/pausing:
+        - If generating and validated_queue > high_threshold → pause
+        - If paused and validated_queue < low_threshold → resume
+        - Otherwise maintain current state
+
+        Also checks GENERATED queue with simple threshold.
 
         Returns:
-            (should_pause, generated_count, cooldown_seconds) tuple
+            (should_pause, queue_count, cooldown_seconds) tuple
         """
         try:
             generated_count = self.strategy_processor.count_available("GENERATED")
+            validated_count = self.strategy_processor.count_available("VALIDATED")
 
+            # Hysteresis logic for VALIDATED queue (the real bottleneck)
+            if self._generating and validated_count > self.validated_high:
+                # Was generating, queue too full -> pause
+                self._generating = False
+                logger.info(
+                    f"Backpressure: VALIDATED queue high ({validated_count} > {self.validated_high}), "
+                    f"pausing generation"
+                )
+            elif not self._generating and validated_count < self.validated_low:
+                # Was paused, queue drained enough -> resume
+                self._generating = True
+                logger.info(
+                    f"Backpressure: VALIDATED queue low ({validated_count} < {self.validated_low}), "
+                    f"resuming generation"
+                )
+
+            # If hysteresis says pause, use cooldown
+            if not self._generating:
+                return (True, validated_count, self.base_cooldown)
+
+            # Also check GENERATED queue (simple threshold, not hysteresis)
             if generated_count >= self.generated_limit:
                 cooldown = self.strategy_processor.calculate_backpressure_cooldown(
                     generated_count,
@@ -141,7 +179,7 @@ class ContinuousGeneratorProcess:
                 )
                 return (True, generated_count, cooldown)
 
-            return (False, generated_count, 0)
+            return (False, generated_count + validated_count, 0)
 
         except Exception as e:
             logger.error(f"Failed to check backpressure: {e}")
@@ -155,10 +193,12 @@ class ContinuousGeneratorProcess:
 
         try:
             depths = self.strategy_processor.get_queue_depths()
+            val_count = depths.get('VALIDATED', 0)
+            state = "GEN" if self._generating else "PAUSE"
             logger.info(
-                f"Pipeline: GEN={depths.get('GENERATED', 0)}/{self.generated_limit} "
-                f"VAL={depths.get('VALIDATED', 0)} ACT={depths.get('ACTIVE', 0)} "
-                f"LIVE={depths.get('LIVE', 0)}"
+                f"Pipeline [{state}]: GEN={depths.get('GENERATED', 0)}/{self.generated_limit} "
+                f"VAL={val_count}/[{self.validated_low}-{self.validated_high}] "
+                f"ACT={depths.get('ACTIVE', 0)} LIVE={depths.get('LIVE', 0)}"
             )
             self._last_log_time = now
         except Exception as e:
@@ -238,7 +278,9 @@ class ContinuousGeneratorProcess:
 
         if unused_patterns:
             # Use exactly 1 pattern per strategy (no combining)
-            selected = [random.choice(unused_patterns)]
+            # DETERMINISTIC: sort by id for reproducible order (not random)
+            sorted_patterns = sorted(unused_patterns, key=lambda p: p.id)
+            selected = [sorted_patterns[0]]
 
             # Remove from cache
             self._unused_patterns_cache = [
@@ -252,6 +294,147 @@ class ContinuousGeneratorProcess:
             logger.info("All patterns used, using custom AI generation")
             return (False, [])
 
+    def _is_source_enabled(self, source_name: str) -> bool:
+        """Check if a generation source is enabled in config."""
+        sources = self.config.get('generation', {}).get('strategy_sources', {})
+        return sources.get(source_name, {}).get('enabled', False)
+
+    def _get_enabled_sources(self) -> List[str]:
+        """
+        Get list of enabled generation sources in priority order.
+
+        Order: pattern, unger, ai_free, ai_assigned
+        This order determines round-robin sequence.
+
+        Returns:
+            List of enabled source names
+        """
+        all_sources = ['pattern', 'unger', 'ai_free', 'ai_assigned']
+        return [s for s in all_sources if self._is_source_enabled(s)]
+
+    def _get_next_source(self) -> Optional[str]:
+        """
+        Get next source in round-robin rotation.
+
+        Returns:
+            Source name or None if no sources enabled
+        """
+        if not self._enabled_sources:
+            return None
+
+        source = self._enabled_sources[self._source_index % len(self._enabled_sources)]
+        self._source_index += 1
+        return source
+
+    def _should_use_unger(self) -> Tuple[bool, Optional[str]]:
+        """
+        Check if should use Unger regime-based generation.
+
+        Returns:
+            (use_unger, regime_type) tuple
+        """
+        if not self._is_source_enabled('unger'):
+            return (False, None)
+
+        try:
+            from src.generator.unger import UngerGenerator
+
+            unger_gen = UngerGenerator(self.config)
+            trend_coins = unger_gen.get_regime_coins('TREND')
+            reversal_coins = unger_gen.get_regime_coins('REVERSAL')
+
+            if trend_coins or reversal_coins:
+                # Select regime with more coins, or random if equal
+                if len(trend_coins) > len(reversal_coins):
+                    regime_type = "TREND"
+                elif len(reversal_coins) > len(trend_coins):
+                    regime_type = "REVERSAL"
+                else:
+                    regime_type = random.choice(["TREND", "REVERSAL"])
+
+                logger.info(
+                    f"Unger available: TREND={len(trend_coins)}, REVERSAL={len(reversal_coins)}, "
+                    f"selected={regime_type}"
+                )
+                return (True, regime_type)
+
+        except Exception as e:
+            logger.warning(f"Unger check failed: {e}")
+
+        return (False, None)
+
+    def _generate_unger_batch(self, timeframe: str, regime_type: str) -> Tuple[bool, int, str]:
+        """
+        Generate Unger v2 strategies for given regime type.
+
+        Uses the new Unger Generator v2 with:
+        - 128 entry conditions (9 categories)
+        - 92 entry filters (6 categories)
+        - 11 exit mechanisms
+        - ~15-30M possible strategies
+
+        Args:
+            timeframe: Target timeframe
+            regime_type: 'TREND' or 'REVERSAL'
+
+        Returns:
+            (success, count, template_id) tuple
+        """
+        try:
+            from src.generator.unger import UngerGenerator
+
+            gen_start = time.time()
+            unger_gen = UngerGenerator(self.config)
+
+            # Generate one strategy for the regime
+            results = unger_gen.generate(
+                timeframe=timeframe,
+                regime_type=regime_type,
+                count=1
+            )
+
+            gen_duration_ms = int((time.time() - gen_start) * 1000)
+
+            if not results:
+                logger.debug(f"No Unger strategy generated for {regime_type}")
+                return (False, 0, "no_results")
+
+            # Save strategies
+            saved_count = 0
+            for result in results:
+                # UngStrat_ prefix for Unger-generated strategies
+                strategy_name = f"UngStrat_{result.strategy_type}_{result.strategy_id}"
+
+                self._save_to_database(
+                    name=strategy_name,
+                    strategy_type=result.strategy_type,
+                    timeframe=result.timeframe,
+                    code=result.code,
+                    ai_provider="unger",
+                    pattern_based=False,
+                    pattern_ids=[],
+                    template_id=None,
+                    parameters=result.parameters,
+                    pattern_coins=result.pattern_coins,
+                    base_code_hash=result.base_code_hash,
+                    generation_mode="unger",
+                    duration_ms=gen_duration_ms,
+                    leverage=None
+                )
+                saved_count += 1
+
+                logger.info(
+                    f"Saved UngStrat_{result.strategy_type}_{result.strategy_id} "
+                    f"({result.regime_type}, {len(result.pattern_coins)} coins, "
+                    f"entry={result.entry_name}, exit={result.exit_mechanism_name})"
+                )
+
+            return (True, saved_count, f"unger_{regime_type}")
+
+        except Exception as e:
+            logger.error(f"Unger generation error: {e}", exc_info=True)
+            return (False, 0, str(e))
+
     async def run_continuous(self):
         """Main continuous generation loop with multi-level backpressure"""
         logger.info("Starting continuous generation loop (multi-level backpressure)")
@@ -264,9 +447,13 @@ class ContinuousGeneratorProcess:
             should_pause, generated_count, cooldown = self._check_backpressure()
 
             if should_pause:
-                logger.info(
-                    f"Backpressure: {generated_count} GENERATED "
-                    f"(limit {self.generated_limit}), cooling down {cooldown}s"
+                # Log state (hysteresis logs transition, this logs ongoing pause)
+                gen_count = self.strategy_processor.count_available("GENERATED")
+                val_count = self.strategy_processor.count_available("VALIDATED")
+                logger.debug(
+                    f"Backpressure active: GEN={gen_count}/{self.generated_limit} "
+                    f"VAL={val_count}/[{self.validated_low}-{self.validated_high}], "
+                    f"cooldown {cooldown}s"
                 )
                 await asyncio.sleep(cooldown)
                 continue
@@ -316,10 +503,13 @@ class ContinuousGeneratorProcess:
 
     def _generate_batch(self) -> Tuple[bool, int, str]:
         """
-        Generate strategy variations from one template, respecting backpressure.
+        Generate strategies using round-robin source selection.
+
+        Cycles through enabled sources: pattern → unger → ai_free → ai_assigned
+        Skips sources that are not available (exhausted patterns, AI limit, etc.)
 
         Returns:
-            (success, count, template_id) tuple
+            (success, count, source_name) tuple
         """
         try:
             # Throttling
@@ -339,108 +529,184 @@ class ContinuousGeneratorProcess:
                 logger.debug("No remaining capacity, skipping generation")
                 return (False, 0, "backpressure")
 
-            # Select random strategy type and timeframe
-            strategy_types = ['MOM', 'REV', 'TRN', 'BRE', 'VOL', 'SCA']
-            timeframes = self.config['timeframes']
+            # Get next source from round-robin
+            source = self._get_next_source()
+            if not source:
+                logger.warning("No generation sources enabled")
+                return (False, 0, "no_sources")
 
-            strategy_type = random.choice(strategy_types)
+            # Select random timeframe (used by all sources)
+            timeframes = self.config['timeframes']
             timeframe = random.choice(timeframes)
 
-            # Smart pattern selection
-            use_patterns, selected_patterns = self._should_use_patterns()
-
-            # Check AI daily limit (only for AI-based, not pattern-based)
-            if not use_patterns and self.ai_tracker:
-                if not self.ai_tracker.can_call():
-                    wait_seconds = seconds_until_midnight()
-                    logger.info(
-                        f"AI daily limit reached ({self.ai_tracker.count}/{self.ai_tracker.max_calls}). "
-                        f"Waiting {wait_seconds/3600:.1f}h until reset."
-                    )
-                    return (False, 0, "daily_limit")
-
-            # Track generation time
-            gen_start = time.time()
-
-            # Generate strategies with capacity limit
-            results = self.strategy_builder.generate_strategies(
-                strategy_type=strategy_type,
-                timeframe=timeframe,
-                use_patterns=use_patterns,
-                patterns=selected_patterns,
-                max_strategies=remaining_capacity
-            )
-
-            # Calculate generation duration
-            gen_duration_ms = int((time.time() - gen_start) * 1000)
-
-            if not results:
-                # This is normal when patterns are filtered out (e.g., insufficient coins)
-                logger.debug("No valid strategies generated")
-                return (False, 0, "")
-
-            # Record AI call if successful (only for AI-based)
-            if not use_patterns and self.ai_tracker:
-                self.ai_tracker.record_call()
-                logger.debug(
-                    f"AI calls today: {self.ai_tracker.count}/{self.ai_tracker.max_calls}"
-                )
-
-            # Save all strategies
-            saved_count = 0
-            template_id = results[0].template_id or results[0].strategy_id[:8]
-            # Get base_code_hash from first result (all should have same hash)
-            base_code_hash = getattr(results[0], 'base_code_hash', None)
-
-            for result in results:
-                # Determine generation_mode
-                generation_mode = getattr(result, 'generation_mode', None)
-                if generation_mode is None:
-                    generation_mode = "pattern" if use_patterns else "ai_free"
-
-                if not result.validation_passed:
-                    # Track generation failure
-                    from src.database.event_tracker import EventTracker
-                    EventTracker.generation_failed(
-                        strategy_type=strategy_type,
-                        timeframe=result.timeframe,
-                        generation_mode=generation_mode,
-                        error='; '.join(result.validation_errors) if result.validation_errors else None
-                    )
-                    continue
-
-                # Use different prefix for pattern-based vs template-based strategies
-                prefix = "PatStrat" if use_patterns else "Strategy"
-                strategy_name = f"{prefix}_{strategy_type}_{result.strategy_id}"
-
-                self._save_to_database(
-                    name=strategy_name,
-                    strategy_type=strategy_type,
-                    timeframe=result.timeframe,  # Use result's TF (from pattern), not random
-                    code=result.code,
-                    ai_provider=result.ai_provider,
-                    pattern_based=use_patterns,
-                    pattern_ids=result.patterns_used,
-                    template_id=result.template_id,
-                    parameters=result.parameters,
-                    pattern_coins=getattr(result, 'pattern_coins', None),
-                    base_code_hash=getattr(result, 'base_code_hash', base_code_hash),
-                    generation_mode=generation_mode,
-                    duration_ms=gen_duration_ms,
-                    leverage=getattr(result, 'leverage', None)
-                )
-                saved_count += 1
-
-            logger.info(
-                f"Saved {saved_count}/{len(results)} strategies "
-                f"from template {template_id} (hash: {base_code_hash[:8] if base_code_hash else 'N/A'})"
-            )
-
-            return (True, saved_count, template_id)
+            # Dispatch to appropriate generator based on source
+            if source == 'pattern':
+                return self._generate_from_pattern(timeframe, remaining_capacity)
+            elif source == 'unger':
+                return self._generate_from_unger(timeframe)
+            elif source == 'ai_free':
+                return self._generate_from_ai(timeframe, remaining_capacity, source='ai_free')
+            elif source == 'ai_assigned':
+                return self._generate_from_ai(timeframe, remaining_capacity, source='ai_assigned')
+            else:
+                logger.error(f"Unknown source: {source}")
+                return (False, 0, f"unknown_{source}")
 
         except Exception as e:
             logger.error(f"Generation error: {e}", exc_info=True)
             return (False, 0, str(e))
+
+    def _generate_from_pattern(self, timeframe: str, remaining_capacity: int) -> Tuple[bool, int, str]:
+        """Generate strategy from pattern-discovery API."""
+        use_patterns, selected_patterns = self._should_use_patterns()
+
+        if not use_patterns:
+            logger.debug("No unused patterns available, skipping pattern source")
+            return (False, 0, "pattern_exhausted")
+
+        # Use pattern's timeframe (validated on that TF), not random timeframe
+        pattern = selected_patterns[0]
+        pattern_tf = getattr(pattern, 'timeframe', timeframe)
+
+        return self._generate_with_builder(
+            timeframe=pattern_tf,  # Use pattern's validated timeframe
+            remaining_capacity=remaining_capacity,
+            use_patterns=True,
+            patterns=selected_patterns,
+            generation_mode="pattern",
+            force_source="pattern"
+        )
+
+    def _generate_from_unger(self, timeframe: str) -> Tuple[bool, int, str]:
+        """Generate strategy using Unger regime-based method."""
+        use_unger, regime_type = self._should_use_unger()
+
+        if not use_unger:
+            logger.debug("No regime coins available, skipping unger source")
+            return (False, 0, "unger_no_coins")
+
+        return self._generate_unger_batch(timeframe, regime_type)
+
+    def _generate_from_ai(
+        self, timeframe: str, remaining_capacity: int, source: str
+    ) -> Tuple[bool, int, str]:
+        """Generate strategy using AI (ai_free or ai_assigned)."""
+        # Check AI daily limit
+        if self.ai_tracker and not self.ai_tracker.can_call():
+            wait_seconds = seconds_until_midnight()
+            logger.info(
+                f"AI daily limit reached ({self.ai_tracker.count}/{self.ai_tracker.max_calls}). "
+                f"Waiting {wait_seconds/3600:.1f}h until reset."
+            )
+            return (False, 0, "ai_daily_limit")
+
+        return self._generate_with_builder(
+            timeframe=timeframe,
+            remaining_capacity=remaining_capacity,
+            use_patterns=False,
+            patterns=[],
+            generation_mode=source,
+            force_source=source
+        )
+
+    def _generate_with_builder(
+        self,
+        timeframe: str,
+        remaining_capacity: int,
+        use_patterns: bool,
+        patterns: list,
+        generation_mode: str,
+        force_source: Optional[str] = None
+    ) -> Tuple[bool, int, str]:
+        """
+        Generate strategies using StrategyBuilder.
+
+        Shared logic for pattern and AI-based generation.
+        """
+        # Select random strategy type
+        strategy_types = ['MOM', 'REV', 'TRN', 'BRE', 'VOL', 'SCA']
+        strategy_type = random.choice(strategy_types)
+
+        # Track generation time
+        gen_start = time.time()
+
+        # Generate strategies with capacity limit
+        results = self.strategy_builder.generate_strategies(
+            strategy_type=strategy_type,
+            timeframe=timeframe,
+            use_patterns=use_patterns,
+            patterns=patterns,
+            max_strategies=remaining_capacity,
+            force_source=force_source
+        )
+
+        gen_duration_ms = int((time.time() - gen_start) * 1000)
+
+        if not results:
+            logger.debug(f"No valid strategies generated from {generation_mode}")
+            return (False, 0, generation_mode)
+
+        # Record AI call if successful (only for AI-based)
+        if not use_patterns and self.ai_tracker:
+            self.ai_tracker.record_call()
+            logger.debug(
+                f"AI calls today: {self.ai_tracker.count}/{self.ai_tracker.max_calls}"
+            )
+
+        # Save all strategies
+        saved_count = 0
+        template_id = results[0].template_id or results[0].strategy_id[:8]
+        base_code_hash = getattr(results[0], 'base_code_hash', None)
+
+        for result in results:
+            result_mode = getattr(result, 'generation_mode', None) or generation_mode
+
+            if not result.validation_passed:
+                from src.database.event_tracker import EventTracker
+                EventTracker.generation_failed(
+                    strategy_type=strategy_type,
+                    timeframe=result.timeframe,
+                    generation_mode=result_mode,
+                    error='; '.join(result.validation_errors) if result.validation_errors else None
+                )
+                continue
+
+            # Determine prefix based on generation mode
+            # Pat = pattern, Ung = unger, AIF = ai_free, AIA = ai_assigned
+            prefix_map = {
+                'pattern': 'PatStrat',
+                'unger': 'UngStrat',
+                'ai_free': 'AIFStrat',
+                'ai_assigned': 'AIAStrat',
+            }
+            prefix = prefix_map.get(result_mode, 'Strategy')
+            actual_type = getattr(result, 'strategy_type', strategy_type)
+            strategy_name = f"{prefix}_{actual_type}_{result.strategy_id}"
+
+            self._save_to_database(
+                name=strategy_name,
+                strategy_type=actual_type,
+                timeframe=result.timeframe,
+                code=result.code,
+                ai_provider=result.ai_provider,
+                pattern_based=use_patterns,
+                pattern_ids=result.patterns_used,
+                template_id=result.template_id,
+                parameters=result.parameters,
+                pattern_coins=getattr(result, 'pattern_coins', None),
+                base_code_hash=getattr(result, 'base_code_hash', base_code_hash),
+                generation_mode=result_mode,
+                duration_ms=gen_duration_ms,
+                leverage=getattr(result, 'leverage', None)
+            )
+            saved_count += 1
+
+        logger.info(
+            f"[{generation_mode}] Saved {saved_count}/{len(results)} strategies "
+            f"(hash: {base_code_hash[:8] if base_code_hash else 'N/A'})"
+        )
+
+        return (True, saved_count, generation_mode)
 
     def _detect_direction(self, code: str) -> str:
         """
@@ -495,9 +761,19 @@ class ContinuousGeneratorProcess:
         generation_mode: Optional[str] = None,
         duration_ms: Optional[int] = None,
         leverage: Optional[int] = None
-    ):
-        """Save generated strategy to database"""
+    ) -> bool:
+        """Save generated strategy to database. Returns True if saved, False if duplicate."""
         try:
+            # Deduplication check: skip if hash already exists
+            if base_code_hash:
+                with get_session() as session:
+                    exists = session.query(Strategy.id).filter(
+                        Strategy.base_code_hash == base_code_hash
+                    ).first()
+                    if exists:
+                        logger.debug(f"Duplicate strategy skipped: {name} (hash: {base_code_hash[:8]})")
+                        return False
+
             # Convert empty strings to None for UUID fields
             if template_id == '' or template_id is None:
                 template_id = None
@@ -537,12 +813,15 @@ class ContinuousGeneratorProcess:
                     generation_mode=generation_mode,
                     direction=direction,
                     duration_ms=duration_ms,
-                    leverage=leverage
+                    leverage=leverage,
+                    pattern_ids=pattern_ids
                 )
 
             logger.debug(f"Saved strategy {name} to database")
+            return True
         except Exception as e:
             logger.error(f"Failed to save strategy {name} to database: {e}", exc_info=True)
+            return False
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""

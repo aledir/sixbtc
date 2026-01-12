@@ -89,6 +89,12 @@ class ContinuousSchedulerProcess:
             self.cleanup_tmp_hour = tmp_config.get('run_hour', 5)
             self.cleanup_tmp_max_age = tmp_config.get('max_age_hours', 24)
 
+        # Market regime detection (Unger method)
+        regime_config = self.config._raw_config.get('regime', {})
+        if regime_config.get('enabled', False):
+            self.tasks['refresh_market_regimes'] = 24  # Daily
+            self.regime_run_hour = 1  # Run at 01:00 UTC
+
         # Initialize last run times (use timezone-aware datetime)
         for task in self.tasks:
             self.last_run[task] = datetime.min.replace(tzinfo=UTC)
@@ -162,6 +168,12 @@ class ContinuousSchedulerProcess:
                 result = await self._cleanup_tmp_dir()
                 tracker.add_metadata('deleted_files', result.get('deleted_files', 0))
                 tracker.add_metadata('deleted_bytes', result.get('deleted_bytes', 0))
+
+            elif task_name == 'refresh_market_regimes':
+                result = await self._refresh_market_regimes()
+                tracker.add_metadata('trend', result.get('trend', 0))
+                tracker.add_metadata('reversal', result.get('reversal', 0))
+                tracker.add_metadata('mixed', result.get('mixed', 0))
 
             else:
                 logger.warning(f"Unknown task: {task_name}")
@@ -581,6 +593,53 @@ class ContinuousSchedulerProcess:
             logger.error(f"Tmp cleanup failed: {e}")
 
         return {'deleted_files': deleted_files, 'deleted_bytes': deleted_bytes}
+
+    async def _refresh_market_regimes(self) -> dict:
+        """
+        Refresh market regime detection for all active pairs.
+
+        Uses Unger's breakout vs reversal method to classify each market as:
+        - TREND: Breakout test profitable
+        - REVERSAL: Reversal test profitable
+        - MIXED: No clear signal
+
+        Results are saved to market_regimes table for use by Unger Generator.
+
+        Only runs at the configured regime_run_hour (default 01:00 UTC).
+        """
+        # Check if it's the right hour
+        current_hour = datetime.now(UTC).hour
+        target_hour = getattr(self, 'regime_run_hour', 1)
+
+        if current_hour != target_hour:
+            logger.debug(
+                f"Skipping regime refresh: current hour {current_hour}, target {target_hour}"
+            )
+            return {'trend': 0, 'reversal': 0, 'mixed': 0, 'reason': 'wrong_hour'}
+
+        try:
+            from src.generator.regime.detector import refresh_market_regimes
+
+            result = refresh_market_regimes()
+
+            if result.get('enabled', True):
+                logger.info(
+                    f"Market regime refresh complete: "
+                    f"TREND={result.get('trend', 0)}, "
+                    f"REVERSAL={result.get('reversal', 0)}, "
+                    f"MIXED={result.get('mixed', 0)}"
+                )
+            else:
+                logger.debug("Market regime detection is disabled")
+
+            return result
+
+        except ImportError as e:
+            logger.error(f"RegimeDetector not available: {e}")
+            return {'trend': 0, 'reversal': 0, 'mixed': 0, 'reason': 'import_error'}
+        except Exception as e:
+            logger.error(f"Market regime refresh failed: {e}")
+            return {'trend': 0, 'reversal': 0, 'mixed': 0, 'reason': str(e)}
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""

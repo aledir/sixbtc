@@ -140,19 +140,24 @@ class SyntaxValidator:
             class_name = strategy_classes[0]
 
             # Validate class name format:
-            # - Strategy_TYPE_hash (e.g., Strategy_MOM_abc123)
             # - PatStrat_TYPE_hash (e.g., PatStrat_MOM_abc123) - pattern-based
-            # - Strategy_TYPE_templatehash_paramhash (e.g., Strategy_MOM_d524c121_52e390)
+            # - UngStrat_TYPE_hash (e.g., UngStrat_CRS_abc123) - Unger regime-based
+            # - AIFStrat_TYPE_hash (e.g., AIFStrat_MOM_abc123) - AI free
+            # - AIAStrat_TYPE_hash (e.g., AIAStrat_REV_abc123) - AI assigned
+            # - Strategy_TYPE_hash (legacy/fallback)
             valid_formats = [
-                r'^Strategy_[A-Z]+_[a-f0-9]+$',           # Basic: Strategy_MOM_abc123
                 r'^PatStrat_[A-Z]+_[a-f0-9]+$',           # Pattern: PatStrat_MOM_abc123
+                r'^UngStrat_[A-Z]+_[a-f0-9]+$',           # Unger: UngStrat_CRS_abc123
+                r'^AIFStrat_[A-Z]+_[a-f0-9]+$',           # AI Free: AIFStrat_MOM_abc123
+                r'^AIAStrat_[A-Z]+_[a-f0-9]+$',           # AI Assigned: AIAStrat_REV_abc123
+                r'^Strategy_[A-Z]+_[a-f0-9]+$',           # Legacy: Strategy_MOM_abc123
                 r'^Strategy_[A-Z]+_[a-f0-9]+_[a-f0-9]+$', # Template: Strategy_MOM_tpl_param
                 r'^Strategy_[A-Z]+_[a-zA-Z0-9]+$',        # Alphanumeric (for tests)
             ]
             if not any(re.match(pattern, class_name) for pattern in valid_formats):
                 errors.append(
                     f"Invalid class name format: {class_name}. "
-                    "Expected: Strategy_TYPE_hash or PatStrat_TYPE_hash"
+                    "Expected: PatStrat_, UngStrat_, AIFStrat_, or AIAStrat_"
                 )
 
         return class_name, errors

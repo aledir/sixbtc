@@ -395,9 +395,9 @@ class ContinuousExecutorProcess:
             return self._strategy_cache[strategy_id]
 
         try:
-            # Extract class name (supports Strategy_ and PatStrat_)
+            # Extract class name (supports all prefixes)
             import re
-            match = re.search(r'class\s+((?:Strategy|PatStrat)_\w+)\s*\(', code)
+            match = re.search(r'class\s+((?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat)_\w+)\s*\(', code)
             if not match:
                 return None
 
@@ -508,6 +508,23 @@ class ContinuousExecutorProcess:
             strategy_leverage = getattr(signal, 'leverage', 1)
             coin_max_leverage = self._get_coin_max_leverage(symbol)
             actual_leverage = min(strategy_leverage, coin_max_leverage)
+
+            # Dynamic cap: each trade uses at most 1/max_positions of equity
+            max_positions = self.config['risk']['limits']['max_open_positions_per_subaccount']
+            account_balance = subaccount['allocated_capital']
+            notional = size * current_price
+            margin_needed = notional / actual_leverage
+            max_margin = account_balance / max_positions
+
+            if margin_needed > max_margin:
+                # Cap size to respect diversification
+                max_notional = max_margin * actual_leverage
+                original_size = size
+                size = max_notional / current_price
+                logger.debug(
+                    f"Size capped: {original_size:.6f} -> {size:.6f} "
+                    f"(margin {margin_needed:.2f} > max {max_margin:.2f})"
+                )
 
             logger.info(
                 f"Executing {signal.direction} {symbol} for subaccount {subaccount['id']}: "

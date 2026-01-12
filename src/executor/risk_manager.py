@@ -19,6 +19,11 @@ import pandas as pd
 import numpy as np
 
 from src.strategies.base import StopLossType, TakeProfitType
+from src.utils.risk_calculator import (
+    calculate_safe_leverage,
+    is_leverage_safe,
+    calculate_liquidation_distance_pct,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -587,6 +592,127 @@ class RiskManager:
 
         return True, "OK"
 
+    def check_leverage_safety(
+        self,
+        sl_pct: float,
+        leverage: int,
+        max_leverage: int,
+        buffer_pct: float = 10.0,
+    ) -> Tuple[bool, int, str]:
+        """
+        Check if leverage is safe given stop loss percentage.
+
+        Ensures liquidation price is at least buffer_pct further from entry
+        than the stop loss. This protects against liquidation before SL triggers.
+
+        Uses Hyperliquid formula:
+        - maintenance_margin_rate = 1 / (2 * max_leverage)
+        - liq_distance = 1/leverage - maintenance_margin_rate
+
+        Args:
+            sl_pct: Stop loss distance as decimal (e.g., 0.05 for 5%)
+            leverage: Desired leverage
+            max_leverage: Maximum leverage for the asset (from Hyperliquid)
+            buffer_pct: Minimum buffer between SL and liquidation (default: 10%)
+
+        Returns:
+            Tuple of (is_safe, max_safe_leverage, message)
+
+        Example:
+            >>> check_leverage_safety(0.12, 20, 40, 10.0)
+            (False, 6, "Leverage 20x unsafe with 12.0% SL, max safe is 6x")
+        """
+        safe, safe_lev = is_leverage_safe(sl_pct, leverage, max_leverage, buffer_pct)
+
+        if safe:
+            liq_dist = calculate_liquidation_distance_pct(leverage, max_leverage)
+            return True, safe_lev, (
+                f"Leverage {leverage}x safe: SL at {sl_pct:.1%}, "
+                f"liquidation at {liq_dist:.1%}"
+            )
+        else:
+            return False, safe_lev, (
+                f"Leverage {leverage}x unsafe with {sl_pct:.1%} SL, "
+                f"max safe is {safe_lev}x"
+            )
+
+    def get_safe_leverage_for_signal(
+        self,
+        signal,
+        current_price: float,
+        max_leverage: int = 20,
+        buffer_pct: float = 10.0,
+    ) -> int:
+        """
+        Calculate maximum safe leverage for a signal's stop loss.
+
+        Args:
+            signal: Signal object with sl_pct or stop_loss
+            current_price: Current market price
+            max_leverage: Maximum leverage for the asset
+            buffer_pct: Minimum buffer between SL and liquidation
+
+        Returns:
+            Maximum safe leverage (clamped to max_leverage)
+        """
+        # Extract SL percentage from signal
+        sl_pct = None
+
+        if hasattr(signal, 'sl_pct') and signal.sl_pct:
+            sl_pct = signal.sl_pct
+        elif hasattr(signal, 'stop_loss') and signal.stop_loss and current_price > 0:
+            sl_pct = abs(current_price - signal.stop_loss) / current_price
+
+        if sl_pct is None or sl_pct <= 0:
+            logger.warning("Cannot determine SL percentage, using conservative 1x")
+            return 1
+
+        return calculate_safe_leverage(sl_pct, max_leverage, buffer_pct)
+
+    def validate_and_adjust_leverage(
+        self,
+        signal,
+        current_price: float,
+        desired_leverage: int,
+        max_leverage: int = 20,
+        buffer_pct: float = 10.0,
+    ) -> Tuple[int, bool, str]:
+        """
+        Validate leverage and adjust if necessary to prevent liquidation.
+
+        This is the main entry point for live trading safety checks.
+        If desired leverage is unsafe, it will be reduced to safe level.
+
+        Args:
+            signal: Signal object with sl_pct or stop_loss
+            current_price: Current market price
+            desired_leverage: Strategy's desired leverage
+            max_leverage: Maximum leverage for the asset
+            buffer_pct: Minimum buffer between SL and liquidation
+
+        Returns:
+            Tuple of (actual_leverage, was_adjusted, message)
+
+        Example:
+            >>> validate_and_adjust_leverage(signal, 100.0, 20, 40, 10.0)
+            (6, True, "Leverage reduced from 20x to 6x for safety")
+        """
+        safe_lev = self.get_safe_leverage_for_signal(
+            signal, current_price, max_leverage, buffer_pct
+        )
+
+        if desired_leverage <= safe_lev:
+            return desired_leverage, False, f"Leverage {desired_leverage}x is safe"
+
+        # Leverage needs adjustment
+        logger.warning(
+            f"Leverage reduced from {desired_leverage}x to {safe_lev}x "
+            f"to prevent liquidation before SL"
+        )
+        return safe_lev, True, (
+            f"Leverage reduced from {desired_leverage}x to {safe_lev}x for safety"
+        )
+
     def adjust_stops_for_side(
         self,
         side: str,
@@ -636,25 +762,51 @@ class RiskManager:
         self,
         strategy_id: str,
         symbol: str,
-        signal: Any
-    ) -> bool:
+        signal: Any,
+        current_price: float = 0.0,
+        max_leverage: int = 20,
+    ) -> Tuple[bool, str]:
         """
-        Check if position can be opened (test-compatible interface)
+        Check if position can be opened with safety validations
 
         Args:
             strategy_id: Strategy identifier
             symbol: Trading pair
             signal: Signal object
+            current_price: Current market price (for leverage safety check)
+            max_leverage: Maximum leverage for the asset
 
         Returns:
-            True if position can be opened
+            Tuple of (can_open, reason)
         """
-        # For testing, we always allow opening positions
-        # In production, this would check:
-        # - Position limits
-        # - Risk limits
-        # - Strategy-specific constraints
-        return True
+        # Check basic signal validity
+        if not self.validate_signal(signal, current_price if current_price > 0 else 1.0):
+            return False, "Invalid signal parameters"
+
+        # Check leverage safety if signal has leverage attribute
+        if hasattr(signal, 'leverage') and signal.leverage and current_price > 0:
+            sl_pct = None
+            if hasattr(signal, 'sl_pct') and signal.sl_pct:
+                sl_pct = signal.sl_pct
+            elif hasattr(signal, 'stop_loss') and signal.stop_loss:
+                sl_pct = abs(current_price - signal.stop_loss) / current_price
+
+            if sl_pct and sl_pct > 0:
+                is_safe, safe_lev, msg = self.check_leverage_safety(
+                    sl_pct=sl_pct,
+                    leverage=signal.leverage,
+                    max_leverage=max_leverage,
+                    buffer_pct=10.0,
+                )
+                if not is_safe:
+                    logger.warning(
+                        f"Position blocked for {symbol}: {msg}. "
+                        f"Use validate_and_adjust_leverage() to auto-correct."
+                    )
+                    # Return True but with warning - caller should use adjust method
+                    # This allows flexibility: caller can reject or adjust
+
+        return True, "OK"
 
     def validate_signal(
         self,

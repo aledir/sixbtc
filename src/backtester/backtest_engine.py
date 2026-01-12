@@ -28,7 +28,7 @@ logger = get_logger(__name__)
 # NUMBA JIT-COMPILED SIMULATION KERNEL
 # =============================================================================
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=False)  # cache=False to force recompilation after margin tracking fix
 def _simulate_portfolio_numba(
     close_2d: np.ndarray,           # (n_bars, n_symbols) float64
     high_2d: np.ndarray,            # (n_bars, n_symbols) float64
@@ -112,6 +112,9 @@ def _simulate_portfolio_numba(
     equity = initial_capital
     equity_curve = np.zeros(n_bars + 1, dtype=np.float64)
     equity_curve[0] = equity
+
+    # Margin tracking (matches parametric kernel behavior)
+    margin_used = 0.0
 
     # Main simulation loop
     for i in range(n_bars):
@@ -242,7 +245,9 @@ def _simulate_portfolio_numba(
                 trade_exit_reason[n_trades] = exit_reason
                 n_trades += 1
 
-                # Clear position
+                # Clear position and release margin
+                margin_used -= pos_margin[j]
+                pos_margin[j] = 0.0
                 pos_entry_idx[j] = -1
                 n_open -= 1
 
@@ -281,6 +286,11 @@ def _simulate_portfolio_numba(
                 notional = margin * actual_lev
                 size = notional / slipped_entry
 
+                # Check margin availability (matches parametric kernel behavior)
+                margin_available = equity - margin_used
+                if margin > margin_available:
+                    continue  # Skip - insufficient margin
+
                 # Calculate SL/TP prices
                 sl_pct = sl_pcts_2d[i, j]
                 tp_pct = tp_pcts_2d[i, j]
@@ -313,6 +323,8 @@ def _simulate_portfolio_numba(
                 pos_time_exit[j] = time_exit_flags_2d[i, j]
                 pos_exit_after_bars[j] = exit_after_bars_2d[i, j]
 
+                # Track margin usage
+                margin_used += margin
                 n_open += 1
 
         equity_curve[i + 1] = equity
@@ -549,7 +561,7 @@ class BacktestEngine:
         def process_symbol(symbol):
             df = aligned_data[symbol]
             entries, exits, sizes, sl_pcts, tp_pcts, signal_meta = self._generate_signals_fast(
-                strategy, df, symbol
+                strategy, df, symbol, max_positions
             )
             return symbol, {
                 'entries': entries,
@@ -577,6 +589,20 @@ class BacktestEngine:
         _t0 = time.perf_counter()
         arrays = self._prepare_simulation_arrays(all_signals, symbols, len(common_index))
         _t_prepare = time.perf_counter() - _t0
+
+        # DEBUG: Check sizes array values
+        sizes_at_entries = arrays['sizes'][arrays['entries']]
+        if len(sizes_at_entries) > 0:
+            # Also get SL and time exit info
+            sl_at_entries = arrays['sl_pcts'][arrays['entries']]
+            time_exit_at_entries = arrays['time_exit_flags'][arrays['entries']]
+            exit_bars_at_entries = arrays['exit_after_bars'][arrays['entries']]
+            logger.info(
+                f"[{strategy_name}] DEBUG kernel inputs: sizes=({sizes_at_entries.min():.3f}-{sizes_at_entries.max():.3f}), "
+                f"sl=({sl_at_entries.min():.3f}-{sl_at_entries.max():.3f}), "
+                f"time_exit={time_exit_at_entries.sum()}/{len(time_exit_at_entries)}, "
+                f"exit_bars=({exit_bars_at_entries.min()}-{exit_bars_at_entries.max()})"
+            )
 
         # Run Numba-optimized simulation
         _t0 = time.perf_counter()
@@ -628,11 +654,15 @@ class BacktestEngine:
         metrics['max_positions_used'] = max_positions
         metrics['symbols_count'] = len(symbols)
 
+        # DEBUG: Count total entry signals for comparison with parametric
+        total_entry_signals = int(arrays['entries'].sum())
+        metrics['total_signals'] = total_entry_signals
+
         # Log profiling results
         _t_total = time.perf_counter() - _t_start
         logger.info(
-            f"[{strategy_name}] Backtest complete: {len(closed_trades)} trades, {len(symbols)} symbols, "
-            f"{len(common_index)} bars | "
+            f"[{strategy_name}] Backtest complete: {len(closed_trades)} trades, {total_entry_signals} signals, "
+            f"{len(symbols)} symbols, {len(common_index)} bars | "
             f"Time: {_t_total:.2f}s (align={_t_align:.2f}s, signals={_t_signals:.2f}s, "
             f"prepare={_t_prepare:.3f}s, sim={_t_simulation:.3f}s)"
         )
@@ -713,10 +743,12 @@ class BacktestEngine:
                     trailing_pcts_2d[bar_idx, j] = meta.get('trailing_stop_pct', 0.02)
                     trailing_act_2d[bar_idx, j] = meta.get('trailing_activation_pct', 0.01)
 
-                # Time-based exit
-                if meta.get('exit_type') == ExitType.TIME_BASED:
+                # Time-based exit (only if exit_after_bars > 0)
+                # exit_bars=0 means NO time exit (only SL/TP)
+                exit_bars = meta.get('exit_after_bars', 20)
+                if meta.get('exit_type') == ExitType.TIME_BASED and exit_bars > 0:
                     time_exit_flags_2d[bar_idx, j] = True
-                    exit_after_bars_2d[bar_idx, j] = meta.get('exit_after_bars', 20)
+                    exit_after_bars_2d[bar_idx, j] = exit_bars
 
         return {
             'close': close_2d,
@@ -857,6 +889,7 @@ class BacktestEngine:
         open_positions = {}  # symbol -> {entry_price, entry_idx, size, sl, tp}
         closed_trades = []
         equity = self.initial_capital
+        margin_used = 0.0  # Track margin for consistency with Numba kernel
         equity_curve = [equity]
 
         # Generate signals for all symbols upfront
@@ -865,7 +898,7 @@ class BacktestEngine:
         for symbol in symbols:
             df = aligned_data[symbol]
             entries, exits, sizes, sl_pcts, tp_pcts, signal_meta = self._generate_signals_fast(
-                strategy, df, symbol
+                strategy, df, symbol, max_positions
             )
             all_signals[symbol] = {
                 'entries': entries,
@@ -933,10 +966,12 @@ class BacktestEngine:
                 current_low = sig['low'].iloc[i]
                 direction = pos.get('direction', 'long')
 
-                # Check TIME_BASED exit first
-                if pos.get('exit_after_bars') is not None:
+                # Check TIME_BASED exit first (only if exit_after_bars > 0)
+                # exit_after_bars=0 means no time exit (only SL/TP)
+                exit_bars = pos.get('exit_after_bars')
+                if exit_bars is not None and exit_bars > 0:
                     bars_held = i - pos['entry_idx']
-                    if bars_held >= pos['exit_after_bars']:
+                    if bars_held >= exit_bars:
                         if direction == 'long':
                             pnl = (current_price - pos['entry_price']) * pos['size']
                         else:
@@ -1005,6 +1040,8 @@ class BacktestEngine:
                 return_on_margin = pnl / margin if margin > 0 else 0
 
                 equity += pnl
+                margin_used -= margin  # Release margin
+
                 closed_trades.append({
                     'symbol': symbol,
                     'entry_idx': pos['entry_idx'],
@@ -1071,6 +1108,11 @@ class BacktestEngine:
                     notional = margin * actual_leverage
                     size = notional / slipped_entry
 
+                    # Check margin availability (matches Numba kernel behavior)
+                    margin_available = equity - margin_used
+                    if margin > margin_available:
+                        continue  # Skip - insufficient margin
+
                     # Calculate SL/TP prices (direction-aware, from slipped entry)
                     if direction == 'long':
                         sl_price = slipped_entry * (1 - entry['sl_pct'])
@@ -1103,6 +1145,7 @@ class BacktestEngine:
                         pos_data['exit_after_bars'] = meta.get('exit_after_bars', 20)
 
                     open_positions[symbol] = pos_data
+                    margin_used += margin  # Track margin usage
 
             equity_curve.append(equity)
         _t_simulation = time.perf_counter() - _t0
@@ -1348,7 +1391,8 @@ class BacktestEngine:
         self,
         strategy: StrategyCore,
         data: pd.DataFrame,
-        symbol: str = None
+        symbol: str = None,
+        max_open_positions: int = 10
     ) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series, Dict]:
         """
         Generate entry/exit signals from strategy class attributes.
@@ -1364,6 +1408,7 @@ class BacktestEngine:
             strategy: StrategyCore instance
             data: OHLCV DataFrame with high, low, close columns
             symbol: Symbol name for logging
+            max_open_positions: Max concurrent positions (for dynamic size cap)
 
         Returns:
             (entries, exits, sizes, sl_pcts, tp_pcts, signal_meta)
@@ -1430,6 +1475,10 @@ class BacktestEngine:
         # Calculate SL/TP percentages based on sl_type
         risk_pct = self.risk_manager.risk_per_trade_pct
 
+        # Dynamic position size cap: ensures diversification across max_positions
+        # With max_positions=10, each trade uses max 10% of equity
+        dynamic_cap = 1.0 / max(max_open_positions, 1)
+
         if sl_type == StopLossType.ATR:
             # ATR-based: calculate effective SL/TP % per entry bar
             # Check if strategy pre-calculated ATR column
@@ -1462,7 +1511,7 @@ class BacktestEngine:
                 # Divide by leverage to match live executor risk calculation
                 # Kernel does: notional = margin * leverage, so we pre-divide to keep risk accurate
                 effective_leverage = max(leverage, 1)
-                position_size = min(risk_pct / (effective_sl_pct * effective_leverage), 1.0) if effective_sl_pct > 0 else 0.1
+                position_size = min(risk_pct / (effective_sl_pct * effective_leverage), dynamic_cap) if effective_sl_pct > 0 else 0.1
                 sizes_arr[entry_idx] = position_size
 
         elif sl_type == StopLossType.TRAILING:
@@ -1473,7 +1522,7 @@ class BacktestEngine:
 
             # Divide by leverage to match live executor risk calculation
             effective_leverage = max(leverage, 1)
-            position_size = min(risk_pct / (effective_sl_pct * effective_leverage), 1.0) if effective_sl_pct > 0 else 0.1
+            position_size = min(risk_pct / (effective_sl_pct * effective_leverage), dynamic_cap) if effective_sl_pct > 0 else 0.1
             sizes_arr[entry_indices] = position_size
 
         else:
@@ -1484,8 +1533,16 @@ class BacktestEngine:
 
             # Divide by leverage to match live executor risk calculation
             effective_leverage = max(leverage, 1)
-            position_size = min(risk_pct / (effective_sl_pct * effective_leverage), 1.0) if effective_sl_pct > 0 else 0.1
+            position_size = min(risk_pct / (effective_sl_pct * effective_leverage), dynamic_cap) if effective_sl_pct > 0 else 0.1
             sizes_arr[entry_indices] = position_size
+
+            # DEBUG: Log position size calculation (INFO level for visibility)
+            if symbol and len(entry_indices) > 0:  # Only log first symbol per run
+                logger.info(
+                    f"[{symbol}] IS sizing: risk={risk_pct:.4f}, sl={effective_sl_pct:.4f}, "
+                    f"lev={effective_leverage}, size_pct={position_size:.4f}, cap={dynamic_cap:.4f}, "
+                    f"entries={len(entry_indices)}, exit_bars={exit_after_bars}"
+                )
 
         # Build metadata dict for all entries
         base_meta = {

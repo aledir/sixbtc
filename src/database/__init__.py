@@ -11,7 +11,7 @@ Provides:
 from .models import (
     Base, Strategy, StrategyTemplate, BacktestResult, PipelineMetricsSnapshot,
     Trade, PerformanceSnapshot, Subaccount, Coin, ScheduledTaskExecution,
-    PairsUpdateLog, StrategyEvent
+    PairsUpdateLog, StrategyEvent, MarketRegime
 )
 from .connection import get_engine, get_session, get_db, init_db
 from .strategy_processor import StrategyProcessor
@@ -30,6 +30,7 @@ __all__ = [
     "ScheduledTaskExecution",
     "PairsUpdateLog",
     "StrategyEvent",
+    "MarketRegime",
     "EventTracker",
     "get_engine",
     "get_session",

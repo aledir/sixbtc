@@ -133,8 +133,9 @@ class Pattern:
             and (tradable_coins is None or cp.coin in tradable_coins)
         ]
 
-        # Sort by edge descending - return ALL matching coins (no limit)
-        sorted_coins = sorted(filtered, key=lambda x: x.edge, reverse=True)
+        # Sort by edge descending, then coin name for deterministic ordering
+        # (when two coins have equal edge, sort alphabetically)
+        sorted_coins = sorted(filtered, key=lambda x: (-x.edge, x.coin))
 
         return [cp.coin for cp in sorted_coins]
 
@@ -273,7 +274,7 @@ class PatternFetcher:
         self,
         timeframe: Optional[str] = None,
         limit: int = 10,
-        min_quality_score: float = 0.75
+        min_quality_score: float = 0.0
     ) -> List[Pattern]:
         """
         Fetch Tier 1 patterns from pattern-discovery
@@ -281,7 +282,8 @@ class PatternFetcher:
         Args:
             timeframe: Filter by timeframe (e.g., '15m', '1h') - not used by API currently
             limit: Maximum number of patterns to return
-            min_quality_score: Minimum quality score (0-1)
+            min_quality_score: Minimum quality score (0-1) - default 0 = no filter
+                               Tier 1 patterns are already validated by pattern-discovery
 
         Returns:
             List of Pattern objects
@@ -312,15 +314,18 @@ class PatternFetcher:
             data = response.json()
             raw_patterns = data.get('patterns', [])
 
-            # Filter by quality score locally
-            filtered = [
-                p for p in raw_patterns
-                if (p.get('quality_score') or 0) >= min_quality_score
-            ]
+            # Filter by quality score locally (default 0 = no filter)
+            if min_quality_score > 0:
+                filtered = [
+                    p for p in raw_patterns
+                    if (p.get('quality_score') or 0) >= min_quality_score
+                ]
+            else:
+                filtered = raw_patterns
 
             patterns = [self._parse_pattern(p) for p in filtered]
 
-            logger.info(f"Fetched {len(patterns)} Tier 1 patterns (quality >= {min_quality_score})")
+            logger.info(f"Fetched {len(patterns)} Tier 1 patterns")
             return patterns
 
         except requests.exceptions.RequestException as e:
@@ -518,8 +523,8 @@ class PatternFetcher:
         if len(tier1_targets) <= 1:
             return [pattern]  # Only one target, no expansion needed
 
-        # Sort by edge descending and limit
-        tier1_targets = sorted(tier1_targets, key=lambda t: t.edge, reverse=True)
+        # Sort by edge descending, then target_name for deterministic ordering
+        tier1_targets = sorted(tier1_targets, key=lambda t: (-t.edge, t.target_name))
         tier1_targets = tier1_targets[:max_targets]
 
         # Create virtual pattern for each target
@@ -572,7 +577,7 @@ class PatternFetcher:
     def get_tier_1_patterns_expanded(
         self,
         limit: int = 10,
-        min_quality_score: float = 0.75,
+        min_quality_score: float = 0.0,
         expand_multi_target: bool = True,
         min_edge_for_expansion: float = 0.05,
         max_targets_per_pattern: int = 5
@@ -586,7 +591,7 @@ class PatternFetcher:
 
         Args:
             limit: Max base patterns to fetch from API
-            min_quality_score: Quality threshold for base patterns
+            min_quality_score: Quality threshold (default 0 = no filter, tier1 already validated)
             expand_multi_target: If True, expand patterns with multiple Tier 1 targets
             min_edge_for_expansion: Minimum edge for a target to be expanded (default 5%)
             max_targets_per_pattern: Maximum targets to expand per pattern

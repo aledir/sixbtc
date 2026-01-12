@@ -25,7 +25,7 @@ Usage:
 
 import logging
 from datetime import datetime, UTC
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 from uuid import UUID
 
 from src.database import get_session
@@ -110,7 +110,8 @@ class EventTracker:
         generation_mode: Optional[str] = None,
         direction: Optional[str] = None,
         duration_ms: Optional[int] = None,
-        leverage: Optional[int] = None
+        leverage: Optional[int] = None,
+        pattern_ids: Optional[list] = None
     ) -> bool:
         """
         Emit event when a new strategy is generated.
@@ -127,6 +128,7 @@ class EventTracker:
             direction: Trading direction (LONG, SHORT, BIDIR)
             duration_ms: Generation time in milliseconds
             leverage: Leverage used (from coins table max_leverage)
+            pattern_ids: List of pattern IDs used (for pattern-based strategies)
         """
         return EventTracker.emit(
             event_type="created",
@@ -142,7 +144,8 @@ class EventTracker:
             pattern_based=pattern_based,
             generation_mode=generation_mode,
             direction=direction,
-            leverage=leverage
+            leverage=leverage,
+            pattern_ids=pattern_ids
         )
 
     @staticmethod
@@ -355,6 +358,37 @@ class EventTracker:
         )
 
     @staticmethod
+    def backtest_parametric_stats(
+        base_code_hash: str,
+        strategy_name: str,
+        timeframe: str,
+        combo_stats: dict,
+        duration_ms: Optional[int] = None
+    ) -> bool:
+        """
+        Emit event with parametric backtest statistics for metrics aggregation.
+
+        Emitted ALWAYS after parametric backtest (whether combos pass or not).
+
+        Args:
+            base_code_hash: Hash of the base strategy code
+            combo_stats: Dict with combo statistics:
+                {total, passed, failed, fail_reasons: {sharpe, trades, wr, exp, dd},
+                 failed_avg: {sharpe, wr, exp, trades}, passed_avg: {...}}
+        """
+        return EventTracker.emit(
+            event_type="parametric_stats",
+            stage="backtest",
+            status="info",
+            strategy_id=None,  # Not tied to specific strategy, tracks base code
+            strategy_name=strategy_name,
+            base_code_hash=base_code_hash,
+            duration_ms=duration_ms,
+            timeframe=timeframe,
+            combo_stats=combo_stats
+        )
+
+    @staticmethod
     def backtest_parametric_failed(
         strategy_id: UUID,
         strategy_name: str,
@@ -363,15 +397,16 @@ class EventTracker:
         best_sharpe: Optional[float] = None,
         best_win_rate: Optional[float] = None,
         combinations_tested: Optional[int] = None,
-        threshold_breakdown: Optional[dict] = None,
+        combo_stats: Optional[dict] = None,
         duration_ms: Optional[int] = None
     ) -> bool:
         """
         Emit event when parametric backtest finds no valid parameters.
 
         Args:
-            threshold_breakdown: Dict with failure counts per threshold:
-                {total_combos, fail_trades, fail_sharpe, fail_wr, fail_exp, fail_dd}
+            combo_stats: Dict with combo statistics:
+                {total, passed, failed, fail_reasons: {sharpe, trades, wr, exp, dd},
+                 failed_avg: {sharpe, wr, exp, trades}, passed_avg: {...}}
         """
         return EventTracker.emit(
             event_type="parametric_failed",
@@ -385,7 +420,169 @@ class EventTracker:
             best_sharpe=best_sharpe,
             best_win_rate=best_win_rate,
             combinations_tested=combinations_tested,
-            threshold_breakdown=threshold_breakdown
+            combo_stats=combo_stats
+        )
+
+    @staticmethod
+    def backtest_is_failed(
+        strategy_id: UUID,
+        strategy_name: str,
+        timeframe: str,
+        reason: str,
+        fail_types: Dict[str, int],
+        is_sharpe: float,
+        is_win_rate: float,
+        is_trades: int,
+        is_expectancy: float,
+        is_max_drawdown: float,
+        duration_ms: Optional[int] = None,
+        base_code_hash: Optional[str] = None
+    ) -> bool:
+        """
+        Emit event when IS validation fails (strategy will be deleted).
+        Records IS metrics and fail_types for aggregate statistics.
+
+        fail_types: dict with counts for each threshold {sharpe: 1, wr: 0, exp: 1, dd: 0, trades: 0}
+        Cumulative like PARAMETRIC - counts ALL thresholds that failed.
+        """
+        return EventTracker.emit(
+            event_type="is_failed",
+            stage="backtest",
+            status="failed",
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            base_code_hash=base_code_hash,
+            duration_ms=duration_ms,
+            timeframe=timeframe,
+            reason=reason,
+            fail_types=fail_types,
+            is_sharpe=is_sharpe,
+            is_win_rate=is_win_rate,
+            is_trades=is_trades,
+            is_expectancy=is_expectancy,
+            is_max_drawdown=is_max_drawdown
+        )
+
+    @staticmethod
+    def backtest_is_passed(
+        strategy_id: UUID,
+        strategy_name: str,
+        timeframe: str,
+        is_sharpe: float,
+        is_win_rate: float,
+        is_trades: int,
+        is_expectancy: float,
+        is_max_drawdown: float,
+        duration_ms: Optional[int] = None,
+        base_code_hash: Optional[str] = None
+    ) -> bool:
+        """
+        Emit event when IS validation passes (strategy proceeds to OOS).
+        Records IS metrics and timing for aggregate statistics.
+        """
+        return EventTracker.emit(
+            event_type="is_passed",
+            stage="backtest",
+            status="passed",
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            base_code_hash=base_code_hash,
+            duration_ms=duration_ms,
+            timeframe=timeframe,
+            is_sharpe=is_sharpe,
+            is_win_rate=is_win_rate,
+            is_trades=is_trades,
+            is_expectancy=is_expectancy,
+            is_max_drawdown=is_max_drawdown
+        )
+
+    @staticmethod
+    def backtest_oos_failed(
+        strategy_id: UUID,
+        strategy_name: str,
+        timeframe: str,
+        reason: str,
+        fail_types: Dict[str, int],
+        is_sharpe: float,
+        is_win_rate: float,
+        is_trades: int,
+        is_expectancy: float,
+        oos_sharpe: Optional[float] = None,
+        oos_win_rate: Optional[float] = None,
+        oos_trades: Optional[int] = None,
+        oos_expectancy: Optional[float] = None,
+        oos_max_drawdown: Optional[float] = None,
+        duration_ms: Optional[int] = None,
+        base_code_hash: Optional[str] = None
+    ) -> bool:
+        """
+        Emit event when OOS validation fails (strategy will be deleted).
+        Records IS/OOS metrics and fail_types for aggregate statistics.
+
+        fail_types: dict with counts for each threshold {sharpe: 1, wr: 0, exp: 0, dd: 0, trades: 1, degradation: 0}
+        Cumulative like PARAMETRIC - counts ALL thresholds that failed.
+        """
+        return EventTracker.emit(
+            event_type="oos_failed",
+            stage="backtest",
+            status="failed",
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            base_code_hash=base_code_hash,
+            duration_ms=duration_ms,
+            timeframe=timeframe,
+            reason=reason,
+            fail_types=fail_types,
+            is_sharpe=is_sharpe,
+            is_win_rate=is_win_rate,
+            is_trades=is_trades,
+            is_expectancy=is_expectancy,
+            oos_sharpe=oos_sharpe,
+            oos_win_rate=oos_win_rate,
+            oos_trades=oos_trades,
+            oos_expectancy=oos_expectancy,
+            oos_max_drawdown=oos_max_drawdown
+        )
+
+    @staticmethod
+    def backtest_oos_passed(
+        strategy_id: UUID,
+        strategy_name: str,
+        timeframe: str,
+        is_sharpe: float,
+        is_win_rate: float,
+        is_trades: int,
+        is_expectancy: float,
+        oos_sharpe: float,
+        oos_win_rate: float,
+        oos_trades: int,
+        oos_expectancy: float,
+        oos_max_drawdown: float,
+        duration_ms: Optional[int] = None,
+        base_code_hash: Optional[str] = None
+    ) -> bool:
+        """
+        Emit event when OOS validation passes (strategy proceeds to scoring).
+        Records IS/OOS metrics and timing for aggregate statistics.
+        """
+        return EventTracker.emit(
+            event_type="oos_passed",
+            stage="backtest",
+            status="passed",
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            base_code_hash=base_code_hash,
+            duration_ms=duration_ms,
+            timeframe=timeframe,
+            is_sharpe=is_sharpe,
+            is_win_rate=is_win_rate,
+            is_trades=is_trades,
+            is_expectancy=is_expectancy,
+            oos_sharpe=oos_sharpe,
+            oos_win_rate=oos_win_rate,
+            oos_trades=oos_trades,
+            oos_expectancy=oos_expectancy,
+            oos_max_drawdown=oos_max_drawdown
         )
 
     # =========================================================================

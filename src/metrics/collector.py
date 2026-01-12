@@ -109,7 +109,7 @@ class MetricsCollector:
                 score_stats = self._get_score_stats_24h(session, window_24h)
                 retest_stats = self._get_retest_stats_24h(session, window_24h)
                 live_stats = self._get_live_rotation_stats(session, window_24h)
-                threshold_breakdown = self._get_threshold_breakdown_24h(session, window_24h)
+                combo_stats = self._get_combo_stats_24h(session, window_24h)
 
                 # Determine overall status
                 status, issue = self._get_status_and_issue(
@@ -141,7 +141,7 @@ class MetricsCollector:
                     pool_by_source=pool_by_source,
                     retest_stats=retest_stats,
                     live_stats=live_stats,
-                    threshold_breakdown=threshold_breakdown,
+                    combo_stats=combo_stats,
                 )
 
         except Exception as e:
@@ -437,24 +437,41 @@ class MetricsCollector:
         Returns:
             Dict with unique patterns used, total available, remaining, strategies count
         """
-        # Get unique BASE pattern IDs used (extract UUID before '__' suffix)
-        # Pattern IDs can be: "uuid" or "uuid__target_name"
+        # Get unique BASE pattern IDs ever used (from events, not strategies table)
+        # Events persist when strategies are deleted, so this count is stable
+        # Pattern IDs are stored in event_data->>'pattern_ids' as JSON array
         unique_used = session.execute(
             text("""
                 SELECT COUNT(DISTINCT split_part(elem, '__', 1))
-                FROM strategies s,
-                     json_array_elements_text(s.pattern_ids) AS elem
-                WHERE s.pattern_based = true
-                  AND s.pattern_ids IS NOT NULL
+                FROM strategy_events se,
+                     json_array_elements_text((se.event_data->>'pattern_ids')::json) AS elem
+                WHERE se.stage = 'generation'
+                  AND se.event_type = 'created'
+                  AND se.event_data->>'pattern_ids' IS NOT NULL
             """)
         ).scalar() or 0
 
-        # Get total strategies generated from patterns (all time, currently in DB)
-        strategies_in_db = session.execute(
+        # Fallback to strategies table if no events have pattern_ids yet
+        # (for backward compatibility with strategies generated before this fix)
+        if unique_used == 0:
+            unique_used = session.execute(
+                text("""
+                    SELECT COUNT(DISTINCT split_part(elem, '__', 1))
+                    FROM strategies s,
+                         json_array_elements_text(s.pattern_ids) AS elem
+                    WHERE s.pattern_based = true
+                      AND s.pattern_ids IS NOT NULL
+                """)
+            ).scalar() or 0
+
+        # Get total strategies generated from patterns (from events, stable count)
+        strategies_generated = session.execute(
             text("""
                 SELECT COUNT(*)
-                FROM strategies
-                WHERE pattern_based = true
+                FROM strategy_events
+                WHERE stage = 'generation'
+                  AND event_type = 'created'
+                  AND event_data->>'generation_mode' = 'pattern'
             """)
         ).scalar() or 0
 
@@ -486,7 +503,7 @@ class MetricsCollector:
             'unique_used': unique_used,
             'total_available': total_available,
             'remaining': remaining,
-            'strategies_in_db': strategies_in_db
+            'strategies_generated': strategies_generated
         }
 
     def _get_pool_by_source(self, session) -> Dict[str, int]:
@@ -545,8 +562,9 @@ class MetricsCollector:
             ))
         ).scalar() or 0
 
-        # Parametric passed (strategies saved with score)
-        parametric_passed = session.execute(
+        # Parametric output: strategies that exited parametric (passed IS threshold)
+        # = scored (passed OOS) + oos_failed (failed OOS but exited parametric)
+        parametric_scored = session.execute(
             select(func.count(StrategyEvent.id))
             .where(and_(
                 StrategyEvent.stage == 'backtest',
@@ -555,7 +573,19 @@ class MetricsCollector:
             ))
         ).scalar() or 0
 
-        # Parametric failed (no valid combinations found)
+        parametric_oos_failed = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'backtest',
+                StrategyEvent.event_type == 'oos_failed',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        # Total strategies that exited parametric (before OOS validation)
+        parametric_output = parametric_scored + parametric_oos_failed
+
+        # Parametric failed (no valid combinations found - base rejected)
         parametric_failed = session.execute(
             select(func.count(StrategyEvent.id))
             .where(and_(
@@ -661,13 +691,14 @@ class MetricsCollector:
 
         # Count unique bases that produced at least one strategy (using base_code_hash)
         # base_code_hash links parametric output strategies back to their base template
+        # Include both scored (passed OOS) and oos_failed (failed OOS but exited parametric)
         bases_with_output = session.execute(
             text("""
                 SELECT COUNT(DISTINCT base_code_hash)
                 FROM strategy_events
                 WHERE timestamp >= :since
                   AND stage = 'backtest'
-                  AND event_type = 'scored'
+                  AND event_type IN ('scored', 'oos_failed')
                   AND base_code_hash IS NOT NULL
             """),
             {'since': since}
@@ -688,11 +719,14 @@ class MetricsCollector:
             'bases_with_combos': bases_with_combos,
             'bases_with_output': bases_with_output,
             'combinations_tested': combinations_tested,
-            'parametric_passed': parametric_passed,
-            'parametric_failed': parametric_failed,
-            'parametric_completed': parametric_passed + parametric_failed,
+            # Parametric output = strategies that exited (passed IS threshold)
+            'parametric_output': parametric_output,
+            'parametric_scored': parametric_scored,  # Passed OOS too
+            'parametric_oos_failed': parametric_oos_failed,  # Failed OOS
+            'parametric_failed': parametric_failed,  # Base rejected (no valid combos)
+            'parametric_completed': parametric_output + parametric_failed,
             'score_ok': score_ok,
-            'score_ok_pct': pct(score_ok, parametric_passed),
+            'score_ok_pct': pct(score_ok, parametric_scored),
             'shuffle_ok': shuffle_ok,
             'shuffle_ok_pct': pct(shuffle_ok, score_ok),
             'mw_started': mw_started,
@@ -703,41 +737,128 @@ class MetricsCollector:
             'pool_pct': pct(pool_entered, mw_ok if mw_ok > 0 else shuffle_ok),
         }
 
-    def _get_threshold_breakdown_24h(self, session, since: datetime) -> Dict[str, int]:
+    def _get_combo_stats_24h(self, session, since: datetime) -> Dict:
         """
-        Aggregate threshold breakdown from parametric_failed events.
+        Aggregate combo_stats from parametric_stats events.
 
-        Returns dict with failure counts per threshold type:
-        {total, fail_trades, fail_sharpe, fail_wr, fail_exp, fail_dd}
+        Returns dict with aggregated statistics:
+        {
+            total_combos, passed_combos, failed_combos,
+            bases_with_passed, bases_with_failed,
+            fail_reasons: {sharpe, trades, wr, exp, dd},
+            failed_avg: {sharpe, wr, exp, trades},
+            passed_avg: {sharpe, wr, exp, trades}
+        }
         """
         result = session.execute(
             text("""
                 SELECT
-                    COALESCE(SUM((event_data->'threshold_breakdown'->>'fail_trades')::int), 0) as fail_trades,
-                    COALESCE(SUM((event_data->'threshold_breakdown'->>'fail_sharpe')::int), 0) as fail_sharpe,
-                    COALESCE(SUM((event_data->'threshold_breakdown'->>'fail_wr')::int), 0) as fail_wr,
-                    COALESCE(SUM((event_data->'threshold_breakdown'->>'fail_exp')::int), 0) as fail_exp,
-                    COALESCE(SUM((event_data->'threshold_breakdown'->>'fail_dd')::int), 0) as fail_dd,
-                    COALESCE(SUM((event_data->'threshold_breakdown'->>'total_combos')::int), 0) as total_combos
+                    COALESCE(SUM((event_data->'combo_stats'->>'total')::int), 0) as total_combos,
+                    COALESCE(SUM((event_data->'combo_stats'->>'passed')::int), 0) as passed_combos,
+                    COALESCE(SUM((event_data->'combo_stats'->>'failed')::int), 0) as failed_combos,
+                    COUNT(DISTINCT CASE WHEN (event_data->'combo_stats'->>'passed')::int > 0
+                          THEN base_code_hash END) as bases_with_passed,
+                    COUNT(DISTINCT CASE WHEN (event_data->'combo_stats'->>'passed')::int = 0
+                          THEN base_code_hash END) as bases_with_failed,
+                    COALESCE(SUM((event_data->'combo_stats'->'fail_reasons'->>'sharpe')::int), 0) as fail_sharpe,
+                    COALESCE(SUM((event_data->'combo_stats'->'fail_reasons'->>'trades')::int), 0) as fail_trades,
+                    COALESCE(SUM((event_data->'combo_stats'->'fail_reasons'->>'wr')::int), 0) as fail_wr,
+                    COALESCE(SUM((event_data->'combo_stats'->'fail_reasons'->>'exp')::int), 0) as fail_exp,
+                    COALESCE(SUM((event_data->'combo_stats'->'fail_reasons'->>'dd')::int), 0) as fail_dd,
+                    -- Weighted averages for failed combos
+                    CASE WHEN SUM((event_data->'combo_stats'->>'failed')::int) > 0 THEN
+                        SUM((event_data->'combo_stats'->'failed_avg'->>'sharpe')::float *
+                            (event_data->'combo_stats'->>'failed')::int) /
+                        SUM((event_data->'combo_stats'->>'failed')::int)
+                    ELSE 0 END as failed_avg_sharpe,
+                    CASE WHEN SUM((event_data->'combo_stats'->>'failed')::int) > 0 THEN
+                        SUM((event_data->'combo_stats'->'failed_avg'->>'wr')::float *
+                            (event_data->'combo_stats'->>'failed')::int) /
+                        SUM((event_data->'combo_stats'->>'failed')::int)
+                    ELSE 0 END as failed_avg_wr,
+                    CASE WHEN SUM((event_data->'combo_stats'->>'failed')::int) > 0 THEN
+                        SUM((event_data->'combo_stats'->'failed_avg'->>'exp')::float *
+                            (event_data->'combo_stats'->>'failed')::int) /
+                        SUM((event_data->'combo_stats'->>'failed')::int)
+                    ELSE 0 END as failed_avg_exp,
+                    CASE WHEN SUM((event_data->'combo_stats'->>'failed')::int) > 0 THEN
+                        SUM((event_data->'combo_stats'->'failed_avg'->>'trades')::float *
+                            (event_data->'combo_stats'->>'failed')::int) /
+                        SUM((event_data->'combo_stats'->>'failed')::int)
+                    ELSE 0 END as failed_avg_trades,
+                    -- Weighted averages for passed combos
+                    CASE WHEN SUM((event_data->'combo_stats'->>'passed')::int) > 0 THEN
+                        SUM((event_data->'combo_stats'->'passed_avg'->>'sharpe')::float *
+                            (event_data->'combo_stats'->>'passed')::int) /
+                        SUM((event_data->'combo_stats'->>'passed')::int)
+                    ELSE 0 END as passed_avg_sharpe,
+                    CASE WHEN SUM((event_data->'combo_stats'->>'passed')::int) > 0 THEN
+                        SUM((event_data->'combo_stats'->'passed_avg'->>'wr')::float *
+                            (event_data->'combo_stats'->>'passed')::int) /
+                        SUM((event_data->'combo_stats'->>'passed')::int)
+                    ELSE 0 END as passed_avg_wr,
+                    CASE WHEN SUM((event_data->'combo_stats'->>'passed')::int) > 0 THEN
+                        SUM((event_data->'combo_stats'->'passed_avg'->>'exp')::float *
+                            (event_data->'combo_stats'->>'passed')::int) /
+                        SUM((event_data->'combo_stats'->>'passed')::int)
+                    ELSE 0 END as passed_avg_exp,
+                    CASE WHEN SUM((event_data->'combo_stats'->>'passed')::int) > 0 THEN
+                        SUM((event_data->'combo_stats'->'passed_avg'->>'trades')::float *
+                            (event_data->'combo_stats'->>'passed')::int) /
+                        SUM((event_data->'combo_stats'->>'passed')::int)
+                    ELSE 0 END as passed_avg_trades,
+                    -- Count only bases that have a matching generation.created event
+                    -- (excludes orphan parametric_stats from previous sessions after reset)
+                    COUNT(DISTINCT CASE
+                        WHEN base_code_hash IN (
+                            SELECT DISTINCT base_code_hash
+                            FROM strategy_events
+                            WHERE stage = 'generation'
+                              AND event_type = 'created'
+                              AND timestamp >= :since
+                        ) THEN base_code_hash
+                    END) as total_bases,
+                    -- Average duration per base (parametric backtest time)
+                    AVG(duration_ms) as avg_duration_ms
                 FROM strategy_events
                 WHERE timestamp >= :since
                   AND stage = 'backtest'
-                  AND event_type = 'parametric_failed'
-                  AND event_data->'threshold_breakdown' IS NOT NULL
+                  AND event_type = 'parametric_stats'
+                  AND event_data->'combo_stats' IS NOT NULL
             """),
             {'since': since}
         ).first()
 
-        if not result or result[5] == 0:
+        if not result or result[0] == 0:
             return {}
 
         return {
-            'total': result[5],
-            'fail_trades': result[0],
-            'fail_sharpe': result[1],
-            'fail_wr': result[2],
-            'fail_exp': result[3],
-            'fail_dd': result[4],
+            'total_combos': result[0],
+            'passed_combos': result[1],
+            'failed_combos': result[2],
+            'bases_with_passed': result[3],
+            'bases_with_failed': result[4],
+            'fail_reasons': {
+                'sharpe': result[5],
+                'trades': result[6],
+                'wr': result[7],
+                'exp': result[8],
+                'dd': result[9],
+            },
+            'failed_avg': {
+                'sharpe': result[10] or 0,
+                'wr': result[11] or 0,
+                'exp': result[12] or 0,
+                'trades': result[13] or 0,
+            },
+            'passed_avg': {
+                'sharpe': result[14] or 0,
+                'wr': result[15] or 0,
+                'exp': result[16] or 0,
+                'trades': result[17] or 0,
+            },
+            'total_bases': result[18],
+            'avg_duration_ms': float(result[19]) if result[19] else None,
         }
 
     def _get_timing_avg_24h(self, session, since: datetime) -> Dict[str, Optional[float]]:
@@ -1029,39 +1150,16 @@ class MetricsCollector:
         """
         Get IN-SAMPLE backtest statistics for last 24h.
 
-        Queries BacktestResult where period_type='in_sample' created in window.
-        """
-        result = session.execute(
-            select(
-                func.count(BacktestResult.id),
-                func.avg(BacktestResult.sharpe_ratio),
-                func.avg(BacktestResult.win_rate),
-                func.avg(BacktestResult.expectancy),
-                func.avg(BacktestResult.total_trades),
-            )
-            .where(and_(
-                BacktestResult.period_type == 'in_sample',
-                BacktestResult.created_at >= since
-            ))
-        ).first()
+        IS passed = strategies that reached OOS (passed IS validation):
+        - BacktestResult OOS (strategies that passed both IS and OOS)
+        - oos_failed events (strategies that passed IS but failed OOS)
 
-        return {
-            'count': result[0] if result else 0,
-            'avg_sharpe': float(result[1]) if result and result[1] else None,
-            'avg_wr': float(result[2]) if result and result[2] else None,
-            'avg_exp': float(result[3]) if result and result[3] else None,
-            'avg_trades': float(result[4]) if result and result[4] else None,
-        }
+        IS failed = is_failed events (strategies that failed IS validation)
 
-    def _get_oos_stats_24h(self, session, since: datetime) -> Dict[str, Any]:
+        Returns passed/failed counts, avg metrics for each, and fail reasons.
         """
-        Get OUT-OF-SAMPLE validation statistics for last 24h.
-
-        Queries BacktestResult for OOS metrics. Degradation is stored on IS row
-        as recency_ratio (1 - degradation).
-        """
-        # Count OOS results
-        oos_count = session.execute(
+        # IS passed count from BacktestResult OOS (strategies that passed everything)
+        oos_passed_result = session.execute(
             select(func.count(BacktestResult.id))
             .where(and_(
                 BacktestResult.period_type == 'out_of_sample',
@@ -1069,9 +1167,274 @@ class MetricsCollector:
             ))
         ).scalar() or 0
 
-        # Get degradation stats from IS rows (recency_ratio stored there)
+        # IS passed count from oos_failed events (passed IS, failed OOS)
+        oos_failed_count_result = session.execute(
+            text("""
+                SELECT COUNT(*)
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'backtest'
+                  AND event_type = 'oos_failed'
+                  AND event_data->>'reason' NOT LIKE 'IS %'
+            """),
+            {'since': since}
+        ).scalar() or 0
+
+        passed_count = oos_passed_result + oos_failed_count_result
+
+        # IS passed avg metrics: combine from BacktestResult IS + oos_failed IS metrics
+        # From BacktestResult IS (strategies that passed everything)
+        br_is_result = session.execute(
+            select(
+                func.count(BacktestResult.id),
+                func.sum(BacktestResult.sharpe_ratio),
+                func.sum(BacktestResult.win_rate),
+                func.sum(BacktestResult.expectancy),
+                func.sum(BacktestResult.total_trades),
+            )
+            .where(and_(
+                BacktestResult.period_type == 'in_sample',
+                BacktestResult.created_at >= since
+            ))
+        ).first()
+
+        br_count = br_is_result[0] if br_is_result else 0
+        br_sums = {
+            'sharpe': float(br_is_result[1]) if br_is_result and br_is_result[1] else 0,
+            'wr': float(br_is_result[2]) if br_is_result and br_is_result[2] else 0,
+            'exp': float(br_is_result[3]) if br_is_result and br_is_result[3] else 0,
+            'trades': float(br_is_result[4]) if br_is_result and br_is_result[4] else 0,
+        }
+
+        # From oos_failed events (passed IS, failed OOS) - get IS metrics
+        oos_failed_is_result = session.execute(
+            text("""
+                SELECT
+                    COUNT(*),
+                    SUM((event_data->>'is_sharpe')::float),
+                    SUM((event_data->>'is_win_rate')::float),
+                    SUM((event_data->>'is_expectancy')::float),
+                    SUM((event_data->>'is_trades')::float)
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'backtest'
+                  AND event_type = 'oos_failed'
+                  AND event_data->>'reason' NOT LIKE 'IS %'
+            """),
+            {'since': since}
+        ).first()
+
+        oos_f_count = oos_failed_is_result[0] if oos_failed_is_result else 0
+        oos_f_sums = {
+            'sharpe': float(oos_failed_is_result[1]) if oos_failed_is_result and oos_failed_is_result[1] else 0,
+            'wr': float(oos_failed_is_result[2]) if oos_failed_is_result and oos_failed_is_result[2] else 0,
+            'exp': float(oos_failed_is_result[3]) if oos_failed_is_result and oos_failed_is_result[3] else 0,
+            'trades': float(oos_failed_is_result[4]) if oos_failed_is_result and oos_failed_is_result[4] else 0,
+        }
+
+        # Weighted average
+        total_passed = br_count + oos_f_count
+        if total_passed > 0:
+            passed_avg = {
+                'sharpe': (br_sums['sharpe'] + oos_f_sums['sharpe']) / total_passed,
+                'wr': (br_sums['wr'] + oos_f_sums['wr']) / total_passed,
+                'exp': (br_sums['exp'] + oos_f_sums['exp']) / total_passed,
+                'trades': (br_sums['trades'] + oos_f_sums['trades']) / total_passed,
+            }
+        else:
+            passed_avg = {'sharpe': None, 'wr': None, 'exp': None, 'trades': None}
+
+        # Failed strategies: from is_failed events
+        failed_result = session.execute(
+            text("""
+                SELECT
+                    COUNT(*),
+                    AVG((event_data->>'is_sharpe')::float),
+                    AVG((event_data->>'is_win_rate')::float),
+                    AVG((event_data->>'is_expectancy')::float),
+                    AVG((event_data->>'is_trades')::float),
+                    AVG(duration_ms)
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'backtest'
+                  AND event_type = 'is_failed'
+            """),
+            {'since': since}
+        ).first()
+
+        failed_count = failed_result[0] if failed_result else 0
+        failed_avg = {
+            'sharpe': float(failed_result[1]) if failed_result and failed_result[1] else None,
+            'wr': float(failed_result[2]) if failed_result and failed_result[2] else None,
+            'exp': float(failed_result[3]) if failed_result and failed_result[3] else None,
+            'trades': float(failed_result[4]) if failed_result and failed_result[4] else None,
+        }
+
+        # Average timing from ALL IS events (both passed and failed)
+        is_timing_result = session.execute(
+            text("""
+                SELECT AVG(duration_ms)
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'backtest'
+                  AND event_type IN ('is_passed', 'is_failed')
+                  AND duration_ms IS NOT NULL
+            """),
+            {'since': since}
+        ).scalar()
+        is_avg_duration_ms = float(is_timing_result) if is_timing_result else None
+
+        # Fail reasons breakdown (from fail_types dict in is_failed events)
+        # CUMULATIVE: each strategy counted for ALL thresholds it violates (like PARAMETRIC)
+        fail_reasons_result = session.execute(
+            text("""
+                SELECT
+                    COALESCE(SUM((event_data->'fail_types'->>'sharpe')::int), 0) as fail_sharpe,
+                    COALESCE(SUM((event_data->'fail_types'->>'wr')::int), 0) as fail_wr,
+                    COALESCE(SUM((event_data->'fail_types'->>'exp')::int), 0) as fail_exp,
+                    COALESCE(SUM((event_data->'fail_types'->>'dd')::int), 0) as fail_dd,
+                    COALESCE(SUM((event_data->'fail_types'->>'trades')::int), 0) as fail_trades
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'backtest'
+                  AND event_type = 'is_failed'
+                  AND event_data->'fail_types' IS NOT NULL
+            """),
+            {'since': since}
+        ).first()
+
+        fail_reasons = {
+            'sharpe': int(fail_reasons_result[0]) if fail_reasons_result else 0,
+            'wr': int(fail_reasons_result[1]) if fail_reasons_result else 0,
+            'exp': int(fail_reasons_result[2]) if fail_reasons_result else 0,
+            'dd': int(fail_reasons_result[3]) if fail_reasons_result else 0,
+            'trades': int(fail_reasons_result[4]) if fail_reasons_result else 0,
+        }
+
+        total_count = passed_count + failed_count
+
+        return {
+            'count': total_count,
+            'passed': passed_count,
+            'failed': failed_count,
+            'passed_avg': passed_avg,
+            'failed_avg': failed_avg,
+            'fail_reasons': fail_reasons,
+            'avg_duration_ms': is_avg_duration_ms,
+        }
+
+    def _get_oos_stats_24h(self, session, since: datetime) -> Dict[str, Any]:
+        """
+        Get OUT-OF-SAMPLE validation statistics for last 24h.
+
+        Combines:
+        - BacktestResult (strategies that passed OOS validation)
+        - oos_failed events (strategies that failed OOS validation)
+
+        Returns passed/failed counts, avg metrics for each, and fail reasons.
+        """
+        # Passed strategies: from BacktestResult (OOS period)
+        passed_result = session.execute(
+            select(
+                func.count(BacktestResult.id),
+                func.avg(BacktestResult.sharpe_ratio),
+                func.avg(BacktestResult.win_rate),
+                func.avg(BacktestResult.expectancy),
+                func.avg(BacktestResult.total_trades),
+                func.avg(BacktestResult.max_drawdown),
+            )
+            .where(and_(
+                BacktestResult.period_type == 'out_of_sample',
+                BacktestResult.created_at >= since
+            ))
+        ).first()
+
+        passed_count = passed_result[0] if passed_result else 0
+        passed_avg = {
+            'sharpe': float(passed_result[1]) if passed_result and passed_result[1] else None,
+            'wr': float(passed_result[2]) if passed_result and passed_result[2] else None,
+            'exp': float(passed_result[3]) if passed_result and passed_result[3] else None,
+            'trades': float(passed_result[4]) if passed_result and passed_result[4] else None,
+            'dd': float(passed_result[5]) if passed_result and passed_result[5] else None,
+        }
+
+        # Failed strategies: from oos_failed events (includes OOS metrics now)
+        # Exclude old events where IS failures were incorrectly logged as oos_failed
+        # (before is_failed event type was introduced)
+        failed_result = session.execute(
+            text("""
+                SELECT
+                    COUNT(*),
+                    AVG((event_data->>'oos_sharpe')::float),
+                    AVG((event_data->>'oos_win_rate')::float),
+                    AVG((event_data->>'oos_expectancy')::float),
+                    AVG((event_data->>'oos_trades')::float),
+                    AVG((event_data->>'oos_max_drawdown')::float),
+                    AVG(duration_ms)
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'backtest'
+                  AND event_type = 'oos_failed'
+                  AND event_data->>'reason' NOT LIKE 'IS %'
+            """),
+            {'since': since}
+        ).first()
+
+        failed_count = failed_result[0] if failed_result else 0
+        failed_avg = {
+            'sharpe': float(failed_result[1]) if failed_result and failed_result[1] else None,
+            'wr': float(failed_result[2]) if failed_result and failed_result[2] else None,
+            'exp': float(failed_result[3]) if failed_result and failed_result[3] else None,
+            'trades': float(failed_result[4]) if failed_result and failed_result[4] else None,
+            'dd': float(failed_result[5]) if failed_result and failed_result[5] else None,
+        }
+
+        # Average timing from ALL OOS events (both passed and failed)
+        oos_timing_result = session.execute(
+            text("""
+                SELECT AVG(duration_ms)
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'backtest'
+                  AND event_type IN ('oos_passed', 'oos_failed')
+                  AND duration_ms IS NOT NULL
+            """),
+            {'since': since}
+        ).scalar()
+        oos_avg_duration_ms = float(oos_timing_result) if oos_timing_result else None
+
+        # Fail reasons breakdown (from fail_types dict in oos_failed events)
+        # CUMULATIVE: each strategy counted for ALL thresholds it violates (like PARAMETRIC)
+        fail_reasons_result = session.execute(
+            text("""
+                SELECT
+                    COALESCE(SUM((event_data->'fail_types'->>'sharpe')::int), 0) as fail_sharpe,
+                    COALESCE(SUM((event_data->'fail_types'->>'wr')::int), 0) as fail_wr,
+                    COALESCE(SUM((event_data->'fail_types'->>'exp')::int), 0) as fail_exp,
+                    COALESCE(SUM((event_data->'fail_types'->>'dd')::int), 0) as fail_dd,
+                    COALESCE(SUM((event_data->'fail_types'->>'trades')::int), 0) as fail_trades,
+                    COALESCE(SUM((event_data->'fail_types'->>'degradation')::int), 0) as fail_degradation
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'backtest'
+                  AND event_type = 'oos_failed'
+                  AND event_data->'fail_types' IS NOT NULL
+            """),
+            {'since': since}
+        ).first()
+
+        fail_reasons = {
+            'sharpe': int(fail_reasons_result[0]) if fail_reasons_result else 0,
+            'wr': int(fail_reasons_result[1]) if fail_reasons_result else 0,
+            'exp': int(fail_reasons_result[2]) if fail_reasons_result else 0,
+            'dd': int(fail_reasons_result[3]) if fail_reasons_result else 0,
+            'trades': int(fail_reasons_result[4]) if fail_reasons_result else 0,
+            'degradation': int(fail_reasons_result[5]) if fail_reasons_result else 0,
+        }
+
+        # Get degradation stats for passed strategies (from IS rows)
         # recency_ratio = 1 - degradation, so degradation = 1 - recency_ratio
-        degrad_result = session.execute(
+        passed_degrad_result = session.execute(
             select(
                 func.avg(1 - BacktestResult.recency_ratio),
                 func.sum(func.cast(BacktestResult.recency_ratio >= 1.0, Integer)),
@@ -1084,27 +1447,64 @@ class MetricsCollector:
             ))
         ).first()
 
+        p_degrad = float(passed_degrad_result[0]) if passed_degrad_result and passed_degrad_result[0] else 0
+        p_better = int(passed_degrad_result[1]) if passed_degrad_result and passed_degrad_result[1] else 0
+        p_worse = int(passed_degrad_result[2]) if passed_degrad_result and passed_degrad_result[2] else 0
+
+        total_count = passed_count + failed_count
+
+        # Calculate avg degradation (only for passed, since failed have fail_type=degradation tracked)
+        avg_degradation = p_degrad if passed_count > 0 else None
+
         return {
-            'count': oos_count,
-            'avg_degradation': float(degrad_result[0]) if degrad_result and degrad_result[0] else None,
-            'oos_better': int(degrad_result[1]) if degrad_result and degrad_result[1] else 0,
-            'oos_worse': int(degrad_result[2]) if degrad_result and degrad_result[2] else 0,
+            'count': total_count,
+            'passed': passed_count,
+            'failed': failed_count,
+            'passed_avg': passed_avg,
+            'failed_avg': failed_avg,
+            'fail_reasons': fail_reasons,
+            'avg_degradation': avg_degradation,
+            'oos_better': p_better,
+            'oos_worse': p_worse,
+            'avg_duration_ms': oos_avg_duration_ms,
         }
 
     def _get_score_stats_24h(self, session, since: datetime) -> Dict[str, Any]:
-        """Get score calculation statistics for last 24h."""
-        # Get score distribution from strategies that passed score check
+        """Get score calculation statistics for last 24h.
+
+        Includes ALL scored strategies (both passed and failed min_score threshold).
+        Sources:
+        - shuffle_test.started: strategies that passed score threshold
+        - backtest.score_rejected: strategies that failed score threshold
+        """
+        # Query combines both passed (shuffle_test.started) and failed (score_rejected)
         result = session.execute(
             text("""
+                WITH all_scores AS (
+                    -- Strategies that passed score threshold (went to shuffle test)
+                    SELECT (event_data->>'score')::float as score
+                    FROM strategy_events
+                    WHERE timestamp >= :since
+                      AND stage = 'shuffle_test'
+                      AND event_type = 'started'
+                      AND event_data->>'score' IS NOT NULL
+
+                    UNION ALL
+
+                    -- Strategies that failed score threshold (score_rejected event)
+                    SELECT (event_data->>'score')::float as score
+                    FROM strategy_events
+                    WHERE timestamp >= :since
+                      AND stage = 'backtest'
+                      AND event_type = 'score_rejected'
+                      AND event_data->>'score' IS NOT NULL
+                )
                 SELECT
-                    MIN((event_data->>'score')::float) as min_score,
-                    MAX((event_data->>'score')::float) as max_score,
-                    AVG((event_data->>'score')::float) as avg_score
-                FROM strategy_events
-                WHERE timestamp >= :since
-                  AND stage = 'shuffle_test'
-                  AND event_type = 'started'
-                  AND event_data->>'score' IS NOT NULL
+                    MIN(score) as min_score,
+                    MAX(score) as max_score,
+                    AVG(score) as avg_score
+                FROM all_scores
+                WHERE score IS NOT NULL
             """),
             {'since': since}
         ).first()
@@ -1317,7 +1717,7 @@ class MetricsCollector:
         pool_by_source: Dict[str, int],
         retest_stats: Dict[str, Any],
         live_stats: Dict[str, Any],
-        threshold_breakdown: Dict[str, int],
+        combo_stats: Dict[str, Any],
     ) -> None:
         """
         Log metrics following the 10-step pipeline structure.
@@ -1348,6 +1748,12 @@ class MetricsCollector:
                 return "--"
             return f"{val*100:.0f}%"
 
+        def fmt_pct_exp(val: Optional[float]) -> str:
+            """Format expectancy as percentage (0.0020 -> 0.20%)"""
+            if val is None:
+                return "--"
+            return f"{val*100:.2f}%"
+
         # === STATUS ===
         if issue:
             logger.info(f'=== PIPELINE STATUS: {status} ({issue}) ===')
@@ -1365,9 +1771,10 @@ class MetricsCollector:
         gen_timing = generator_stats['timing_by_source']
 
         src_pattern = gen_by_source.get('pattern', 0)
+        src_unger = gen_by_source.get('unger', 0)
         src_ai_free = gen_by_source.get('ai_free', 0)
         src_ai_assigned = gen_by_source.get('ai_assigned', 0)
-        logger.info(f'[1/10 GENERATOR] 24h: {gen_total} strategies | pattern={src_pattern}, ai_free={src_ai_free}, ai_assigned={src_ai_assigned}')
+        logger.info(f'[1/10 GENERATOR] 24h: {gen_total} strategies | pattern={src_pattern}, unger={src_unger}, ai_free={src_ai_free}, ai_assigned={src_ai_assigned}')
 
         type_parts = [f'{t}={c}' for t, c in sorted(gen_by_type.items()) if c > 0]
         type_str = ', '.join(type_parts) if type_parts else '--'
@@ -1389,19 +1796,18 @@ class MetricsCollector:
         pat_unique = unused_patterns.get('unique_used', 0)
         pat_total = unused_patterns.get('total_available')
         pat_remaining = unused_patterns.get('remaining')
-        pat_in_db = unused_patterns.get('strategies_in_db', 0)
         if pat_total is not None:
-            # Format: "33 base patterns -> 79 strategies | 0 unused"
-            unused_str = f" | {pat_remaining} unused" if pat_remaining and pat_remaining > 0 else ""
-            logger.info(f'[1/10 GENERATOR] patterns: {pat_unique} base -> {pat_in_db} strategies{unused_str}')
+            # Format: "24 used | 9 remaining (33 tier1 available)"
+            logger.info(f'[1/10 GENERATOR] patterns: {pat_unique} used | {pat_remaining} remaining ({pat_total} tier1 available)')
         else:
-            logger.info(f'[1/10 GENERATOR] patterns: {pat_unique} base -> {pat_in_db} strategies')
+            logger.info(f'[1/10 GENERATOR] patterns: {pat_unique} used')
 
         time_pattern = fmt_time(gen_timing.get('pattern'))
+        time_unger = fmt_time(gen_timing.get('unger'))
         time_ai_free = fmt_time(gen_timing.get('ai_free'))
         time_ai_assigned = fmt_time(gen_timing.get('ai_assigned'))
         gen_failures = generator_stats.get('gen_failures', 0)
-        logger.info(f'[1/10 GENERATOR] timing: pattern={time_pattern}, ai_free={time_ai_free}, ai_assigned={time_ai_assigned} | failures: {gen_failures}')
+        logger.info(f'[1/10 GENERATOR] timing: pattern={time_pattern}, unger={time_unger}, ai_free={time_ai_free}, ai_assigned={time_ai_assigned} | failures: {gen_failures}')
 
         # =====================================================================
         # [2/10 VALIDATOR]
@@ -1422,78 +1828,197 @@ class MetricsCollector:
         # =====================================================================
         # [3/10 PARAMETRIC]
         # =====================================================================
-        v = queue_depths.get('VALIDATED', 0)
         bt_waiting = backpressure["bt_waiting"]
         bt_processing = backpressure["bt_processing"]
-        combinations = funnel["combinations_tested"]
-        param_failed = funnel["parametric_failed"]
-        bases_with_output = funnel["bases_with_output"]
-        param_passed = funnel["parametric_passed"]
 
-        if bases_with_output > 0:
-            strategies_per_base = f"{param_passed / bases_with_output:.1f}"
-        elif param_passed > 0:
-            estimated_bases = max(1, param_passed // 6)
-            strategies_per_base = f"~{param_passed / estimated_bases:.1f}"
-        else:
-            strategies_per_base = "--"
-
-        total_bases = param_failed + (bases_with_output or 0)
         logger.info(f'[3/10 PARAMETRIC] queue: {bt_waiting} waiting, {bt_processing} running')
-        logger.info(f'[3/10 PARAMETRIC] 24h: {total_bases} bases tested, {combinations} combos')
 
-        # Show threshold breakdown if available
-        if threshold_breakdown:
-            tb_total = threshold_breakdown.get('total', 0)
-            if tb_total > 0:
-                def tb_pct(n: int) -> str:
-                    return f"{100*n//tb_total}%" if tb_total > 0 else "--"
-                ft = threshold_breakdown.get('fail_trades', 0)
-                fs = threshold_breakdown.get('fail_sharpe', 0)
-                fw = threshold_breakdown.get('fail_wr', 0)
-                fe = threshold_breakdown.get('fail_exp', 0)
-                fd = threshold_breakdown.get('fail_dd', 0)
-                logger.info(f'[3/10 PARAMETRIC] threshold_filter (combos):')
-                logger.info(f'[3/10 PARAMETRIC]   trades<10: {ft} ({tb_pct(ft)}) | sharpe<0.3: {fs} ({tb_pct(fs)})')
-                logger.info(f'[3/10 PARAMETRIC]   wr<0.35: {fw} ({tb_pct(fw)}) | exp<0.002: {fe} ({tb_pct(fe)}) | dd>0.5: {fd} ({tb_pct(fd)})')
+        if combo_stats:
+            total_combos = combo_stats.get('total_combos', 0)
+            passed_combos = combo_stats.get('passed_combos', 0)
+            failed_combos = combo_stats.get('failed_combos', 0)
+            total_bases = combo_stats.get('total_bases', 0)
+            bases_passed = combo_stats.get('bases_with_passed', 0)
+            bases_failed = combo_stats.get('bases_with_failed', 0)
 
-        logger.info(f'[3/10 PARAMETRIC] passed: {bases_with_output or 0} bases -> {param_passed} strategies ({strategies_per_base}/base)')
-        logger.info(f'[3/10 PARAMETRIC] timing: {fmt_time(timing.get("backtest"))}/base | failures: {param_failed}')
+            logger.info(f'[3/10 PARAMETRIC] 24h: {total_bases} bases, {total_combos} combos tested')
+            logger.info(f'[3/10 PARAMETRIC] bases with passed combos: {bases_passed}')
+            logger.info(f'[3/10 PARAMETRIC] bases with failed combos: {bases_failed}')
+
+            # Failed combos stats
+            if total_combos > 0:
+                failed_pct = 100 * failed_combos // total_combos
+                logger.info(f'[3/10 PARAMETRIC] combos failed: {failed_combos} ({failed_pct}% of {total_combos})')
+
+                fa = combo_stats.get('failed_avg', {})
+                if failed_combos > 0:
+                    logger.info(
+                        f"[3/10 PARAMETRIC] combos failed avg: "
+                        f"sharpe={fa.get('sharpe', 0):.2f}, "
+                        f"wr={fa.get('wr', 0)*100:.0f}%, "
+                        f"exp={fa.get('exp', 0)*100:.2f}%, "
+                        f"trades={fa.get('trades', 0):.0f}"
+                    )
+
+                # Fail reasons (CUMULATIVE - count and % of failed combos that violated each threshold)
+                fr = combo_stats.get('fail_reasons', {})
+                if failed_combos > 0:
+                    def fr_fmt(n: int) -> str:
+                        pct = 100 * n // failed_combos if failed_combos > 0 else 0
+                        return f"{n} ({pct}%)"
+                    logger.info(
+                        f"[3/10 PARAMETRIC] fail reasons: "
+                        f"sharpe: {fr_fmt(fr.get('sharpe', 0))}, "
+                        f"trades: {fr_fmt(fr.get('trades', 0))}, "
+                        f"wr: {fr_fmt(fr.get('wr', 0))}, "
+                        f"exp: {fr_fmt(fr.get('exp', 0))}, "
+                        f"dd: {fr_fmt(fr.get('dd', 0))}"
+                    )
+
+                # Passed combos stats
+                passed_pct = 100 * passed_combos // total_combos
+                logger.info(f'[3/10 PARAMETRIC] combos passed: {passed_combos} ({passed_pct}% of {total_combos})')
+
+                pa = combo_stats.get('passed_avg', {})
+                if passed_combos > 0:
+                    logger.info(
+                        f"[3/10 PARAMETRIC] combos passed avg: "
+                        f"sharpe={pa.get('sharpe', 0):.2f}, "
+                        f"wr={pa.get('wr', 0)*100:.0f}%, "
+                        f"exp={pa.get('exp', 0)*100:.2f}%, "
+                        f"trades={pa.get('trades', 0):.0f}"
+                    )
+
+            # Timing per base
+            param_timing = fmt_time(combo_stats.get('avg_duration_ms'))
+            logger.info(f'[3/10 PARAMETRIC] timing: {param_timing} per base')
+        else:
+            # No combo_stats available yet
+            combinations = funnel["combinations_tested"]
+            logger.info(f'[3/10 PARAMETRIC] 24h: -- bases, {combinations} combos (no stats yet)')
 
         # =====================================================================
         # [4/10 IS_BACKTEST]
         # =====================================================================
         is_count = is_stats.get('count', 0)
-        is_sharpe = fmt_float(is_stats.get('avg_sharpe'))
-        is_wr = fmt_pct_float(is_stats.get('avg_wr'))
-        is_exp = fmt_float(is_stats.get('avg_exp'), 3) if is_stats.get('avg_exp') else "--"
-        is_trades = fmt_float(is_stats.get('avg_trades'), 0) if is_stats.get('avg_trades') else "--"
+        is_passed = is_stats.get('passed', 0)
+        is_failed = is_stats.get('failed', 0)
+
+        is_passed_pct = int(100 * is_passed // is_count) if is_count > 0 else 0
+        is_failed_pct = int(100 * is_failed // is_count) if is_count > 0 else 0
 
         logger.info(f'[4/10 IS_BACKTEST] 24h: {is_count} strategies tested')
-        logger.info(f'[4/10 IS_BACKTEST] metrics: sharpe={is_sharpe}, wr={is_wr}, exp={is_exp}, trades={is_trades}')
+        logger.info(f'[4/10 IS_BACKTEST] passed: {is_passed} ({is_passed_pct}%)')
+
+        # Passed avg
+        is_pa = is_stats.get('passed_avg', {})
+        is_pa_sharpe = fmt_float(is_pa.get('sharpe'))
+        is_pa_wr = fmt_pct_float(is_pa.get('wr'))
+        is_pa_exp = fmt_pct_exp(is_pa.get('exp'))
+        is_pa_trades = fmt_float(is_pa.get('trades'), 0) if is_pa.get('trades') else "--"
+        logger.info(f'[4/10 IS_BACKTEST] passed avg: sharpe={is_pa_sharpe}, wr={is_pa_wr}, exp={is_pa_exp}, trades={is_pa_trades}')
+
+        logger.info(f'[4/10 IS_BACKTEST] failed: {is_failed} ({is_failed_pct}%)')
+
+        # Failed avg
+        is_fa = is_stats.get('failed_avg', {})
+        is_fa_sharpe = fmt_float(is_fa.get('sharpe'))
+        is_fa_wr = fmt_pct_float(is_fa.get('wr'))
+        is_fa_exp = fmt_pct_exp(is_fa.get('exp'))
+        is_fa_trades = fmt_float(is_fa.get('trades'), 0) if is_fa.get('trades') else "--"
+        logger.info(f'[4/10 IS_BACKTEST] failed avg: sharpe={is_fa_sharpe}, wr={is_fa_wr}, exp={is_fa_exp}, trades={is_fa_trades}')
+
+        # Fail reasons (count and % of failed strategies that violated each threshold)
+        is_fr = is_stats.get('fail_reasons', {})
+        if is_failed > 0:
+            def is_fr_fmt(n: int) -> str:
+                pct = 100 * n // is_failed if is_failed > 0 else 0
+                return f"{n} ({pct}%)"
+            logger.info(
+                f"[4/10 IS_BACKTEST] fail reasons: "
+                f"sharpe: {is_fr_fmt(is_fr.get('sharpe', 0))}, "
+                f"wr: {is_fr_fmt(is_fr.get('wr', 0))}, "
+                f"exp: {is_fr_fmt(is_fr.get('exp', 0))}, "
+                f"dd: {is_fr_fmt(is_fr.get('dd', 0))}, "
+                f"trades: {is_fr_fmt(is_fr.get('trades', 0))}"
+            )
+
+        # Timing (from failed strategies only - passed go to OOS without separate event)
+        is_timing = fmt_time(is_stats.get('avg_duration_ms'))
+        logger.info(f'[4/10 IS_BACKTEST] timing: {is_timing} avg')
 
         # =====================================================================
         # [5/10 OOS_BACKTEST]
         # =====================================================================
         oos_count = oos_stats.get('count', 0)
+        oos_passed = oos_stats.get('passed', 0)
+        oos_failed = oos_stats.get('failed', 0)
+
+        oos_passed_pct = int(100 * oos_passed // oos_count) if oos_count > 0 else 0
+        oos_failed_pct = int(100 * oos_failed // oos_count) if oos_count > 0 else 0
+
+        logger.info(f'[5/10 OOS_BACKTEST] 24h: {oos_count} strategies tested')
+        logger.info(f'[5/10 OOS_BACKTEST] passed: {oos_passed} ({oos_passed_pct}%)')
+
+        # Passed avg
+        oos_pa = oos_stats.get('passed_avg', {})
+        oos_pa_sharpe = fmt_float(oos_pa.get('sharpe'))
+        oos_pa_wr = fmt_pct_float(oos_pa.get('wr'))
+        oos_pa_exp = fmt_pct_exp(oos_pa.get('exp'))
+        oos_pa_trades = fmt_float(oos_pa.get('trades'), 0) if oos_pa.get('trades') else "--"
+        logger.info(f'[5/10 OOS_BACKTEST] passed avg: sharpe={oos_pa_sharpe}, wr={oos_pa_wr}, exp={oos_pa_exp}, trades={oos_pa_trades}')
+
+        logger.info(f'[5/10 OOS_BACKTEST] failed: {oos_failed} ({oos_failed_pct}%)')
+
+        # Failed avg
+        oos_fa = oos_stats.get('failed_avg', {})
+        oos_fa_sharpe = fmt_float(oos_fa.get('sharpe'))
+        oos_fa_wr = fmt_pct_float(oos_fa.get('wr'))
+        oos_fa_exp = fmt_pct_exp(oos_fa.get('exp'))
+        oos_fa_trades = fmt_float(oos_fa.get('trades'), 0) if oos_fa.get('trades') else "--"
+        logger.info(f'[5/10 OOS_BACKTEST] failed avg: sharpe={oos_fa_sharpe}, wr={oos_fa_wr}, exp={oos_fa_exp}, trades={oos_fa_trades}')
+
+        # Fail reasons (count and % of failed strategies that violated each threshold)
+        oos_fr = oos_stats.get('fail_reasons', {})
+        if oos_failed > 0:
+            def oos_fr_fmt(n: int) -> str:
+                pct = 100 * n // oos_failed if oos_failed > 0 else 0
+                return f"{n} ({pct}%)"
+            logger.info(
+                f"[5/10 OOS_BACKTEST] fail reasons: "
+                f"sharpe: {oos_fr_fmt(oos_fr.get('sharpe', 0))}, "
+                f"wr: {oos_fr_fmt(oos_fr.get('wr', 0))}, "
+                f"exp: {oos_fr_fmt(oos_fr.get('exp', 0))}, "
+                f"dd: {oos_fr_fmt(oos_fr.get('dd', 0))}, "
+                f"trades: {oos_fr_fmt(oos_fr.get('trades', 0))}, "
+                f"degradation: {oos_fr_fmt(oos_fr.get('degradation', 0))}"
+            )
+
+        # Degradation summary (for passed strategies)
         avg_degrad = oos_stats.get('avg_degradation')
         oos_better = oos_stats.get('oos_better', 0)
         oos_worse = oos_stats.get('oos_worse', 0)
+        if oos_passed > 0 and avg_degrad is not None:
+            # performance_change = -degradation (positive = OOS better than IS)
+            perf_change = -avg_degrad * 100
+            perf_str = f"{perf_change:+.0f}%"  # +100% or -50%
+            logger.info(f'[5/10 OOS_BACKTEST] passed performance_change: {perf_str} | oos_better={oos_better}, oos_worse={oos_worse}')
 
-        degrad_str = f"{avg_degrad*100:.0f}%" if avg_degrad is not None else "--"
-        logger.info(f'[5/10 OOS_BACKTEST] 24h: {oos_count} strategies tested')
-        logger.info(f'[5/10 OOS_BACKTEST] degradation: {degrad_str} | oos_better={oos_better}, oos_worse={oos_worse}')
+        # Timing (from failed strategies only - passed continue to scoring)
+        oos_timing = fmt_time(oos_stats.get('avg_duration_ms'))
+        logger.info(f'[5/10 OOS_BACKTEST] timing: {oos_timing} avg')
 
         # =====================================================================
         # [6/10 SCORE]
         # =====================================================================
+        param_scored = funnel["parametric_scored"]  # Strategies that passed OOS
         score_ok = funnel["score_ok"]
         score_rejected = failures["score_reject"]
         min_score = fmt_float(score_stats.get('min_score'))
         max_score = fmt_float(score_stats.get('max_score'))
         avg_score = fmt_float(score_stats.get('avg_score'))
 
-        logger.info(f'[6/10 SCORE] 24h: {score_ok}/{param_passed} passed min_score={self.pool_min_score} ({fmt_pct(funnel["score_ok_pct"])})')
+        logger.info(f'[6/10 SCORE] 24h: {score_ok}/{param_scored} passed min_score={self.pool_min_score} ({fmt_pct(funnel["score_ok_pct"])})')
         logger.info(f'[6/10 SCORE] range: {min_score} to {max_score} (avg {avg_score}) | rejected: {score_rejected}')
 
         # =====================================================================
@@ -1529,8 +2054,9 @@ class MetricsCollector:
         pool_optimized = pool_by_source.get('optimized', 0)
         pool_entered = funnel["pool"]
 
+        pool_unger = pool_by_source.get('unger', 0)
         logger.info(f'[9/10 POOL] size: {pool_size}/{pool_limit} | 24h_added: {pool_entered}')
-        logger.info(f'[9/10 POOL] sources: pattern={pool_pattern}, ai_free={pool_ai_free}, ai_assigned={pool_ai_assigned}, optimized={pool_optimized}')
+        logger.info(f'[9/10 POOL] sources: pattern={pool_pattern}, unger={pool_unger}, ai_free={pool_ai_free}, ai_assigned={pool_ai_assigned}, optimized={pool_optimized}')
         logger.info(f'[9/10 POOL] scores: {fmt_float(pool_stats["score_min"])} to {fmt_float(pool_stats["score_max"])} (avg {fmt_float(pool_stats["score_avg"])})')
 
         expectancy_str = f'{pool_quality["expectancy_avg"]*100:.1f}%' if pool_quality["expectancy_avg"] else "--"

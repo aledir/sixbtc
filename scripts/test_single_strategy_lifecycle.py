@@ -215,10 +215,16 @@ def instantiate_strategy(code: str, strategy_name: str):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        # Find the strategy class
+        # Find the strategy class (all prefixes)
         for name in dir(module):
             obj = getattr(module, name)
-            if isinstance(obj, type) and name.startswith('Strategy_'):
+            if isinstance(obj, type) and (
+                name.startswith('Strategy_') or
+                name.startswith('PatStrat_') or
+                name.startswith('UngStrat_') or
+                name.startswith('AIFStrat_') or
+                name.startswith('AIAStrat_')
+            ):
                 return obj()
 
         return None
