@@ -331,7 +331,9 @@ class ContinuousGeneratorProcess:
         Check if should use Unger regime-based generation.
 
         Returns:
-            (use_unger, regime_type) tuple
+            (use_unger, regime_type) tuple.
+            If no regime coins available, returns (True, None) to let
+            the generator use its internal fallback to all tradeable coins.
         """
         if not self._is_source_enabled('unger'):
             return (False, None)
@@ -358,12 +360,15 @@ class ContinuousGeneratorProcess:
                 )
                 return (True, regime_type)
 
+            # No regime coins, but generator has fallback to all tradeable coins
+            logger.info("No regime coins, Unger will use all tradeable coins fallback")
+            return (True, None)
+
         except Exception as e:
             logger.warning(f"Unger check failed: {e}")
+            return (False, None)
 
-        return (False, None)
-
-    def _generate_unger_batch(self, timeframe: str, regime_type: str) -> Tuple[bool, int, str]:
+    def _generate_unger_batch(self, timeframe: str, regime_type: Optional[str]) -> Tuple[bool, int, str]:
         """
         Generate Unger v2 strategies for given regime type.
 
@@ -373,20 +378,46 @@ class ContinuousGeneratorProcess:
         - 11 exit mechanisms
         - ~15-30M possible strategies
 
+        When genetic mode is enabled and ACTIVE pool is sufficient,
+        uses ratio to mix smart (random combination) and genetic (crossover/mutation).
+
         Args:
             timeframe: Target timeframe
-            regime_type: 'TREND' or 'REVERSAL'
+            regime_type: 'TREND', 'REVERSAL', or None (uses all tradeable coins)
 
         Returns:
             (success, count, template_id) tuple
         """
         try:
-            from src.generator.unger import UngerGenerator
+            from src.generator.unger import UngerGenerator, GeneticUngerGenerator
 
             gen_start = time.time()
+
+            # Check if genetic mode should be used
+            use_genetic = self._should_use_unger_genetic()
+
+            if use_genetic:
+                # Use genetic generator (evolves from ACTIVE pool)
+                genetic_gen = GeneticUngerGenerator(self.config)
+                direction = random.choice(['long', 'short'])
+
+                results = genetic_gen.generate(
+                    timeframe=timeframe,
+                    direction=direction,
+                    count=1
+                )
+
+                if results:
+                    gen_duration_ms = int((time.time() - gen_start) * 1000)
+                    return self._save_unger_results(results, gen_duration_ms, is_genetic=True)
+
+                # Fallback to smart if genetic failed (empty pool, etc.)
+                logger.debug("Genetic generation returned no results, falling back to smart")
+
+            # Smart mode: random combination from catalog
             unger_gen = UngerGenerator(self.config)
 
-            # Generate one strategy for the regime
+            # Generate one strategy for the regime (None = mixed/all coins fallback)
             results = unger_gen.generate(
                 timeframe=timeframe,
                 regime_type=regime_type,
@@ -396,44 +427,121 @@ class ContinuousGeneratorProcess:
             gen_duration_ms = int((time.time() - gen_start) * 1000)
 
             if not results:
-                logger.debug(f"No Unger strategy generated for {regime_type}")
+                logger.debug(f"No Unger strategy generated for {regime_type or 'MIXED'}")
                 return (False, 0, "no_results")
 
-            # Save strategies
-            saved_count = 0
-            for result in results:
-                # UngStrat_ prefix for Unger-generated strategies
-                strategy_name = f"UngStrat_{result.strategy_type}_{result.strategy_id}"
-
-                self._save_to_database(
-                    name=strategy_name,
-                    strategy_type=result.strategy_type,
-                    timeframe=result.timeframe,
-                    code=result.code,
-                    ai_provider="unger",
-                    pattern_based=False,
-                    pattern_ids=[],
-                    template_id=None,
-                    parameters=result.parameters,
-                    pattern_coins=result.pattern_coins,
-                    base_code_hash=result.base_code_hash,
-                    generation_mode="unger",
-                    duration_ms=gen_duration_ms,
-                    leverage=None
-                )
-                saved_count += 1
-
-                logger.info(
-                    f"Saved UngStrat_{result.strategy_type}_{result.strategy_id} "
-                    f"({result.regime_type}, {len(result.pattern_coins)} coins, "
-                    f"entry={result.entry_name}, exit={result.exit_mechanism_name})"
-                )
-
-            return (True, saved_count, f"unger_{regime_type}")
+            return self._save_unger_results(results, gen_duration_ms, is_genetic=False)
 
         except Exception as e:
             logger.error(f"Unger generation error: {e}", exc_info=True)
             return (False, 0, str(e))
+
+    def _should_use_unger_genetic(self) -> bool:
+        """
+        Determine if genetic mode should be used for Unger generation.
+
+        Uses smart_ratio/genetic_ratio from config with probabilistic selection.
+        Requires sufficient ACTIVE pool of unger strategies.
+
+        Returns:
+            True if should use genetic mode this iteration
+        """
+        try:
+            unger_config = self.config.get('generation', {}).get('strategy_sources', {}).get('unger', {})
+            genetic_config = unger_config.get('genetic', {})
+
+            if not genetic_config.get('enabled', False):
+                return False
+
+            min_pool_size = genetic_config.get('min_pool_size', 50)
+            genetic_ratio = genetic_config.get('genetic_ratio', 0.30)
+
+            # Check ACTIVE pool size for unger strategies
+            from sqlalchemy import select, func
+            from src.database.models import Strategy
+            from src.database.connection import get_session
+
+            with get_session() as session:
+                pool_count = session.execute(
+                    select(func.count(Strategy.id)).where(
+                        Strategy.status == 'ACTIVE',
+                        Strategy.generation_mode == 'unger'
+                    )
+                ).scalar() or 0
+
+            if pool_count < min_pool_size:
+                return False
+
+            # Probabilistic selection based on ratio
+            return random.random() < genetic_ratio
+
+        except Exception as e:
+            logger.debug(f"Genetic check failed: {e}")
+            return False
+
+    def _save_unger_results(
+        self,
+        results: list,
+        gen_duration_ms: int,
+        is_genetic: bool
+    ) -> Tuple[bool, int, str]:
+        """
+        Save Unger generation results to database.
+
+        Args:
+            results: List of UngerGeneratedStrategy or UngerGeneticResult
+            gen_duration_ms: Generation duration in milliseconds
+            is_genetic: True if from genetic generator
+
+        Returns:
+            (success, count, source_name) tuple
+        """
+        saved_count = 0
+        for result in results:
+            # Determine prefix and mode based on genetic flag
+            if is_genetic:
+                prefix = "UggStrat"
+                gen_mode = "unger_genetic"
+            else:
+                prefix = "UngStrat"
+                gen_mode = "unger"
+
+            strategy_name = f"{prefix}_{result.strategy_type}_{result.strategy_id}"
+
+            self._save_to_database(
+                name=strategy_name,
+                strategy_type=result.strategy_type,
+                timeframe=result.timeframe,
+                code=result.code,
+                ai_provider="unger",
+                pattern_based=False,
+                pattern_ids=[],
+                template_id=None,
+                parameters=result.parameters,
+                pattern_coins=getattr(result, 'pattern_coins', None),
+                base_code_hash=result.base_code_hash,
+                generation_mode=gen_mode,
+                duration_ms=gen_duration_ms,
+                leverage=None
+            )
+            saved_count += 1
+
+            # Log with appropriate details
+            if is_genetic:
+                parent_ids = getattr(result, 'parent_ids', [])
+                logger.info(
+                    f"Saved {strategy_name} "
+                    f"(genetic, {result.direction}, parents={len(parent_ids)})"
+                )
+            else:
+                logger.info(
+                    f"Saved {strategy_name} "
+                    f"({result.regime_type}, {len(result.pattern_coins)} coins, "
+                    f"entry={result.entry_name}, exit={result.exit_mechanism_name})"
+                )
+
+        source_name = "unger_genetic" if is_genetic else "unger"
+        return (True, saved_count, source_name)
 
     async def run_continuous(self):
         """Main continuous generation loop with multi-level backpressure"""
@@ -586,8 +694,8 @@ class ContinuousGeneratorProcess:
         use_unger, regime_type = self._should_use_unger()
 
         if not use_unger:
-            logger.debug("No regime coins available, skipping unger source")
-            return (False, 0, "unger_no_coins")
+            logger.debug("Unger source disabled or unavailable")
+            return (False, 0, "unger_disabled")
 
         return self._generate_unger_batch(timeframe, regime_type)
 
@@ -823,11 +931,12 @@ class ContinuousGeneratorProcess:
                 continue
 
             # Determine prefix based on generation mode
-            # Pat = pattern, Ung = unger, AIF = ai_free, AIA = ai_assigned
+            # Pat = pattern, Ung = unger, Ugg = unger_genetic, AIF = ai_free, AIA = ai_assigned
             prefix_map = {
                 'pattern': 'PatStrat',
                 'pattern_gen': 'PGnStrat',
                 'unger': 'UngStrat',
+                'unger_genetic': 'UggStrat',
                 'ai_free': 'AIFStrat',
                 'ai_assigned': 'AIAStrat',
             }

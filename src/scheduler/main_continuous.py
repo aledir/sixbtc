@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Dict, List, Set
 
 from src.config import load_config
-from src.database import get_session, Strategy, StrategyProcessor
+from src.database import get_session, Strategy, StrategyEvent, StrategyProcessor
 from src.scheduler.task_tracker import track_task_execution
 from src.utils import get_logger, setup_logging
 
@@ -88,6 +88,20 @@ class ContinuousSchedulerProcess:
             self.tasks['cleanup_tmp_dir'] = tmp_config['interval_hours']
             self.cleanup_tmp_hour = tmp_config.get('run_hour', 5)
             self.cleanup_tmp_max_age = tmp_config.get('max_age_hours', 24)
+
+        # Cleanup old StrategyEvent records
+        events_config = scheduler_config.get('cleanup_old_events', {})
+        if events_config.get('enabled', False):
+            self.tasks['cleanup_old_events'] = events_config['interval_hours']
+            self.cleanup_events_hour = events_config.get('run_hour', 6)
+            self.cleanup_events_max_age_days = events_config.get('max_age_days', 7)
+
+        # Cleanup stale strategies (stuck in GENERATED/VALIDATED)
+        stale_config = scheduler_config.get('cleanup_stale_strategies', {})
+        if stale_config.get('enabled', False):
+            self.tasks['cleanup_stale_strategies'] = stale_config['interval_hours']
+            self.cleanup_stale_hour = stale_config.get('run_hour', 6)
+            self.cleanup_stale_max_age_days = stale_config.get('max_age_days', 1)
 
         # Market regime detection (Unger method)
         regime_config = self.config._raw_config.get('regime', {})
@@ -174,6 +188,14 @@ class ContinuousSchedulerProcess:
                 tracker.add_metadata('trend', result.get('trend', 0))
                 tracker.add_metadata('reversal', result.get('reversal', 0))
                 tracker.add_metadata('mixed', result.get('mixed', 0))
+
+            elif task_name == 'cleanup_old_events':
+                result = await self._cleanup_old_events()
+                tracker.add_metadata('deleted_count', result.get('deleted', 0))
+
+            elif task_name == 'cleanup_stale_strategies':
+                result = await self._cleanup_stale_strategies()
+                tracker.add_metadata('deleted_count', result.get('deleted', 0))
 
             else:
                 logger.warning(f"Unknown task: {task_name}")
@@ -640,6 +662,118 @@ class ContinuousSchedulerProcess:
         except Exception as e:
             logger.error(f"Market regime refresh failed: {e}")
             return {'trend': 0, 'reversal': 0, 'mixed': 0, 'reason': str(e)}
+
+    async def _cleanup_old_events(self) -> dict:
+        """
+        Clean up old StrategyEvent records.
+
+        Events are useful for debugging and pattern recycling but grow fast.
+        Deletes events older than max_age_days (configurable, default 7 days).
+
+        Only runs at the configured run_hour.
+        """
+        current_hour = datetime.now(UTC).hour
+        target_hour = getattr(self, 'cleanup_events_hour', 6)
+
+        if current_hour != target_hour:
+            logger.debug(
+                f"Skipping events cleanup: current hour {current_hour}, target {target_hour}"
+            )
+            return {'deleted': 0, 'reason': 'wrong_hour'}
+
+        max_age_days = getattr(self, 'cleanup_events_max_age_days', 7)
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+
+        try:
+            with get_session() as session:
+                # Count before delete for logging
+                old_events_count = (
+                    session.query(StrategyEvent)
+                    .filter(StrategyEvent.timestamp < cutoff)
+                    .count()
+                )
+
+                if old_events_count > 0:
+                    # Delete in batches to avoid long locks
+                    batch_size = 10000
+                    total_deleted = 0
+
+                    while True:
+                        deleted = (
+                            session.query(StrategyEvent)
+                            .filter(StrategyEvent.timestamp < cutoff)
+                            .limit(batch_size)
+                            .delete(synchronize_session=False)
+                        )
+                        session.commit()
+                        total_deleted += deleted
+
+                        if deleted < batch_size:
+                            break
+
+                    logger.info(
+                        f"Cleaned up {total_deleted} old strategy events "
+                        f"(older than {max_age_days} days)"
+                    )
+                    return {'deleted': total_deleted}
+                else:
+                    logger.debug("No old strategy events to clean")
+                    return {'deleted': 0}
+
+        except Exception as e:
+            logger.error(f"Events cleanup failed: {e}")
+            return {'deleted': 0, 'reason': str(e)}
+
+    async def _cleanup_stale_strategies(self) -> dict:
+        """
+        Clean up strategies stuck in intermediate states.
+
+        Strategies in GENERATED or VALIDATED that haven't been processed
+        for max_age_days are likely orphaned (validator/backtester crash, etc.).
+        Safe to delete as they will never be processed.
+
+        Only runs at the configured run_hour.
+        """
+        current_hour = datetime.now(UTC).hour
+        target_hour = getattr(self, 'cleanup_stale_hour', 6)
+
+        if current_hour != target_hour:
+            logger.debug(
+                f"Skipping stale cleanup: current hour {current_hour}, target {target_hour}"
+            )
+            return {'deleted': 0, 'reason': 'wrong_hour'}
+
+        max_age_days = getattr(self, 'cleanup_stale_max_age_days', 1)
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+
+        try:
+            with get_session() as session:
+                stale_strategies = (
+                    session.query(Strategy)
+                    .filter(
+                        Strategy.status.in_(['GENERATED', 'VALIDATED']),
+                        Strategy.created_at < cutoff
+                    )
+                    .all()
+                )
+
+                if stale_strategies:
+                    for s in stale_strategies:
+                        logger.debug(f"Deleting stale strategy: {s.name} (status={s.status})")
+                        session.delete(s)
+
+                    logger.info(
+                        f"Cleaned up {len(stale_strategies)} stale strategies "
+                        f"(GENERATED/VALIDATED older than {max_age_days} days)"
+                    )
+                    return {'deleted': len(stale_strategies)}
+                else:
+                    logger.debug("No stale strategies to clean")
+                    return {'deleted': 0}
+
+        except Exception as e:
+            logger.error(f"Stale strategies cleanup failed: {e}")
+            return {'deleted': 0, 'reason': str(e)}
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""

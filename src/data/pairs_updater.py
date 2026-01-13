@@ -378,7 +378,12 @@ class PairsUpdater:
             if not latest or not latest.updated_at:
                 return True
 
-            age_hours = (datetime.now(timezone.utc) - latest.updated_at).total_seconds() / 3600
+            # Ensure updated_at is timezone-aware (DB stores naive UTC)
+            updated_at = latest.updated_at
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+
+            age_hours = (datetime.now(timezone.utc) - updated_at).total_seconds() / 3600
             return age_hours > max_age_hours
 
 

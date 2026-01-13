@@ -2,7 +2,7 @@
 Pandas-TA Catalogs
 
 Exports:
-- Indicator registry (80+ pandas_ta indicators)
+- Indicator registry (149 pandas_ta indicators across 8 categories)
 - Condition types and templates
 - Compatibility matrices
 """

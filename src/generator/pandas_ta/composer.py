@@ -402,33 +402,11 @@ class PtaComposer:
         if not valid_conditions:
             valid_conditions = [ConditionType.THRESHOLD_BELOW, ConditionType.THRESHOLD_ABOVE]
 
-        # Filter conditions by direction
-        if direction == "LONG":
-            # For LONG: prefer threshold_below (oversold), crossed_above, slope_up
-            preferred = [
-                ct for ct in valid_conditions
-                if ct in (
-                    ConditionType.THRESHOLD_BELOW,
-                    ConditionType.CROSSED_ABOVE,
-                    ConditionType.SLOPE_UP,
-                )
-            ]
-            if preferred:
-                valid_conditions = preferred
-        elif direction == "SHORT":
-            # For SHORT: prefer threshold_above (overbought), crossed_below, slope_down
-            preferred = [
-                ct for ct in valid_conditions
-                if ct in (
-                    ConditionType.THRESHOLD_ABOVE,
-                    ConditionType.CROSSED_BELOW,
-                    ConditionType.SLOPE_DOWN,
-                )
-            ]
-            if preferred:
-                valid_conditions = preferred
+        # NOTE: Direction filtering REMOVED to explore all possibilities
+        # Let the backtest decide if unconventional combos work
+        # (e.g., LONG with RSI > 80 momentum continuation)
 
-        # Select condition type
+        # Select condition type (all valid conditions equally likely)
         condition_type = self._rng.choice(valid_conditions)
 
         # Resolve indicator parameters

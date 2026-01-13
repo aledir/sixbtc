@@ -142,6 +142,7 @@ class SyntaxValidator:
             # Validate class name format:
             # - PatStrat_TYPE_hash (e.g., PatStrat_MOM_abc123) - pattern-based
             # - UngStrat_TYPE_hash (e.g., UngStrat_CRS_abc123) - Unger regime-based
+            # - UggStrat_TYPE_hash (e.g., UggStrat_BRK_abc123) - Unger genetic
             # - AIFStrat_TYPE_hash (e.g., AIFStrat_MOM_abc123) - AI free
             # - AIAStrat_TYPE_hash (e.g., AIAStrat_REV_abc123) - AI assigned
             # - PGnStrat_TYPE_hash (e.g., PGnStrat_THR_abc123) - Pattern-gen smart
@@ -151,6 +152,7 @@ class SyntaxValidator:
             valid_formats = [
                 r'^PatStrat_[A-Z]+_[a-f0-9]+$',           # Pattern: PatStrat_MOM_abc123
                 r'^UngStrat_[A-Z]+_[a-f0-9]+$',           # Unger: UngStrat_CRS_abc123
+                r'^UggStrat_[A-Z]+_[a-f0-9]+$',           # Unger genetic: UggStrat_BRK_abc123
                 r'^AIFStrat_[A-Z]+_[a-f0-9]+$',           # AI Free: AIFStrat_MOM_abc123
                 r'^AIAStrat_[A-Z]+_[a-f0-9]+$',           # AI Assigned: AIAStrat_REV_abc123
                 r'^PGnStrat_[A-Z]+_[a-f0-9]+$',           # Pattern-gen smart: PGnStrat_THR_abc123
@@ -163,7 +165,7 @@ class SyntaxValidator:
             if not any(re.match(pattern, class_name) for pattern in valid_formats):
                 errors.append(
                     f"Invalid class name format: {class_name}. "
-                    "Expected: PatStrat_, UngStrat_, AIFStrat_, AIAStrat_, PGnStrat_, PGgStrat_, or PtaStrat_"
+                    "Expected: PatStrat_, UngStrat_, UggStrat_, AIFStrat_, AIAStrat_, PGnStrat_, PGgStrat_, or PtaStrat_"
                 )
 
         return class_name, errors

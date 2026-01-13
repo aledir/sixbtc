@@ -225,7 +225,12 @@ class UngerGenerator:
             try:
                 code = self._render_strategy(blueprint)
             except Exception as e:
-                logger.error(f"Failed to render strategy: {e}")
+                logger.error(
+                    f"Failed to render strategy: {e} | "
+                    f"entry={blueprint.entry_condition.id}, "
+                    f"filters={[f[0].id for f in blueprint.entry_filters]}, "
+                    f"exit={blueprint.exit_mechanism.id}"
+                )
                 continue
 
             # Build result
@@ -239,11 +244,23 @@ class UngerGenerator:
                 exit_mechanism_name=blueprint.exit_mechanism.name,
                 base_code_hash=blueprint.compute_hash(),
                 parameters={
+                    # Parameter values
                     'entry_params': blueprint.entry_params,
+                    'filter_params': [f[1] for f in blueprint.entry_filters],  # List of filter param dicts
                     'sl_params': blueprint.sl_params,
                     'tp_params': blueprint.tp_params,
                     'exit_params': blueprint.exit_params,
                     'trailing_params': blueprint.trailing_params,
+                    # Component IDs (for genetic operations)
+                    'entry_id': blueprint.entry_condition.id,
+                    'entry_category': blueprint.entry_condition.category,
+                    'filter_ids': [f[0].id for f in blueprint.entry_filters],
+                    'exit_mechanism_id': blueprint.exit_mechanism.id,
+                    'sl_config_id': blueprint.sl_config.id,
+                    'tp_config_id': blueprint.tp_config.id if blueprint.tp_config else None,
+                    'exit_condition_id': blueprint.exit_condition.id if blueprint.exit_condition else None,
+                    'trailing_config_id': blueprint.trailing_config.id if blueprint.trailing_config else None,
+                    'composition_type': 'unger',
                 },
                 regime_type=regime_type or 'MIXED',
                 pattern_num=0,
@@ -639,5 +656,8 @@ class UngerGenerator:
                 regime_type=regime_type,
             )
         except Exception as e:
-            logger.error(f"Failed to generate strategy for regime {regime_type}: {e}")
+            logger.error(
+                f"Failed to generate strategy for regime {regime_type}: {e} | "
+                f"entry={entry.id if entry else 'None'}, direction={direction}"
+            )
             return None

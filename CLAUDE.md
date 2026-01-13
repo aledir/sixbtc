@@ -520,12 +520,17 @@ The `generation_mode` field in the database tracks where each strategy came from
 
 **Config sources map 1:1 to generation_mode values:**
 
-| Config (strategy_sources) | generation_mode | Class Name | Description |
-|---------------------------|-----------------|------------|-------------|
-| `pattern` | `pattern` | `PatStrat_*` | From pattern-discovery API |
-| `ai_free` | `ai_free` | `Strategy_*` | AI freely chooses indicators |
-| `ai_assigned` | `ai_assigned` | `Strategy_*` | AI uses IndicatorCombinator-assigned indicators |
-| — | `optimized` | `Strategy_*` | Backtester parametric optimization output |
+| Config (strategy_sources) | generation_mode | Abbrev | Class Name | Description |
+|---------------------------|-----------------|--------|------------|-------------|
+| `pattern` | `pattern` | pat | `PatStrat_*` | From pattern-discovery API |
+| `pattern_gen` | `pattern_gen` | pgn | `PGnStrat_*` | Smart random composition |
+| `pattern_gen` (genetic) | `pattern_gen_genetic` | pgg | `PGgStrat_*` | Genetic evolution from pool |
+| `unger` | `unger` | ung | `UngStrat_*` | Regime-coherent (Unger method) |
+| `unger` (genetic) | `unger_genetic` | ugg | `UggStrat_*` | Genetic evolution from pool |
+| `pandas_ta` | `pandas_ta` | pta | `PtaStrat_*` | Pandas-TA indicator combinations |
+| `ai_free` | `ai_free` | aif | `AIFStrat_*` | AI freely chooses indicators |
+| `ai_assigned` | `ai_assigned` | aia | `AIAStrat_*` | AI uses IndicatorCombinator-assigned indicators |
+| — | `optimized` | — | `Strategy_*` | Backtester parametric optimization output |
 
 **Config example:**
 ```yaml

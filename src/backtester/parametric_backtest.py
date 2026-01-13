@@ -22,16 +22,181 @@ Usage:
 import itertools
 import logging
 from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 from numba import jit, prange
 
-from src.backtester.parametric_constants import PARAM_SPACE, LEVERAGE_VALUES
+from src.backtester.parametric_constants import (
+    PARAM_SPACE, LEVERAGE_VALUES,
+    ATR_SL_MULTIPLIERS, ATR_TP_MULTIPLIERS, RR_RATIOS,
+    TRAILING_STOP_PCTS, TRAILING_ACTIVATION_PCTS,
+    STRUCTURE_LOOKBACKS, BREAKEVEN_BUFFER,
+    TYPICAL_ATR_PCT, STRUCTURE_SL_ESTIMATE,
+)
+from src.backtester.numba_kernels import (
+    calculate_swing_low_high_numba,
+    calculate_atr_full_numba,
+    convert_sl_atr_to_pct_numba,
+    convert_tp_atr_to_pct_numba,
+    convert_tp_rr_to_pct_numba,
+    convert_sl_structure_to_pct_2d_numba,
+)
+from src.strategies.base import StopLossType, TakeProfitType
 from src.utils.risk_calculator import calculate_safe_leverage
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# PRE-CALCULATION FUNCTIONS (Python, called before Numba kernel)
+# =============================================================================
+
+def _calculate_atr_at_bars(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    period: int = 14
+) -> np.ndarray:
+    """
+    Calculate ATR for all bars/symbols using Numba-optimized kernel.
+
+    Args:
+        high: (n_bars, n_symbols) high prices
+        low: (n_bars, n_symbols) low prices
+        close: (n_bars, n_symbols) close prices
+        period: ATR period (default 14)
+
+    Returns:
+        atr: (n_bars, n_symbols) float64 - ATR values
+    """
+    return calculate_atr_full_numba(high, low, close, period)
+
+
+def _calculate_swing_low_high(
+    high: np.ndarray,
+    low: np.ndarray,
+    lookback: int = 10
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate swing low/high for structure-based SL using Numba-optimized kernel.
+
+    Args:
+        high: (n_bars, n_symbols) high prices
+        low: (n_bars, n_symbols) low prices
+        lookback: Number of bars to look back
+
+    Returns:
+        swing_low: (n_bars, n_symbols) - lowest low in lookback
+        swing_high: (n_bars, n_symbols) - highest high in lookback
+    """
+    return calculate_swing_low_high_numba(high, low, lookback)
+
+
+def _convert_sl_to_pct(
+    sl_type: StopLossType,
+    entries: np.ndarray,
+    close: np.ndarray,
+    directions: np.ndarray,
+    sl_pct: float = None,
+    atr: np.ndarray = None,
+    atr_multiplier: float = None,
+    swing_low: np.ndarray = None,
+    swing_high: np.ndarray = None,
+    trailing_pct: float = None,
+) -> np.ndarray:
+    """
+    Convert any SL type to percentage values per entry bar using Numba kernels.
+
+    Args:
+        sl_type: Type of stop loss
+        entries: (n_bars, n_symbols) bool - entry signals
+        close: (n_bars, n_symbols) close prices
+        directions: (n_bars, n_symbols) int8 - 1=long, -1=short
+        sl_pct: For PERCENTAGE type
+        atr: For ATR type - pre-calculated ATR array
+        atr_multiplier: For ATR type
+        swing_low: For STRUCTURE type
+        swing_high: For STRUCTURE type
+        trailing_pct: For TRAILING type (initial distance)
+
+    Returns:
+        sl_pcts: (n_bars, n_symbols) float64 - SL as decimal (0.02 = 2%)
+    """
+    n_bars, n_symbols = close.shape
+
+    if sl_type == StopLossType.PERCENTAGE:
+        sl_pcts = np.zeros((n_bars, n_symbols), dtype=np.float64)
+        sl_pcts[entries] = sl_pct
+
+    elif sl_type == StopLossType.ATR:
+        # Numba-optimized ATR to percentage conversion
+        sl_pcts = convert_sl_atr_to_pct_numba(entries, close, atr, atr_multiplier)
+
+    elif sl_type == StopLossType.STRUCTURE:
+        # Numba-optimized STRUCTURE to percentage conversion
+        sl_pcts = convert_sl_structure_to_pct_2d_numba(
+            entries, close, directions, swing_low, swing_high
+        )
+
+    elif sl_type == StopLossType.TRAILING:
+        sl_pcts = np.zeros((n_bars, n_symbols), dtype=np.float64)
+        sl_pcts[entries] = trailing_pct
+
+    else:
+        sl_pcts = np.zeros((n_bars, n_symbols), dtype=np.float64)
+
+    return sl_pcts
+
+
+def _convert_tp_to_pct(
+    tp_type: Optional[TakeProfitType],
+    entries: np.ndarray,
+    close: np.ndarray,
+    directions: np.ndarray,
+    sl_pcts: np.ndarray,
+    tp_pct: float = None,
+    atr: np.ndarray = None,
+    atr_multiplier: float = None,
+    rr_ratio: float = None,
+) -> np.ndarray:
+    """
+    Convert any TP type to percentage values per entry bar using Numba kernels.
+
+    Args:
+        tp_type: Type of take profit (can be None)
+        entries: (n_bars, n_symbols) bool - entry signals
+        close: (n_bars, n_symbols) close prices
+        directions: (n_bars, n_symbols) int8 - 1=long, -1=short
+        sl_pcts: (n_bars, n_symbols) - SL percentages (needed for RR_RATIO)
+        tp_pct: For PERCENTAGE type
+        atr: For ATR type - pre-calculated ATR array
+        atr_multiplier: For ATR type
+        rr_ratio: For RR_RATIO type
+
+    Returns:
+        tp_pcts: (n_bars, n_symbols) float64 - TP as decimal
+    """
+    n_bars, n_symbols = close.shape
+
+    if tp_type is None or tp_type == TakeProfitType.PERCENTAGE:
+        tp_pcts = np.zeros((n_bars, n_symbols), dtype=np.float64)
+        if tp_pct is not None:
+            tp_pcts[entries] = tp_pct
+
+    elif tp_type == TakeProfitType.ATR:
+        # Numba-optimized ATR to percentage conversion
+        tp_pcts = convert_tp_atr_to_pct_numba(entries, close, atr, atr_multiplier)
+
+    elif tp_type == TakeProfitType.RR_RATIO:
+        # Numba-optimized RR_RATIO conversion
+        tp_pcts = convert_tp_rr_to_pct_numba(entries, sl_pcts, rr_ratio)
+
+    else:
+        tp_pcts = np.zeros((n_bars, n_symbols), dtype=np.float64)
+
+    return tp_pcts
 
 
 @dataclass
@@ -48,6 +213,10 @@ class ParametricResult:
     total_trades: int
     total_return: float
     score: float
+    # Extended fields for multi-type SL/TP support
+    sl_type: StopLossType = StopLossType.PERCENTAGE
+    tp_type: Optional[TakeProfitType] = TakeProfitType.PERCENTAGE
+    params: dict = field(default_factory=dict)  # Full params for reconstruction
 
 
 # =============================================================================
@@ -72,6 +241,7 @@ def _simulate_single_param_set(
     max_positions: int,
     risk_pct: float,
     min_notional: float,
+    funding_cumsum: np.ndarray,  # (n_bars, n_symbols) cumulative funding rates
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Simulate one parameter set across all symbols.
@@ -155,6 +325,18 @@ def _simulate_single_param_set(
                 notional = pos_entry_price[j] * pos_size[j]
                 fees = notional * fee_rate * 2.0
                 pnl -= fees
+
+                # Apply funding costs (O(1) lookup using cumsum)
+                entry_idx = pos_entry_idx[j]
+                if entry_idx > 0:
+                    total_funding = funding_cumsum[i, j] - funding_cumsum[entry_idx - 1, j]
+                else:
+                    total_funding = funding_cumsum[i, j]
+                funding_cost = notional * total_funding
+                if direction == 1:  # Long pays when rate positive
+                    pnl -= funding_cost
+                else:  # Short receives when rate positive
+                    pnl += funding_cost
 
                 equity += pnl
 
@@ -271,9 +453,347 @@ def _simulate_single_param_set(
         fees = notional * fee_rate * 2.0
         pnl -= fees
 
+        # Apply funding costs (O(1) lookup using cumsum)
+        entry_idx = pos_entry_idx[j]
+        exit_idx = n_bars - 1
+        if entry_idx > 0:
+            total_funding = funding_cumsum[exit_idx, j] - funding_cumsum[entry_idx - 1, j]
+        else:
+            total_funding = funding_cumsum[exit_idx, j]
+        funding_cost = notional * total_funding
+        if direction == 1:  # Long
+            pnl -= funding_cost
+        else:  # Short
+            pnl += funding_cost
+
         equity += pnl
 
         # Record trade as percentage of notional (for expectancy calculation)
+        if n_trades < max_trades:
+            trade_pnl_pct = pnl / notional if notional > 0 else 0.0
+            trade_pnls[n_trades] = trade_pnl_pct
+            trade_wins[n_trades] = pnl > 0
+            n_trades += 1
+
+    equity_curve[n_bars] = equity
+
+    # Trim arrays
+    trade_pnls = trade_pnls[:n_trades]
+    trade_wins = trade_wins[:n_trades]
+
+    return equity_curve, trade_pnls, trade_wins
+
+
+@jit(nopython=True, cache=True)
+def _simulate_single_param_set_v2(
+    close: np.ndarray,           # (n_bars, n_symbols)
+    high: np.ndarray,            # (n_bars, n_symbols)
+    low: np.ndarray,             # (n_bars, n_symbols)
+    entries: np.ndarray,         # (n_bars, n_symbols) bool
+    directions: np.ndarray,      # (n_bars, n_symbols) int8
+    sl_pcts: np.ndarray,         # (n_bars, n_symbols) - DYNAMIC per entry bar
+    tp_pcts: np.ndarray,         # (n_bars, n_symbols) - DYNAMIC per entry bar
+    leverage: int,
+    max_leverages: np.ndarray,   # (n_symbols,) per-coin max
+    exit_bars: int,
+    initial_capital: float,
+    fee_rate: float,
+    slippage: float,
+    max_positions: int,
+    risk_pct: float,
+    min_notional: float,
+    is_trailing: bool,
+    trailing_activation_pct: float,
+    breakeven_buffer: float,
+    funding_cumsum: np.ndarray,  # (n_bars, n_symbols) cumulative funding rates
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Extended simulation kernel supporting per-bar SL/TP and trailing stops.
+
+    Key changes from v1:
+    - sl_pcts/tp_pcts are 2D arrays (read at entry bar)
+    - pos_high_water_mark tracks high/low for trailing
+    - Trailing updates SL dynamically during position
+
+    Returns:
+        equity_curve: (n_bars+1,) float64
+        trade_pnls: (n_trades,) float64 - PnL as percentage of notional
+        trade_wins: (n_trades,) bool - True if trade was profitable
+    """
+    n_bars, n_symbols = close.shape
+    max_trades = n_bars * n_symbols
+
+    # Equity tracking
+    equity = initial_capital
+    equity_curve = np.zeros(n_bars + 1, dtype=np.float64)
+    equity_curve[0] = equity
+
+    # Trade tracking
+    trade_pnls = np.zeros(max_trades, dtype=np.float64)
+    trade_wins = np.zeros(max_trades, dtype=np.bool_)
+    n_trades = 0
+
+    # Position state per symbol
+    pos_entry_idx = np.full(n_symbols, -1, dtype=np.int64)
+    pos_entry_price = np.zeros(n_symbols, dtype=np.float64)
+    pos_size = np.zeros(n_symbols, dtype=np.float64)
+    pos_direction = np.zeros(n_symbols, dtype=np.int8)
+    pos_sl = np.zeros(n_symbols, dtype=np.float64)
+    pos_tp = np.zeros(n_symbols, dtype=np.float64)
+    pos_margin = np.zeros(n_symbols, dtype=np.float64)
+
+    # Trailing stop state
+    pos_high_water_mark = np.zeros(n_symbols, dtype=np.float64)
+    pos_trailing_active = np.zeros(n_symbols, dtype=np.bool_)
+    pos_trailing_pct = np.zeros(n_symbols, dtype=np.float64)
+
+    n_open = 0
+    margin_used = 0.0
+
+    for i in range(n_bars):
+        # 1. UPDATE TRAILING STOPS (before exit checks)
+        if is_trailing:
+            for j in range(n_symbols):
+                if pos_entry_idx[j] < 0:
+                    continue
+
+                direction = pos_direction[j]
+                current_high = high[i, j]
+                current_low = low[i, j]
+                current_price = close[i, j]
+
+                # Check activation (must be in profit by activation_pct)
+                if not pos_trailing_active[j]:
+                    if direction == 1:  # Long
+                        profit_pct = (current_price - pos_entry_price[j]) / pos_entry_price[j]
+                    else:  # Short
+                        profit_pct = (pos_entry_price[j] - current_price) / pos_entry_price[j]
+
+                    if profit_pct >= trailing_activation_pct:
+                        pos_trailing_active[j] = True
+                        if direction == 1:
+                            pos_high_water_mark[j] = current_high
+                        else:
+                            pos_high_water_mark[j] = current_low
+                    continue
+
+                # Update high water mark and SL
+                if direction == 1:  # Long
+                    if current_high > pos_high_water_mark[j]:
+                        pos_high_water_mark[j] = current_high
+                    # Calculate new trailing SL with breakeven buffer floor
+                    theoretical_sl = pos_high_water_mark[j] * (1.0 - pos_trailing_pct[j])
+                    floor_price = pos_entry_price[j] * (1.0 + breakeven_buffer)
+                    new_sl = max(theoretical_sl, floor_price)
+                    if new_sl > pos_sl[j]:
+                        pos_sl[j] = new_sl
+                else:  # Short
+                    if current_low < pos_high_water_mark[j]:
+                        pos_high_water_mark[j] = current_low
+                    theoretical_sl = pos_high_water_mark[j] * (1.0 + pos_trailing_pct[j])
+                    ceiling_price = pos_entry_price[j] * (1.0 - breakeven_buffer)
+                    new_sl = min(theoretical_sl, ceiling_price)
+                    if new_sl < pos_sl[j]:
+                        pos_sl[j] = new_sl
+
+        # 2. CHECK EXITS
+        for j in range(n_symbols):
+            if pos_entry_idx[j] < 0:
+                continue
+
+            direction = pos_direction[j]
+            current_high = high[i, j]
+            current_low = low[i, j]
+
+            should_close = False
+            exit_price = close[i, j]
+
+            # Time-based exit
+            bars_held = i - pos_entry_idx[j]
+            if exit_bars > 0 and bars_held >= exit_bars:
+                should_close = True
+
+            # Stop loss check
+            if not should_close:
+                if direction == 1 and current_low <= pos_sl[j]:
+                    should_close = True
+                    exit_price = pos_sl[j]
+                elif direction == -1 and current_high >= pos_sl[j]:
+                    should_close = True
+                    exit_price = pos_sl[j]
+
+            # Take profit check
+            if not should_close and pos_tp[j] > 0:
+                if direction == 1 and current_high >= pos_tp[j]:
+                    should_close = True
+                    exit_price = pos_tp[j]
+                elif direction == -1 and current_low <= pos_tp[j]:
+                    should_close = True
+                    exit_price = pos_tp[j]
+
+            if should_close:
+                # Apply slippage
+                if direction == 1:
+                    slipped_exit = exit_price * (1.0 - slippage)
+                    pnl = (slipped_exit - pos_entry_price[j]) * pos_size[j]
+                else:
+                    slipped_exit = exit_price * (1.0 + slippage)
+                    pnl = (pos_entry_price[j] - slipped_exit) * pos_size[j]
+
+                # Apply fees
+                notional = pos_entry_price[j] * pos_size[j]
+                fees = notional * fee_rate * 2.0
+                pnl -= fees
+
+                # Apply funding costs (O(1) lookup using cumsum)
+                entry_idx = pos_entry_idx[j]
+                if entry_idx > 0:
+                    total_funding = funding_cumsum[i, j] - funding_cumsum[entry_idx - 1, j]
+                else:
+                    total_funding = funding_cumsum[i, j]
+                funding_cost = notional * total_funding
+                if direction == 1:  # Long pays when rate positive
+                    pnl -= funding_cost
+                else:  # Short receives when rate positive
+                    pnl += funding_cost
+
+                equity += pnl
+
+                # Record trade
+                if n_trades < max_trades:
+                    trade_pnl_pct = pnl / notional if notional > 0 else 0.0
+                    trade_pnls[n_trades] = trade_pnl_pct
+                    trade_wins[n_trades] = pnl > 0
+                    n_trades += 1
+
+                # Clear position
+                margin_used -= pos_margin[j]
+                pos_margin[j] = 0.0
+                pos_entry_idx[j] = -1
+                pos_trailing_active[j] = False
+                n_open -= 1
+
+        # 3. CHECK ENTRIES
+        if n_open < max_positions:
+            for j in range(n_symbols):
+                if n_open >= max_positions:
+                    break
+                if pos_entry_idx[j] >= 0:
+                    continue
+                if not entries[i, j]:
+                    continue
+
+                direction = directions[i, j]
+                if direction == 0:
+                    continue
+
+                price = close[i, j]
+
+                # Apply slippage
+                if direction == 1:
+                    slipped_entry = price * (1.0 + slippage)
+                else:
+                    slipped_entry = price * (1.0 - slippage)
+
+                # GET SL/TP FROM 2D ARRAYS (per-entry bar)
+                sl_pct = sl_pcts[i, j]
+                tp_pct = tp_pcts[i, j]
+
+                if sl_pct <= 0:
+                    continue  # Invalid SL
+
+                # Risk-based position sizing
+                risk_amount = equity * risk_pct
+                notional = risk_amount / sl_pct
+
+                # Leverage capping
+                actual_lev = leverage
+                if max_leverages[j] < leverage:
+                    actual_lev = max_leverages[j]
+                if actual_lev < 1:
+                    actual_lev = 1
+
+                # Margin calculation
+                margin_needed = notional / actual_lev
+
+                # Diversification cap
+                max_margin_per_trade = equity / max_positions
+                if margin_needed > max_margin_per_trade:
+                    margin_needed = max_margin_per_trade
+                    notional = margin_needed * actual_lev
+
+                # Margin check
+                margin_available = equity - margin_used
+                if margin_needed > margin_available:
+                    continue
+
+                # Min notional check
+                if notional < min_notional:
+                    continue
+
+                size = notional / slipped_entry
+
+                # Calculate SL/TP prices
+                if direction == 1:
+                    sl_price = slipped_entry * (1.0 - sl_pct)
+                    tp_price = slipped_entry * (1.0 + tp_pct) if tp_pct > 0 else 0.0
+                else:
+                    sl_price = slipped_entry * (1.0 + sl_pct)
+                    tp_price = slipped_entry * (1.0 - tp_pct) if tp_pct > 0 else 0.0
+
+                # Store position
+                pos_entry_idx[j] = i
+                pos_entry_price[j] = slipped_entry
+                pos_size[j] = size
+                pos_direction[j] = direction
+                pos_sl[j] = sl_price
+                pos_tp[j] = tp_price
+                pos_margin[j] = margin_needed
+                margin_used += margin_needed
+                n_open += 1
+
+                # Initialize trailing state
+                if is_trailing:
+                    pos_high_water_mark[j] = price
+                    pos_trailing_active[j] = False
+                    pos_trailing_pct[j] = sl_pct
+
+        equity_curve[i + 1] = equity
+
+    # Close remaining positions at end
+    for j in range(n_symbols):
+        if pos_entry_idx[j] < 0:
+            continue
+
+        exit_price = close[n_bars - 1, j]
+        direction = pos_direction[j]
+
+        if direction == 1:
+            slipped_exit = exit_price * (1.0 - slippage)
+            pnl = (slipped_exit - pos_entry_price[j]) * pos_size[j]
+        else:
+            slipped_exit = exit_price * (1.0 + slippage)
+            pnl = (pos_entry_price[j] - slipped_exit) * pos_size[j]
+
+        notional = pos_entry_price[j] * pos_size[j]
+        fees = notional * fee_rate * 2.0
+        pnl -= fees
+
+        # Apply funding costs (O(1) lookup using cumsum)
+        entry_idx = pos_entry_idx[j]
+        exit_idx = n_bars - 1
+        if entry_idx > 0:
+            total_funding = funding_cumsum[exit_idx, j] - funding_cumsum[entry_idx - 1, j]
+        else:
+            total_funding = funding_cumsum[exit_idx, j]
+        funding_cost = notional * total_funding
+        if direction == 1:  # Long
+            pnl -= funding_cost
+        else:  # Short
+            pnl += funding_cost
+
+        equity += pnl
+
         if n_trades < max_trades:
             trade_pnl_pct = pnl / notional if notional > 0 else 0.0
             trade_pnls[n_trades] = trade_pnl_pct
@@ -625,6 +1145,7 @@ class ParametricBacktester:
         directions: np.ndarray,
         max_leverages: np.ndarray,
         strategy_name: str = None,
+        funding_cumsum: np.ndarray = None,
     ) -> pd.DataFrame:
         """
         Run parametric backtest for a pattern.
@@ -663,6 +1184,10 @@ class ParametricBacktester:
 
         results = []
 
+        # Use provided funding_cumsum or zeros if not provided
+        if funding_cumsum is None:
+            funding_cumsum = np.zeros((n_bars, n_symbols), dtype=np.float64)
+
         for sl_pct, tp_pct, leverage, exit_bars in param_sets:
             # Run simulation (leverage capping done per-coin inside kernel)
             equity_curve, trade_pnls, trade_wins = _simulate_single_param_set(
@@ -670,6 +1195,7 @@ class ParametricBacktester:
                 sl_pct, tp_pct, leverage, max_levs, exit_bars,
                 self.initial_capital, self.fee_rate, self.slippage,
                 self.max_positions, self.risk_pct, self.min_notional,
+                funding_cumsum,
             )
 
             # Calculate metrics
@@ -927,3 +1453,384 @@ class ParametricBacktester:
         )
 
         return space
+
+    def build_structure_aware_space(
+        self,
+        structure: 'StrategyStructure',
+        timeframe: str = '15m',
+    ) -> Dict[str, List]:
+        """
+        Build parameter space based on detected strategy structure.
+
+        For percentage-based SL/TP: full parametric optimization
+        For non-percentage (ATR, structure, trailing): only optimize leverage + exit_bars
+
+        The Numba kernel only supports percentage-based SL/TP calculations,
+        so non-percentage strategies preserve their original SL/TP params.
+
+        Args:
+            structure: Detected StrategyStructure from strategy_structure.py
+            timeframe: Target timeframe for exit_bars scaling
+
+        Returns:
+            Parameter space dict appropriate for this structure
+        """
+        from src.backtester.strategy_structure import PARAM_RANGES, EXIT_BARS_BY_TIMEFRAME
+        from src.strategies.base import StopLossType, TakeProfitType
+
+        # Get timeframe-specific exit bars
+        exit_bars = EXIT_BARS_BY_TIMEFRAME.get(timeframe, PARAM_RANGES['exit_bars'])
+
+        # Check if strategy is fully percentage-based (Numba kernel compatible)
+        is_pct_based = structure.is_percentage_based
+
+        if is_pct_based:
+            # Full parametric optimization - use absolute space
+            logger.info(
+                f"Structure is percentage-based - using full parametric space"
+            )
+            return self.build_absolute_space(timeframe)
+
+        # Non-percentage strategy: only optimize leverage and exit_bars
+        # Preserve original SL/TP type and params
+        sl_pct_original = structure.original_values.get('sl_pct', 0.02)
+        tp_pct_original = structure.original_values.get('tp_pct', 0.0)
+
+        space = {
+            'sl_pct': [sl_pct_original],  # Keep original (single value)
+            'tp_pct': [tp_pct_original],  # Keep original (single value)
+            'leverage': LEVERAGE_VALUES.copy(),
+            'exit_bars': exit_bars,
+        }
+
+        # Calculate combinations
+        total = len(space['leverage']) * len(space['exit_bars'])
+
+        logger.info(
+            f"Structure is {structure.sl_type.value}-based SL - "
+            f"optimizing only leverage and exit_bars "
+            f"(preserving SL={sl_pct_original:.1%}, TP={tp_pct_original:.1%}) "
+            f"({total} combinations)"
+        )
+
+        return space
+
+    def _generate_typed_param_sets(
+        self,
+        sl_type: StopLossType,
+        tp_type: Optional[TakeProfitType],
+    ) -> Tuple[List[dict], dict]:
+        """
+        Generate parameter sets for typed SL/TP optimization.
+
+        Returns:
+            Tuple of (param_dicts, filter_stats) where each dict has
+            type-specific parameters (atr_mult, rr_ratio, trailing_pct, etc.)
+        """
+        valid_sets = []
+        filter_stats = {
+            'total_raw': 0,
+            'no_exit_filtered': 0,
+            'liquidation_filtered': 0,
+            'valid': 0,
+        }
+
+        # Get base parameters
+        leverage_values = LEVERAGE_VALUES
+        exit_bars_values = self.parameter_space.get('exit_bars', [0, 10, 20, 50, 100])
+
+        # SL parameter values based on type
+        if sl_type == StopLossType.PERCENTAGE:
+            sl_params_list = [{'sl_pct': p} for p in self.parameter_space.get('sl_pct', [0.02])]
+        elif sl_type == StopLossType.ATR:
+            sl_params_list = [{'atr_multiplier': m} for m in ATR_SL_MULTIPLIERS]
+        elif sl_type == StopLossType.STRUCTURE:
+            sl_params_list = [{'lookback': lb} for lb in STRUCTURE_LOOKBACKS]
+        elif sl_type == StopLossType.TRAILING:
+            sl_params_list = [
+                {'trailing_pct': t, 'activation_pct': a}
+                for t in TRAILING_STOP_PCTS
+                for a in TRAILING_ACTIVATION_PCTS
+            ]
+        else:
+            sl_params_list = [{'sl_pct': 0.02}]  # Fallback
+
+        # TP parameter values based on type
+        if tp_type is None or tp_type == TakeProfitType.PERCENTAGE:
+            tp_params_list = [{'tp_pct': p} for p in self.parameter_space.get('tp_pct', [0, 0.04])]
+        elif tp_type == TakeProfitType.ATR:
+            tp_params_list = [{'atr_multiplier': m} for m in ATR_TP_MULTIPLIERS]
+        elif tp_type == TakeProfitType.RR_RATIO:
+            tp_params_list = [{'rr_ratio': r} for r in RR_RATIOS]
+        else:
+            tp_params_list = [{'tp_pct': 0.0}]
+
+        # Generate all combinations
+        for sl_params in sl_params_list:
+            for tp_params in tp_params_list:
+                for lev in leverage_values:
+                    for exit_b in exit_bars_values:
+                        filter_stats['total_raw'] += 1
+
+                        # FILTER 1: Must have exit condition (TP or time)
+                        has_tp = tp_params.get('tp_pct', 0) > 0 or \
+                                 tp_params.get('atr_multiplier', 0) > 0 or \
+                                 tp_params.get('rr_ratio', 0) > 0
+                        if not has_tp and exit_b == 0:
+                            filter_stats['no_exit_filtered'] += 1
+                            continue
+
+                        # FILTER 2: ANTI-LIQUIDATION
+                        # Estimate SL distance based on type for safe leverage calculation
+                        if sl_type == StopLossType.PERCENTAGE:
+                            estimated_sl = sl_params.get('sl_pct', 0.02)
+                        elif sl_type == StopLossType.ATR:
+                            # SL = ATR * multiplier, use typical ATR for estimation
+                            estimated_sl = sl_params.get('atr_multiplier', 2.0) * TYPICAL_ATR_PCT
+                        elif sl_type == StopLossType.STRUCTURE:
+                            # Swing-based SL varies, use conservative estimate
+                            estimated_sl = STRUCTURE_SL_ESTIMATE
+                        elif sl_type == StopLossType.TRAILING:
+                            # Trailing uses trailing_pct as initial SL distance
+                            estimated_sl = sl_params.get('trailing_pct', 0.02)
+                        else:
+                            estimated_sl = 0.02
+
+                        # Calculate safe leverage (same logic as _generate_parameter_sets)
+                        max_safe_lev = calculate_safe_leverage(
+                            sl_pct=estimated_sl,
+                            max_leverage=20,
+                            buffer_pct=10.0,
+                        )
+                        if lev > max_safe_lev:
+                            filter_stats['liquidation_filtered'] += 1
+                            continue
+
+                        param_dict = {
+                            'sl_type': sl_type,
+                            'tp_type': tp_type,
+                            'sl_params': sl_params,
+                            'tp_params': tp_params,
+                            'leverage': lev,
+                            'exit_bars': exit_b,
+                        }
+                        valid_sets.append(param_dict)
+
+        filter_stats['valid'] = len(valid_sets)
+        return valid_sets, filter_stats
+
+    def backtest_typed(
+        self,
+        pattern_signals: np.ndarray,
+        ohlc_data: Dict[str, np.ndarray],
+        directions: np.ndarray,
+        max_leverages: np.ndarray,
+        sl_type: StopLossType,
+        tp_type: Optional[TakeProfitType] = TakeProfitType.PERCENTAGE,
+        strategy_name: str = None,
+        funding_cumsum: np.ndarray = None,
+    ) -> pd.DataFrame:
+        """
+        Run parametric backtest with typed SL/TP support.
+
+        This is the extended version of backtest_pattern() that supports
+        all SL/TP types: ATR, STRUCTURE, TRAILING, RR_RATIO.
+
+        Pre-calculation approach:
+        - ATR/STRUCTURE values are converted to percentages BEFORE Numba kernel
+        - TRAILING is handled dynamically inside the kernel with state tracking
+
+        Args:
+            pattern_signals: (n_bars, n_symbols) boolean array of entry signals
+            ohlc_data: Dict with 'close', 'high', 'low' arrays (n_bars, n_symbols)
+            directions: (n_bars, n_symbols) int8 array: 1=long, -1=short
+            max_leverages: (n_symbols,) int32 array - per-coin max leverage
+            sl_type: Type of stop loss (PERCENTAGE, ATR, STRUCTURE, TRAILING)
+            tp_type: Type of take profit (PERCENTAGE, ATR, RR_RATIO, or None)
+            strategy_name: Optional strategy name for log prefixing
+
+        Returns:
+            DataFrame with metrics for each parameter combination, sorted by score
+        """
+        log_prefix = f"[{strategy_name}] " if strategy_name else ""
+
+        # Prepare arrays
+        close = ohlc_data['close'].astype(np.float64)
+        high = ohlc_data['high'].astype(np.float64)
+        low = ohlc_data['low'].astype(np.float64)
+        entries = pattern_signals.astype(np.bool_)
+        dirs = directions.astype(np.int8)
+        max_levs = max_leverages.astype(np.int32)
+
+        n_bars, n_symbols = close.shape
+
+        # Pre-calculate arrays if needed
+        atr = None
+        swing_low = None
+        swing_high = None
+
+        if sl_type == StopLossType.ATR or tp_type == TakeProfitType.ATR:
+            atr = _calculate_atr_at_bars(high, low, close)
+            logger.debug(f"{log_prefix}Pre-calculated ATR for {n_bars}x{n_symbols}")
+
+        if sl_type == StopLossType.STRUCTURE:
+            # Will be recalculated per lookback value
+            pass
+
+        # Generate typed parameter sets
+        param_sets, filter_stats = self._generate_typed_param_sets(sl_type, tp_type)
+
+        logger.info(
+            f"{log_prefix}Typed parametric: {n_bars} bars, {n_symbols} symbols, "
+            f"SL={sl_type.value}, TP={tp_type.value if tp_type else 'None'}, "
+            f"{filter_stats['valid']}/{filter_stats['total_raw']} combos "
+            f"(filtered: no_exit={filter_stats['no_exit_filtered']}, "
+            f"anti-liq={filter_stats['liquidation_filtered']})"
+        )
+
+        # PRE-CALCULATE SWING CACHE for STRUCTURE-based SL
+        # This avoids O(n_combos) recalculations - only O(n_lookbacks) = 4
+        swing_cache = {}
+        if sl_type == StopLossType.STRUCTURE:
+            logger.debug(f"{log_prefix}Pre-calculating swing arrays for {len(STRUCTURE_LOOKBACKS)} lookbacks")
+            for lookback in STRUCTURE_LOOKBACKS:
+                swing_low_cached, swing_high_cached = calculate_swing_low_high_numba(high, low, lookback)
+                swing_cache[lookback] = (swing_low_cached, swing_high_cached)
+            logger.debug(f"{log_prefix}Swing cache ready")
+
+        results = []
+
+        # Use provided funding_cumsum or zeros if not provided
+        if funding_cumsum is None:
+            funding_cumsum = np.zeros((n_bars, n_symbols), dtype=np.float64)
+
+        for params in param_sets:
+            sl_params = params['sl_params']
+            tp_params = params['tp_params']
+            leverage = params['leverage']
+            exit_bars = params['exit_bars']
+
+            # Get structure arrays from pre-calculated cache
+            if sl_type == StopLossType.STRUCTURE:
+                lookback = sl_params.get('lookback', 10)
+                swing_low, swing_high = swing_cache[lookback]
+
+            # Convert SL to percentage array
+            sl_pcts = _convert_sl_to_pct(
+                sl_type=sl_type,
+                entries=entries,
+                close=close,
+                directions=dirs,
+                sl_pct=sl_params.get('sl_pct'),
+                atr=atr,
+                atr_multiplier=sl_params.get('atr_multiplier'),
+                swing_low=swing_low,
+                swing_high=swing_high,
+                trailing_pct=sl_params.get('trailing_pct'),
+            )
+
+            # Convert TP to percentage array
+            tp_pcts = _convert_tp_to_pct(
+                tp_type=tp_type,
+                entries=entries,
+                close=close,
+                directions=dirs,
+                sl_pcts=sl_pcts,
+                tp_pct=tp_params.get('tp_pct'),
+                atr=atr,
+                atr_multiplier=tp_params.get('atr_multiplier'),
+                rr_ratio=tp_params.get('rr_ratio'),
+            )
+
+            # Determine trailing parameters
+            is_trailing = sl_type == StopLossType.TRAILING
+            trailing_activation_pct = sl_params.get('activation_pct', 0.01) if is_trailing else 0.0
+
+            # Run simulation with v2 kernel
+            equity_curve, trade_pnls, trade_wins = _simulate_single_param_set_v2(
+                close, high, low, entries, dirs,
+                sl_pcts, tp_pcts,
+                leverage, max_levs, exit_bars,
+                self.initial_capital, self.fee_rate, self.slippage,
+                self.max_positions, self.risk_pct, self.min_notional,
+                is_trailing, trailing_activation_pct, BREAKEVEN_BUFFER,
+                funding_cumsum,
+            )
+
+            # Calculate metrics
+            sharpe, max_dd, win_rate, expectancy, n_trades, total_return = _calc_metrics(
+                equity_curve, trade_pnls, trade_wins, self.initial_capital, self.bars_per_year
+            )
+
+            # Build full params dict for reconstruction
+            full_params = {
+                'sl_type': sl_type.value,
+                'tp_type': tp_type.value if tp_type else None,
+                **sl_params,
+                **tp_params,
+                'leverage': leverage,
+                'exit_bars': exit_bars,
+            }
+
+            # Extract representative sl_pct/tp_pct for ParametricResult
+            # (median of non-zero values at entry bars)
+            entry_sl_vals = sl_pcts[entries]
+            entry_tp_vals = tp_pcts[entries]
+            median_sl = float(np.median(entry_sl_vals[entry_sl_vals > 0])) if np.any(entry_sl_vals > 0) else 0.02
+            median_tp = float(np.median(entry_tp_vals[entry_tp_vals > 0])) if np.any(entry_tp_vals > 0) else 0.0
+
+            result = ParametricResult(
+                sl_pct=median_sl,
+                tp_pct=median_tp,
+                leverage=leverage,
+                exit_bars=exit_bars,
+                sharpe=sharpe,
+                max_drawdown=max_dd,
+                win_rate=win_rate,
+                expectancy=expectancy,
+                total_trades=n_trades,
+                total_return=total_return,
+                score=0.0,
+                sl_type=sl_type,
+                tp_type=tp_type,
+                params=full_params,
+            )
+            result.score = self._calculate_score(result)
+            results.append(result)
+
+        # Convert to DataFrame
+        df = pd.DataFrame([
+            {
+                'sl_pct': r.sl_pct,
+                'tp_pct': r.tp_pct,
+                'leverage': r.leverage,
+                'exit_bars': r.exit_bars,
+                'sharpe': r.sharpe,
+                'max_drawdown': r.max_drawdown,
+                'win_rate': r.win_rate,
+                'expectancy': r.expectancy,
+                'total_trades': r.total_trades,
+                'total_return': r.total_return,
+                'score': r.score,
+                'sl_type': r.sl_type.value,
+                'tp_type': r.tp_type.value if r.tp_type else None,
+                'params': r.params,
+            }
+            for r in results
+        ])
+
+        # Sort by score descending
+        df = df.sort_values('score', ascending=False).reset_index(drop=True)
+
+        if len(df) > 0:
+            logger.info(
+                f"{log_prefix}Typed parametric complete: "
+                f"Best score={df['score'].iloc[0]:.2f}, "
+                f"Sharpe={df['sharpe'].iloc[0]:.2f}, "
+                f"SL={df['sl_pct'].iloc[0]:.1%}, TP={df['tp_pct'].iloc[0]:.1%}, "
+                f"Lev={df['leverage'].iloc[0]}, Exit={df['exit_bars'].iloc[0]}"
+            )
+        else:
+            logger.warning(f"{log_prefix}Typed parametric: no valid results")
+
+        return df

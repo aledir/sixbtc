@@ -141,7 +141,7 @@ class PoolManager:
         """
         # Rule 1: Score below minimum threshold (no lock needed)
         if score < self.min_score:
-            self._retire_strategy(strategy_id, f"score {score:.1f} < threshold {self.min_score}")
+            self._retire_strategy(strategy_id, f"score {score:.1f} < threshold {self.min_score}", "score_below_min")
             return False, f"Score {score:.1f} below minimum {self.min_score}"
 
         # Lock to prevent race condition: check + insert must be atomic
@@ -170,16 +170,12 @@ class PoolManager:
 
                 if score > worst_score:
                     # Evict worst and enter
-                    self._retire_strategy(worst_id, f"evicted by {strategy_id} (score {worst_score:.1f} < {score:.1f})")
+                    self._retire_strategy(worst_id, f"evicted by {strategy_id} (score {worst_score:.1f} < {score:.1f})", "evicted")
                     self._activate_strategy(strategy_id, score)
-                    logger.info(
-                        f"[{worst_name}] EVICTED by {strategy_id} "
-                        f"(score {worst_score:.1f} < {score:.1f})"
-                    )
                     return True, f"Evicted {worst_name} (score {worst_score:.1f})"
 
                 # Rule 4: Not good enough
-                self._retire_strategy(strategy_id, f"score {score:.1f} <= pool minimum {worst_score:.1f}")
+                self._retire_strategy(strategy_id, f"score {score:.1f} <= pool minimum {worst_score:.1f}", "score_below_min")
                 return False, f"Score {score:.1f} <= pool minimum {worst_score:.1f}"
 
     def _activate_strategy(self, strategy_id: UUID, score: float):
@@ -195,17 +191,24 @@ class PoolManager:
                 save_to_pool(strategy.name, strategy.code)
                 logger.info(f"[{strategy.name}] Entered ACTIVE pool (score={score:.1f})")
 
-    def _retire_strategy(self, strategy_id: UUID, reason: str):
-        """Set strategy to RETIRED status."""
+    def _retire_strategy(self, strategy_id: UUID, reason: str, reason_code: str):
+        """Set strategy to RETIRED status.
+
+        Args:
+            strategy_id: Strategy UUID
+            reason: Human-readable reason for logging
+            reason_code: Category code: 'evicted', 'retest_failed', 'score_below_min', 'live_degraded'
+        """
         with get_session() as session:
             strategy = session.query(Strategy).filter(Strategy.id == strategy_id).first()
             if strategy:
                 strategy.status = 'RETIRED'
                 strategy.retired_at = datetime.now(UTC)
+                strategy.retired_reason = reason_code
                 session.commit()
                 # Remove .py file from pool/
                 remove_from_pool(strategy.name)
-                logger.info(f"[{strategy.name}] RETIRED: {reason}")
+                logger.info(f"[{strategy.name}] RETIRED ({reason_code}): {reason}")
 
     def revalidate_after_retest(self, strategy_id: UUID, new_score: float) -> Tuple[bool, str]:
         """
@@ -223,7 +226,7 @@ class PoolManager:
         """
         # Check threshold
         if new_score < self.min_score:
-            self._retire_strategy(strategy_id, f"re-test score {new_score:.1f} < threshold {self.min_score}")
+            self._retire_strategy(strategy_id, f"re-test score {new_score:.1f} < threshold {self.min_score}", "retest_failed")
             return False, f"Score dropped below threshold ({new_score:.1f} < {self.min_score})"
 
         with get_session() as session:
@@ -251,7 +254,8 @@ class PoolManager:
                 if min_other_score and new_score < min_other_score:
                     self._retire_strategy(
                         strategy_id,
-                        f"re-test score {new_score:.1f} < pool minimum {min_other_score:.1f}"
+                        f"re-test score {new_score:.1f} < pool minimum {min_other_score:.1f}",
+                        "retest_failed"
                     )
                     return False, f"Score dropped below pool minimum ({new_score:.1f} < {min_other_score:.1f})"
 

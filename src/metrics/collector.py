@@ -79,6 +79,18 @@ class MetricsCollector:
         self.is_days = backtesting_config.get('is_days', 120)
         self.oos_days = backtesting_config.get('oos_days', 30)
 
+        # Parse enabled sources from generation config
+        gen_config = self.config.get('generation', {})
+        strategy_sources = gen_config.get('strategy_sources', {})
+        self.enabled_sources = set()
+        for source_name, source_cfg in strategy_sources.items():
+            if source_cfg.get('enabled', False):
+                self.enabled_sources.add(source_name)
+                # Check if genetic sub-source is enabled
+                genetic_cfg = source_cfg.get('genetic', {})
+                if genetic_cfg.get('enabled', False):
+                    self.enabled_sources.add(f'{source_name}_genetic')
+
         logger.info(f"MetricsCollector initialized (interval: {self.interval_seconds}s)")
 
     def collect_snapshot(self) -> None:
@@ -106,6 +118,7 @@ class MetricsCollector:
                 pool_stats = self._get_pool_stats(session)
                 pool_quality = self._get_pool_quality(session)
                 pool_by_source = self._get_pool_by_source(session)
+                pool_avg_score_by_source = self._get_pool_avg_score_by_source(session)
                 is_stats = self._get_is_stats_24h(session, window_24h)
                 oos_stats = self._get_oos_stats_24h(session, window_24h)
                 score_stats = self._get_score_stats_24h(session, window_24h)
@@ -142,6 +155,7 @@ class MetricsCollector:
                     pool_stats=pool_stats,
                     pool_quality=pool_quality,
                     pool_by_source=pool_by_source,
+                    pool_avg_score_by_source=pool_avg_score_by_source,
                     pool_added_by_source=pool_added_by_source,
                     retest_stats=retest_stats,
                     live_stats=live_stats,
@@ -292,6 +306,7 @@ class MetricsCollector:
             'pattern_gen': 0,
             'pattern_gen_genetic': 0,
             'unger': 0,
+            'unger_genetic': 0,
             'pandas_ta': 0,
             'ai_free': 0,
             'ai_assigned': 0,
@@ -338,6 +353,7 @@ class MetricsCollector:
             'pattern_gen': None,
             'pattern_gen_genetic': None,
             'unger': None,
+            'unger_genetic': None,
             'pandas_ta': None,
             'ai_free': None,
             'ai_assigned': None,
@@ -542,6 +558,7 @@ class MetricsCollector:
             'pattern_gen': 0,
             'pattern_gen_genetic': 0,
             'unger': 0,
+            'unger_genetic': 0,
             'pandas_ta': 0,
             'ai_free': 0,
             'ai_assigned': 0,
@@ -552,6 +569,32 @@ class MetricsCollector:
                 sources[mode] = count
             elif mode:
                 sources['unknown'] += count
+
+        return sources
+
+    def _get_pool_avg_score_by_source(self, session) -> Dict[str, Optional[float]]:
+        """
+        Get average score of ACTIVE pool strategies by generation_mode.
+        """
+        result = session.execute(
+            select(Strategy.generation_mode, func.avg(Strategy.score_backtest))
+            .where(Strategy.status == 'ACTIVE')
+            .group_by(Strategy.generation_mode)
+        ).all()
+
+        sources: Dict[str, Optional[float]] = {
+            'pattern': None,
+            'pattern_gen': None,
+            'pattern_gen_genetic': None,
+            'unger': None,
+            'unger_genetic': None,
+            'pandas_ta': None,
+            'ai_free': None,
+            'ai_assigned': None,
+        }
+        for mode, avg_score in result:
+            if mode in sources and avg_score is not None:
+                sources[mode] = float(avg_score)
 
         return sources
 
@@ -840,7 +883,7 @@ class MetricsCollector:
         # Initialize with all known sources
         sources = {
             'pattern': 0, 'pattern_gen': 0, 'pattern_gen_genetic': 0,
-            'unger': 0, 'pandas_ta': 0, 'ai_free': 0, 'ai_assigned': 0
+            'unger': 0, 'unger_genetic': 0, 'pandas_ta': 0, 'ai_free': 0, 'ai_assigned': 0
         }
         for source, cnt in result:
             if source in sources:
@@ -929,8 +972,10 @@ class MetricsCollector:
                               AND timestamp >= :since
                         ) THEN base_code_hash
                     END) as total_bases,
-                    -- Average duration per base (parametric backtest time)
-                    AVG(duration_ms) as avg_duration_ms
+                    -- Duration stats per base (parametric backtest time)
+                    AVG(duration_ms) as avg_duration_ms,
+                    MIN(duration_ms) as min_duration_ms,
+                    MAX(duration_ms) as max_duration_ms
                 FROM strategy_events
                 WHERE timestamp >= :since
                   AND stage = 'backtest'
@@ -970,6 +1015,8 @@ class MetricsCollector:
             },
             'total_bases': result[18],
             'avg_duration_ms': float(result[19]) if result[19] else None,
+            'min_duration_ms': float(result[20]) if result[20] else None,
+            'max_duration_ms': float(result[21]) if result[21] else None,
         }
 
     def _get_timing_avg_24h(self, session, since: datetime) -> Dict[str, Optional[float]]:
@@ -1655,19 +1702,26 @@ class MetricsCollector:
             ))
         ).scalar() or 0
 
-        # Retired from retest (retired in last 24h)
-        retired = session.execute(
-            select(func.count(Strategy.id))
+        # Retired by reason (retired in last 24h, grouped by retired_reason)
+        retired_by_reason = session.execute(
+            select(Strategy.retired_reason, func.count(Strategy.id))
             .where(and_(
                 Strategy.retired_at >= since,
                 Strategy.status == 'RETIRED'
             ))
-        ).scalar() or 0
+            .group_by(Strategy.retired_reason)
+        ).all()
+
+        reason_counts = {r[0]: r[1] for r in retired_by_reason if r[0] is not None}
 
         return {
             'tested': retested,
             'passed': passed,
-            'retired': retired,
+            'failed': reason_counts.get('retest_failed', 0),
+            'evicted': reason_counts.get('evicted', 0),
+            'score_below_min': reason_counts.get('score_below_min', 0),
+            # Legacy: total retired (for backwards compatibility)
+            'retired': sum(r[1] for r in retired_by_reason),
         }
 
     def _get_live_rotation_stats(self, session, since: datetime) -> Dict[str, Any]:
@@ -1827,6 +1881,7 @@ class MetricsCollector:
         pool_stats: Dict[str, Any],
         pool_quality: Dict[str, Any],
         pool_by_source: Dict[str, int],
+        pool_avg_score_by_source: Dict[str, Optional[float]],
         pool_added_by_source: Dict[str, int],
         retest_stats: Dict[str, Any],
         live_stats: Dict[str, Any],
@@ -1865,7 +1920,32 @@ class MetricsCollector:
             """Format expectancy as percentage (0.0020 -> 0.20%)"""
             if val is None:
                 return "--"
-            return f"{val*100:.2f}%"
+
+        # Source abbreviation mapping (generation_mode -> abbrev)
+        SOURCE_ABBREV = {
+            'pattern': 'pat',
+            'pattern_gen': 'pgn',
+            'pattern_gen_genetic': 'pgg',
+            'unger': 'ung',
+            'unger_genetic': 'ugg',
+            'pandas_ta': 'pta',
+            'ai_free': 'aif',
+            'ai_assigned': 'aia',
+        }
+
+        # Build filtered source list (order matters for display)
+        SOURCE_ORDER = ['pattern', 'pattern_gen', 'pattern_gen_genetic', 'unger', 'unger_genetic', 'pandas_ta', 'ai_free', 'ai_assigned']
+        enabled_sources = self.enabled_sources
+
+        def fmt_sources(values: Dict[str, Any], formatter=str) -> str:
+            """Format source values, filtering out disabled sources."""
+            parts = []
+            for src in SOURCE_ORDER:
+                if src in enabled_sources:
+                    abbrev = SOURCE_ABBREV[src]
+                    val = values.get(src, 0)
+                    parts.append(f"{abbrev}={formatter(val)}")
+            return ', '.join(parts) if parts else '--'
 
         # === STATUS ===
         if issue:
@@ -1883,14 +1963,7 @@ class MetricsCollector:
         gen_by_tf = generator_stats['by_timeframe']
         gen_timing = generator_stats['timing_by_source']
 
-        src_pat = gen_by_source.get('pattern', 0)
-        src_pgn = gen_by_source.get('pattern_gen', 0)
-        src_pgg = gen_by_source.get('pattern_gen_genetic', 0)
-        src_ung = gen_by_source.get('unger', 0)
-        src_pta = gen_by_source.get('pandas_ta', 0)
-        src_aif = gen_by_source.get('ai_free', 0)
-        src_aia = gen_by_source.get('ai_assigned', 0)
-        logger.info(f'[1/10 GENERATOR] 24h: {gen_total} strategies | pat={src_pat}, pgn={src_pgn}, pgg={src_pgg}, ung={src_ung}, pta={src_pta}, aif={src_aif}, aia={src_aia}')
+        logger.info(f'[1/10 GENERATOR] 24h: {gen_total} strategies | {fmt_sources(gen_by_source)}')
 
         type_parts = [f'{t}={c}' for t, c in sorted(gen_by_type.items()) if c > 0]
         type_str = ', '.join(type_parts) if type_parts else '--'
@@ -1909,24 +1982,19 @@ class MetricsCollector:
         tf_str = ', '.join(tf_parts) if tf_parts else '--'
         logger.info(f'[1/10 GENERATOR] timeframe: {tf_str}')
 
-        pat_unique = unused_patterns.get('unique_used', 0)
-        pat_total = unused_patterns.get('total_available')
-        pat_remaining = unused_patterns.get('remaining')
-        if pat_total is not None:
-            # Format: "24 used | 9 remaining (33 tier1 available)"
-            logger.info(f'[1/10 GENERATOR] patterns: {pat_unique} used | {pat_remaining} remaining ({pat_total} tier1 available)')
-        else:
-            logger.info(f'[1/10 GENERATOR] patterns: {pat_unique} used')
+        # Only show patterns line if pattern source is enabled
+        if 'pattern' in enabled_sources:
+            pat_unique = unused_patterns.get('unique_used', 0)
+            pat_total = unused_patterns.get('total_available')
+            pat_remaining = unused_patterns.get('remaining')
+            if pat_total is not None:
+                logger.info(f'[1/10 GENERATOR] patterns: {pat_unique} used | {pat_remaining} remaining ({pat_total} tier1 available)')
+            else:
+                logger.info(f'[1/10 GENERATOR] patterns: {pat_unique} used')
 
-        time_pat = fmt_time(gen_timing.get('pattern'))
-        time_pgn = fmt_time(gen_timing.get('pattern_gen'))
-        time_pgg = fmt_time(gen_timing.get('pattern_gen_genetic'))
-        time_ung = fmt_time(gen_timing.get('unger'))
-        time_pta = fmt_time(gen_timing.get('pandas_ta'))
-        time_aif = fmt_time(gen_timing.get('ai_free'))
-        time_aia = fmt_time(gen_timing.get('ai_assigned'))
         gen_failures = generator_stats.get('gen_failures', 0)
-        logger.info(f'[1/10 GENERATOR] timing: pat={time_pat}, pgn={time_pgn}, pgg={time_pgg}, ung={time_ung}, pta={time_pta}, aif={time_aif}, aia={time_aia} | failures: {gen_failures}')
+        timing_str = fmt_sources(gen_timing, formatter=fmt_time)
+        logger.info(f'[1/10 GENERATOR] timing: {timing_str} | failures: {gen_failures}')
 
         # =====================================================================
         # [2/10 VALIDATOR]
@@ -1946,22 +2014,8 @@ class MetricsCollector:
         # Validation breakdown by source (passed and failed)
         val_passed = validation_by_source.get('passed', {})
         val_failed_src = validation_by_source.get('failed', {})
-        vp_pat = val_passed.get('pattern', 0)
-        vp_pgn = val_passed.get('pattern_gen', 0)
-        vp_pgg = val_passed.get('pattern_gen_genetic', 0)
-        vp_ung = val_passed.get('unger', 0)
-        vp_pta = val_passed.get('pandas_ta', 0)
-        vp_aif = val_passed.get('ai_free', 0)
-        vp_aia = val_passed.get('ai_assigned', 0)
-        vf_pat = val_failed_src.get('pattern', 0)
-        vf_pgn = val_failed_src.get('pattern_gen', 0)
-        vf_pgg = val_failed_src.get('pattern_gen_genetic', 0)
-        vf_ung = val_failed_src.get('unger', 0)
-        vf_pta = val_failed_src.get('pandas_ta', 0)
-        vf_aif = val_failed_src.get('ai_free', 0)
-        vf_aia = val_failed_src.get('ai_assigned', 0)
-        logger.info(f'[2/10 VALIDATOR] passed: pat={vp_pat}, pgn={vp_pgn}, pgg={vp_pgg}, ung={vp_ung}, pta={vp_pta}, aif={vp_aif}, aia={vp_aia}')
-        logger.info(f'[2/10 VALIDATOR] failed: pat={vf_pat}, pgn={vf_pgn}, pgg={vf_pgg}, ung={vf_ung}, pta={vf_pta}, aif={vf_aif}, aia={vf_aia}')
+        logger.info(f'[2/10 VALIDATOR] passed: {fmt_sources(val_passed)}')
+        logger.info(f'[2/10 VALIDATOR] failed: {fmt_sources(val_failed_src)}')
 
         logger.info(f'[2/10 VALIDATOR] timing: {fmt_time(timing.get("validation"))} avg')
 
@@ -2029,9 +2083,15 @@ class MetricsCollector:
                         f"trades={pa.get('trades', 0):.0f}"
                     )
 
-            # Timing per base
-            param_timing = fmt_time(combo_stats.get('avg_duration_ms'))
-            logger.info(f'[3/10 PARAMETRIC] timing: {param_timing} per base')
+            # Timing per base with range
+            total_bases = combo_stats.get('total_bases', 0)
+            avg_time = fmt_time(combo_stats.get('avg_duration_ms'))
+            min_time = fmt_time(combo_stats.get('min_duration_ms'))
+            max_time = fmt_time(combo_stats.get('max_duration_ms'))
+            logger.info(
+                f'[3/10 PARAMETRIC] timing {avg_time}/base '
+                f'(min={min_time}, max={max_time}), {total_bases} bases'
+            )
         else:
             # No combo_stats available yet
             combinations = funnel["combinations_tested"]
@@ -2188,31 +2248,38 @@ class MetricsCollector:
         # =====================================================================
         pool_size = pool_stats["size"]
         pool_limit = pool_stats["limit"]
-        pool_pat = pool_by_source.get('pattern', 0)
-        pool_pgn = pool_by_source.get('pattern_gen', 0)
-        pool_pgg = pool_by_source.get('pattern_gen_genetic', 0)
-        pool_ung = pool_by_source.get('unger', 0)
-        pool_pta = pool_by_source.get('pandas_ta', 0)
-        pool_aif = pool_by_source.get('ai_free', 0)
-        pool_aia = pool_by_source.get('ai_assigned', 0)
         pool_entered = funnel["pool"]
 
         logger.info(f'[9/10 POOL] size: {pool_size}/{pool_limit} | 24h_added: {pool_entered}, 24h_retired: {retest_stats["retired"]}')
-        pa_pat = pool_added_by_source.get('pattern', 0)
-        pa_pgn = pool_added_by_source.get('pattern_gen', 0)
-        pa_pgg = pool_added_by_source.get('pattern_gen_genetic', 0)
-        pa_ung = pool_added_by_source.get('unger', 0)
-        pa_pta = pool_added_by_source.get('pandas_ta', 0)
-        pa_aif = pool_added_by_source.get('ai_free', 0)
-        pa_aia = pool_added_by_source.get('ai_assigned', 0)
-        logger.info(f'[9/10 POOL] 24h_added: pat={pa_pat}, pgn={pa_pgn}, pgg={pa_pgg}, ung={pa_ung}, pta={pa_pta}, aif={pa_aif}, aia={pa_aia}')
-        logger.info(f'[9/10 POOL] sources: pat={pool_pat}, pgn={pool_pgn}, pgg={pool_pgg}, ung={pool_ung}, pta={pool_pta}, aif={pool_aif}, aia={pool_aia}')
+        logger.info(f'[9/10 POOL] 24h_added: {fmt_sources(pool_added_by_source)}')
+        logger.info(f'[9/10 POOL] sources: {fmt_sources(pool_by_source)}')
+
+        # Success rate: pool_added / generated (24h)
+        def calc_success_rate(src: str) -> str:
+            added = pool_added_by_source.get(src, 0)
+            generated = gen_by_source.get(src, 0)
+            if generated == 0:
+                return "--"
+            return f"{(added / generated) * 100:.2f}%"
+
+        success_rates = {src: calc_success_rate(src) for src in SOURCE_ORDER}
+        logger.info(f'[9/10 POOL] success_rate: {fmt_sources(success_rates, formatter=str)}')
+
+        # Avg score by source (current pool)
+        def fmt_avg_score(val) -> str:
+            if val is None:
+                return "--"
+            return f"{val:.1f}"
+
+        logger.info(f'[9/10 POOL] avg_score: {fmt_sources(pool_avg_score_by_source, formatter=fmt_avg_score)}')
+
         logger.info(f'[9/10 POOL] scores: {fmt_float(pool_stats["score_min"])} to {fmt_float(pool_stats["score_max"])} (avg {fmt_float(pool_stats["score_avg"])})')
 
         expectancy_str = f'{pool_quality["expectancy_avg"]*100:.1f}%' if pool_quality["expectancy_avg"] else "--"
         logger.info(f'[9/10 POOL] quality: sharpe={fmt_float(pool_quality["sharpe_avg"])}, wr={fmt_pct_float(pool_quality["winrate_avg"])}, exp={expectancy_str}, dd={fmt_pct_float(pool_quality["dd_avg"])}')
 
-        logger.info(f'[9/10 POOL] retest: tested={retest_stats["tested"]}, passed={retest_stats["passed"]}, retired={retest_stats["retired"]}')
+        logger.info(f'[9/10 POOL] retest: tested={retest_stats["tested"]}, passed={retest_stats["passed"]}, failed={retest_stats["failed"]}')
+        logger.info(f'[9/10 POOL] rotation: evicted={retest_stats["evicted"]}, score_below_min={retest_stats["score_below_min"]}')
 
         # =====================================================================
         # [10/10 LIVE]

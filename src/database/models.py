@@ -217,6 +217,7 @@ class Strategy(Base):
     last_backtested_at = Column(DateTime)  # When last re-backtested (for ACTIVE pool FIFO)
     live_since = Column(DateTime)  # When deployed to live
     retired_at = Column(DateTime)  # When retired from live
+    retired_reason = Column(String(50), nullable=True)  # Why: 'evicted', 'retest_failed', 'score_below_min', 'live_degraded'
 
     # Backtest optimization results
     optimal_timeframe = Column(String(10))  # TF with best performance

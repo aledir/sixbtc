@@ -4,9 +4,11 @@ Retirement Policy - Decide Which LIVE Strategies to Retire
 Single Responsibility: Evaluate LIVE strategies and decide retirement.
 
 Retirement criteria (any triggers retirement):
-1. Score live < min_score (default 30)
-2. Degradation > max_degradation (default 50% worse than backtest)
-3. Drawdown > max_drawdown (default 30%)
+1. Score live < min_score (default 35)
+2. Score degradation > max_score_degradation (default 40% worse than backtest)
+3. Drawdown > max_drawdown (default 25%)
+4. Consecutive losses >= max_consecutive_losses (default 10)
+5. Trade frequency degradation > max_trades_degradation (default 50%)
 """
 
 from datetime import datetime, UTC
@@ -14,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
 from src.database import get_session
-from src.database.models import Strategy, Subaccount
+from src.database.models import Strategy, Subaccount, Trade, BacktestResult
 from src.database.event_tracker import EventTracker
 from src.utils.logger import get_logger
 from src.utils.strategy_files import remove_from_live
@@ -42,15 +44,118 @@ class RetirementPolicy:
         retirement_config = config['monitor']['retirement']
 
         self.min_score = retirement_config['min_score']
-        self.max_degradation = retirement_config['max_degradation']
+        self.max_score_degradation = retirement_config['max_score_degradation']
         self.max_drawdown = retirement_config['max_drawdown']
         self.min_trades = retirement_config['min_trades']
+        self.max_consecutive_losses = retirement_config['max_consecutive_losses']
+        self.max_trades_degradation = retirement_config['max_trades_degradation']
 
         logger.info(
             f"RetirementPolicy initialized: min_score={self.min_score}, "
-            f"max_degradation={self.max_degradation:.0%}, "
-            f"max_drawdown={self.max_drawdown:.0%}"
+            f"max_score_degradation={self.max_score_degradation:.0%}, "
+            f"max_drawdown={self.max_drawdown:.0%}, "
+            f"max_consecutive_losses={self.max_consecutive_losses}, "
+            f"max_trades_degradation={self.max_trades_degradation:.0%}"
         )
+
+    def _count_consecutive_losses(self, strategy_id: UUID, session) -> int:
+        """
+        Count current streak of consecutive losing trades (from most recent).
+
+        Args:
+            strategy_id: Strategy UUID
+            session: Database session
+
+        Returns:
+            Current consecutive losses streak (0 if last trade was winning)
+        """
+        # Limit query to max needed + buffer for efficiency
+        limit = self.max_consecutive_losses + 10
+
+        trades = (
+            session.query(Trade)
+            .filter(
+                Trade.strategy_id == strategy_id,
+                Trade.exit_time.isnot(None)
+            )
+            .order_by(Trade.exit_time.desc())  # Most recent first
+            .limit(limit)
+            .all()
+        )
+
+        if not trades:
+            return 0
+
+        consecutive = 0
+        for trade in trades:
+            if trade.pnl_usd is not None and trade.pnl_usd < 0:
+                consecutive += 1
+            else:
+                break  # Stop at first winning trade
+
+        return consecutive
+
+    def _calculate_trades_degradation(
+        self, strategy_id: UUID, session
+    ) -> Optional[float]:
+        """
+        Calculate trade frequency degradation (live vs backtest).
+
+        Formula: (expected - actual) / expected
+
+        Args:
+            strategy_id: Strategy UUID
+            session: Database session
+
+        Returns:
+            Degradation as fraction (0.50 = 50% fewer trades)
+            None if insufficient data
+        """
+        strategy = session.query(Strategy).filter(
+            Strategy.id == strategy_id
+        ).first()
+
+        if not strategy or not strategy.live_since:
+            return None
+
+        # Get backtest result (most recent full period)
+        backtest = (
+            session.query(BacktestResult)
+            .filter(
+                BacktestResult.strategy_id == strategy_id,
+                BacktestResult.period_type == 'full'
+            )
+            .order_by(BacktestResult.created_at.desc())
+            .first()
+        )
+
+        if not backtest or not backtest.period_days or backtest.period_days == 0:
+            return None
+
+        if not backtest.total_trades or backtest.total_trades == 0:
+            return None
+
+        # Expected trades per day from backtest
+        expected_per_day = backtest.total_trades / backtest.period_days
+
+        # Days live (strip timezone for naive datetime comparison with DB)
+        now_naive = datetime.now(UTC).replace(tzinfo=None)
+        days_live = (now_naive - strategy.live_since).total_seconds() / 86400
+
+        if days_live < 7:  # Need at least 7 days for meaningful comparison
+            return None
+
+        # Expected trades in live period
+        expected_trades = expected_per_day * days_live
+        actual_trades = strategy.total_trades_live or 0
+
+        if expected_trades <= 0:
+            return None
+
+        # Degradation (positive = fewer trades than expected)
+        degradation = (expected_trades - actual_trades) / expected_trades
+
+        return max(0.0, degradation)  # Non-negative only
 
     def evaluate_strategy(self, strategy_id: UUID) -> Tuple[bool, Optional[str]]:
         """
@@ -87,18 +192,34 @@ class RetirementPolicy:
             if score_live is not None and score_live < self.min_score:
                 return (True, f"Live score {score_live:.1f} < {self.min_score}")
 
-            # Check 2: Degradation vs backtest
-            degradation = strategy.live_degradation_pct
-            if degradation is not None and degradation > self.max_degradation:
+            # Check 2: Score degradation vs backtest
+            score_deg = strategy.live_degradation_pct
+            if score_deg is not None and score_deg > self.max_score_degradation:
                 return (
                     True,
-                    f"Degradation {degradation:.0%} > {self.max_degradation:.0%}"
+                    f"Score degradation {score_deg:.0%} > {self.max_score_degradation:.0%}"
                 )
 
             # Check 3: Live drawdown
             drawdown = strategy.max_drawdown_live
             if drawdown is not None and drawdown > self.max_drawdown:
                 return (True, f"Drawdown {drawdown:.0%} > {self.max_drawdown:.0%}")
+
+            # Check 4: Consecutive losses (regime change indicator)
+            consecutive_losses = self._count_consecutive_losses(strategy_id, session)
+            if consecutive_losses >= self.max_consecutive_losses:
+                return (
+                    True,
+                    f"Consecutive losses {consecutive_losses} >= {self.max_consecutive_losses}"
+                )
+
+            # Check 5: Trade frequency degradation
+            trades_deg = self._calculate_trades_degradation(strategy_id, session)
+            if trades_deg is not None and trades_deg > self.max_trades_degradation:
+                return (
+                    True,
+                    f"Trade frequency -{trades_deg:.0%} vs backtest (max -{self.max_trades_degradation:.0%})"
+                )
 
             return (False, None)
 

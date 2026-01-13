@@ -283,6 +283,26 @@ Pipeline Completa Aggiornata:
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ UNGER_GENETIC (generation_mode='unger_genetic')                        │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │ Fonte: Evoluzione genetica di strategie ACTIVE unger                   │  ║
+║  │                                                                        │  ║
+║  │ Operazioni genetiche:                                                  │  ║
+║  │   - Tournament Selection (size=3)                                      │  ║
+║  │   - Crossover componenti (80%): entry, filters, exit mechanism, SL/TP  │  ║
+║  │   - Mutation (20%): cambia componenti o parametri                      │  ║
+║  │   - Mutazione parametri: ±10-20% sui valori numerici                   │  ║
+║  │                                                                        │  ║
+║  │ Attivazione:                                                           │  ║
+║  │   - config.generation.strategy_sources.unger.genetic.enabled = true    │  ║
+║  │   - Pool ACTIVE unger >= min_pool_size (default: 50)                   │  ║
+║  │   - Probabilita' genetic_ratio (default: 30%)                          │  ║
+║  │                                                                        │  ║
+║  │ Prefisso: UggStrat_TYPE_8charID (es: UggStrat_BRK_abc12345)            │  ║
+║  │ DB: generation_mode='unger_genetic', ai_provider='unger'               │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
 ║  │ PANDAS_TA (generation_mode='pandas_ta')                                │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │ Fonte: Indicatori pandas_ta + Matrici Compatibilità                    │  ║
@@ -341,14 +361,15 @@ Pipeline Completa Aggiornata:
 ║  │ pgn  │ PGnStrat_ │ pattern_gen         │ pattern_gen                 │   ║
 ║  │ pgg  │ PGgStrat_ │ pattern_gen_genetic │ pattern_gen.genetic         │   ║
 ║  │ ung  │ UngStrat_ │ unger               │ unger                       │   ║
+║  │ ugg  │ UggStrat_ │ unger_genetic       │ unger.genetic               │   ║
 ║  │ pta  │ PtaStrat_ │ pandas_ta           │ pandas_ta                   │   ║
 ║  │ aif  │ AIFStrat_ │ ai_free             │ ai_free                     │   ║
 ║  │ aia  │ AIAStrat_ │ ai_assigned         │ ai_assigned                 │   ║
 ║  └──────┴───────────┴─────────────────────┴─────────────────────────────┘   ║
 ║                                                                              ║
 ║  Log format (metrics/collector.py):                                          ║
-║    [1/10 GEN] 24h: N | pat=X, pgn=X, pgg=X, ung=X, pta=X, aif=X, aia=X       ║
-║    [9/10 POOL] src: pat=X, pgn=X, pgg=X, ung=X, pta=X, aif=X, aia=X          ║
+║    [1/10 GEN] 24h: N | pat=X, pgn=X, pgg=X, ung=X, ugg=X, pta=X, aif=X, aia=X║
+║    [9/10 POOL] src: pat=X, pgn=X, pgg=X, ung=X, ugg=X, pta=X, aif=X, aia=X   ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -373,11 +394,13 @@ Pipeline Completa Aggiornata:
 ║  │   3. Esattamente 1 classe che eredita da StrategyCore                  │  ║
 ║  │   4. Nome classe valido (prefisso):                                    │  ║
 ║  │      - PatStrat_TYPE_hash (es: PatStrat_MOM_abc123)                    │  ║
-║  │      - UngStrat_TYPE_hash (es: UngStrat_CRS_def456)                    │  ║
-║  │      - AIFStrat_TYPE_hash (es: AIFStrat_REV_789abc)                    │  ║
-║  │      - AIAStrat_TYPE_hash (es: AIAStrat_TRN_fedcba)                    │  ║
+║  │      - UngStrat_TYPE_hash (es: UngStrat_CRS_def456) - Smart            │  ║
+║  │      - UggStrat_TYPE_hash (es: UggStrat_BRK_abc123) - Genetic          │  ║
 ║  │      - PGnStrat_TYPE_hash (es: PGnStrat_THR_12ab34cd) - Smart          │  ║
 ║  │      - PGgStrat_TYPE_hash (es: PGgStrat_CRS_56ef78gh) - Genetic        │  ║
+║  │      - PtaStrat_TYPE_hash (es: PtaStrat_VOL_789abc)                    │  ║
+║  │      - AIFStrat_TYPE_hash (es: AIFStrat_REV_789abc)                    │  ║
+║  │      - AIAStrat_TYPE_hash (es: AIAStrat_TRN_fedcba)                    │  ║
 ║  │   5. Metodo generate_signal(df) deve esistere                          │  ║
 ║  │                                                                        │  ║
 ║  │ Warnings (non bloccanti):                                              │  ║

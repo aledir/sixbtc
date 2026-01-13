@@ -21,6 +21,48 @@ from typing import Dict, List
 LEVERAGE_VALUES: List[int] = [1, 2, 3, 5, 10, 20, 40]
 
 
+# =============================================================================
+# MULTI-TYPE SL/TP PARAMETERS
+# =============================================================================
+
+# ATR-based stop loss multipliers
+# SL distance = ATR * multiplier
+ATR_SL_MULTIPLIERS: List[float] = [1.5, 2.0, 2.5, 3.0, 4.0]
+
+# ATR-based take profit multipliers
+# TP distance = ATR * multiplier
+ATR_TP_MULTIPLIERS: List[float] = [2.0, 3.0, 4.0, 5.0, 6.0]
+
+# Risk-Reward ratio for TP calculation
+# TP distance = SL distance * RR ratio
+RR_RATIOS: List[float] = [1.5, 2.0, 2.5, 3.0, 4.0]
+
+# Trailing stop percentages
+# Initial distance and trail distance from high water mark
+TRAILING_STOP_PCTS: List[float] = [0.01, 0.015, 0.02, 0.025, 0.03]
+
+# Trailing stop activation thresholds
+# Trailing activates when profit exceeds this percentage
+TRAILING_ACTIVATION_PCTS: List[float] = [0.005, 0.01, 0.015, 0.02]
+
+# Structure-based SL lookback periods
+# Number of bars to look back for swing low/high
+STRUCTURE_LOOKBACKS: List[int] = [5, 10, 15, 20]
+
+# Breakeven buffer for trailing stops
+# Prevents SL from going below entry + buffer (long) or above entry - buffer (short)
+BREAKEVEN_BUFFER: float = 0.002  # 0.2%
+
+# Typical ATR for crypto (price-normalized)
+# Used to estimate SL distance for anti-liquidation filter when using ATR-based SL
+# Crypto 24/7 markets typically have 1-2% daily ATR, we use conservative 1.5%
+TYPICAL_ATR_PCT: float = 0.015  # 1.5%
+
+# Conservative SL estimate for structure-based stops
+# Swing-based SL can vary widely, use conservative estimate for anti-liq filter
+STRUCTURE_SL_ESTIMATE: float = 0.02  # 2%
+
+
 # Per-timeframe parameter spaces
 # Format: {'sl_pct': [...], 'tp_pct': [...], 'exit_bars': [...]}
 #

@@ -34,6 +34,9 @@ class {{ class_name }}(StrategyCore):
     # Signal column for vectorized backtest
     signal_column = 'entry_signal'
 
+    # Indicator columns for lookahead test
+    indicator_columns = [{% for ec in entry_conditions %}'{{ ec.indicator.id | lower }}', {% endfor %}{% if needs_atr %}'atr', {% endif %}'entry_signal']
+
     # Parametric placeholders (expanded by backtester)
     SL_PCT = {{ sl_params.get('sl_pct', 0.02) }}
     TP_PCT = {{ tp_params.get('tp_pct', 0.04) if tp_params else 0.04 }}
@@ -45,33 +48,34 @@ class {{ class_name }}(StrategyCore):
     exit_after_bars = 0  # No time-based exit
     {% endif %}
 
-    # Stop Loss params
-    {% if sl_config.sl_type == 'pct' %}
-    sl_type = StopLossType.PERCENTAGE
-    {% elif sl_config.sl_type == 'atr' %}
+    # Stop Loss config
+    {% if sl_config.sl_type == 'atr' %}
     sl_type = StopLossType.ATR
-    atr_stop_multiplier = {{ sl_params.get('atr_mult', 2.0) }}
+    atr_stop_multiplier = {{ sl_params.get('atr_multiplier', 2.0) }}
     {% elif sl_config.sl_type == 'structure' %}
     sl_type = StopLossType.STRUCTURE
+    structure_lookback = {{ sl_params.get('lookback', 10) }}
+    {% elif sl_config.sl_type == 'trailing' %}
+    sl_type = StopLossType.TRAILING
+    trailing_stop_pct = {{ sl_params.get('trailing_pct', 0.02) }}
+    trailing_activation_pct = {{ sl_params.get('activation_pct', 0.01) }}
+    {% else %}
+    sl_type = StopLossType.PERCENTAGE
     {% endif %}
 
+    # Take Profit config
     {% if tp_config %}
-    # Take Profit params
-    {% if tp_config.tp_type == 'pct' %}
-    tp_type = TakeProfitType.PERCENTAGE
+    {% if tp_config.tp_type == 'atr' %}
+    tp_type = TakeProfitType.ATR
+    atr_take_multiplier = {{ tp_params.get('atr_multiplier', 3.0) }}
     {% elif tp_config.tp_type == 'rr_ratio' %}
     tp_type = TakeProfitType.RR_RATIO
     rr_ratio = {{ tp_params.get('rr_ratio', 2.0) }}
-    {% elif tp_config.tp_type == 'atr' %}
-    tp_type = TakeProfitType.ATR
-    atr_take_multiplier = {{ tp_params.get('atr_mult', 3.0) }}
+    {% else %}
+    tp_type = TakeProfitType.PERCENTAGE
     {% endif %}
-    {% endif %}
-
-    {% if trailing %}
-    # Trailing Stop
-    trailing_stop_pct = {{ trailing_params.get('trail_pct', 0.01) }}
-    trailing_activation_pct = {{ trailing_params.get('act_pct', 0.01) }}
+    {% else %}
+    tp_type = TakeProfitType.PERCENTAGE
     {% endif %}
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -129,15 +133,11 @@ class {{ class_name }}(StrategyCore):
             {% endfor %}
         )
         {% endif %}
-        {% if ec.indicator.output_columns | length > 1 %}
-        # Multi-column output - take first (main) column
+        # Handle both Series and DataFrame results (some indicators return DataFrame even with single output)
         if isinstance({{ ec.indicator.id | lower }}_result, pd.DataFrame):
             df['{{ ec.indicator.id | lower }}'] = {{ ec.indicator.id | lower }}_result.iloc[:, 0]
         else:
             df['{{ ec.indicator.id | lower }}'] = {{ ec.indicator.id | lower }}_result
-        {% else %}
-        df['{{ ec.indicator.id | lower }}'] = {{ ec.indicator.id | lower }}_result
-        {% endif %}
 
         {% endfor %}
 
@@ -189,64 +189,37 @@ class {{ class_name }}(StrategyCore):
             return None
 
         # === BUILD SIGNAL ===
-        {% if direction == 'BIDI' %}
-        signal_direction = 'long'  # Default for BIDI entries
-        {% else %}
+        # Direction derived from entry conditions (never BIDI at strategy level)
         signal_direction = '{{ direction | lower }}'
-        {% endif %}
 
         signal_kwargs = {
             'direction': signal_direction,
             'leverage': self.LEVERAGE,
 
-            # Stop Loss
-            {% if sl_config.sl_type == 'pct' %}
-            'sl_type': StopLossType.PERCENTAGE,
+            # Stop Loss (type-aware, optimized by typed parametric backtest)
+            'sl_type': self.sl_type,
             'sl_pct': self.SL_PCT,
-            {% elif sl_config.sl_type == 'atr' %}
-            'sl_type': StopLossType.ATR,
-            'atr_stop_multiplier': {{ sl_params.get('atr_mult', 2.0) }},
+            {% if sl_config.sl_type == 'atr' %}
+            'atr_stop_multiplier': self.atr_stop_multiplier,
             {% elif sl_config.sl_type == 'structure' %}
-            'sl_type': StopLossType.STRUCTURE,
-            {% if sl_config.id == 'SL_03' %}
-            {% if direction == 'LONG' %}
-            'sl_price': df['low'].iloc[-{{ sl_params.get('lookback', 5) }}:].min(),
+            # Calculate sl_price from lookback (swing low for long, swing high for short)
+            {% if direction == 'SHORT' %}
+            'sl_price': df['high'].iloc[-self.structure_lookback:].max(),
             {% else %}
-            'sl_price': df['high'].iloc[-{{ sl_params.get('lookback', 5) }}:].max(),
+            'sl_price': df['low'].iloc[-self.structure_lookback:].min(),
             {% endif %}
-            {% elif sl_config.id == 'SL_04' %}
-            {% if direction == 'LONG' %}
-            'sl_price': df['low'].iloc[-{{ sl_params.get('swing_lookback', 10) }}:].min(),
-            {% else %}
-            'sl_price': df['high'].iloc[-{{ sl_params.get('swing_lookback', 10) }}:].max(),
-            {% endif %}
-            {% endif %}
+            {% elif sl_config.sl_type == 'trailing' %}
+            'trailing_stop_pct': self.trailing_stop_pct,
+            'trailing_activation_pct': self.trailing_activation_pct,
             {% endif %}
 
-            {% if tp_config and tp_params %}
-            # Take Profit
-            {% if tp_config.tp_type == 'pct' %}
-            'tp_type': TakeProfitType.PERCENTAGE,
+            # Take Profit (type-aware, optimized by typed parametric backtest)
+            'tp_type': self.tp_type,
             'tp_pct': self.TP_PCT,
-            {% elif tp_config.tp_type == 'rr_ratio' %}
-            'tp_type': TakeProfitType.RR_RATIO,
-            'rr_ratio': {{ tp_params.get('rr_ratio', 2.0) }},
-            {% elif tp_config.tp_type == 'atr' %}
-            'tp_type': TakeProfitType.ATR,
-            'atr_take_multiplier': {{ tp_params.get('atr_mult', 3.0) }},
-            {% elif tp_config.tp_type == 'structure' %}
-            {% if direction == 'LONG' %}
-            'tp_price': df['high'].iloc[-{{ tp_params.get('lookback', 20) }}:].max(),
-            {% else %}
-            'tp_price': df['low'].iloc[-{{ tp_params.get('lookback', 20) }}:].min(),
-            {% endif %}
-            {% endif %}
-            {% endif %}
-
-            {% if trailing %}
-            # Trailing Stop
-            'trailing_stop_pct': {{ trailing_params.get('trail_pct', 0.01) }},
-            'trailing_activation_pct': {{ trailing_params.get('act_pct', 0.01) }},
+            {% if tp_config and tp_config.tp_type == 'atr' %}
+            'atr_take_multiplier': self.atr_take_multiplier,
+            {% elif tp_config and tp_config.tp_type == 'rr_ratio' %}
+            'rr_ratio': self.rr_ratio,
             {% endif %}
 
             # Time-based Exit (read from class attribute, may be 0 for no time exit)

@@ -2,7 +2,7 @@
 Pattern-Gen Strategy: {{ pattern_name }}
 Type: {{ strategy_type }} ({{ composition_type }})
 Timeframe: {{ timeframe }}
-Direction: {{ direction }}
+Direction: {{ direction | lower }}
 Blocks: {{ blocks_used | join(', ') }}
 Generated: {{ generated_at }}
 """
@@ -16,13 +16,13 @@ from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitTy
 class {{ class_name }}(StrategyCore):
     """
     Pattern: {{ pattern_name }}
-    Direction: {{ direction }}
+    Direction: {{ direction | lower }}
     Lookback: {{ lookback }} bars
     Execution: {{ execution_type }}
     """
 
-    # Direction
-    direction = '{{ direction }}'
+    # Direction (always 'long' or 'short', never 'bidi')
+    direction = '{{ direction | lower }}'
 
     # Timeframe (for Sharpe annualization)
     timeframe = '{{ timeframe }}'

@@ -58,6 +58,11 @@ class DataScheduler:
         # Components (lazy init)
         self._pairs_updater: Optional[PairsUpdater] = None
         self._binance_downloader: Optional[BinanceDataDownloader] = None
+        self._funding_loader = None  # Lazy init to avoid circular imports
+
+        # Funding config
+        funding_config = self.config.get('funding', {})
+        self.funding_enabled = funding_config.get('enabled', False)
 
         logger.info(
             f"DataScheduler initialized: hours={self.update_hours}, enabled={self.enabled}"
@@ -76,6 +81,14 @@ class DataScheduler:
         if self._binance_downloader is None:
             self._binance_downloader = BinanceDataDownloader()
         return self._binance_downloader
+
+    @property
+    def funding_loader(self):
+        """Lazy init funding loader"""
+        if self._funding_loader is None:
+            from src.data.funding_loader import FundingLoader
+            self._funding_loader = FundingLoader()
+        return self._funding_loader
 
     def update_pairs(self) -> None:
         """
@@ -111,8 +124,38 @@ class DataScheduler:
             self.binance_downloader.download_for_pairs()
             logger.info("Data download complete")
 
+            # Sync funding rates if enabled
+            if self.funding_enabled:
+                self.sync_funding()
+
         except Exception as e:
             logger.error(f"Data download failed: {e}", exc_info=True)
+
+    def sync_funding(self) -> None:
+        """
+        Sync funding rates for all active coins from Hyperliquid.
+
+        Called after OHLCV download when funding.enabled=true.
+        """
+        if not self.funding_enabled:
+            return
+
+        logger.info("Starting funding rates sync...")
+
+        try:
+            from src.data.coin_registry import get_active_pairs
+            symbols = get_active_pairs()
+
+            logger.info(f"Syncing funding rates for {len(symbols)} symbols")
+            results = self.funding_loader.download_for_symbols(symbols)
+
+            success = sum(1 for v in results.values() if v is not None)
+            failed = len(results) - success
+
+            logger.info(f"Funding sync complete: {success} success, {failed} failed")
+
+        except Exception as e:
+            logger.error(f"Funding sync failed: {e}", exc_info=True)
 
     def run_now(self) -> None:
         """

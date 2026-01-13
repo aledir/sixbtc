@@ -23,6 +23,7 @@ from src.database import get_session, MarketRegime, Coin
 from src.utils import get_logger
 
 from .composer import PtaBlueprint, PtaComposer, PtaEntryCondition
+from .catalogs import get_direction_for_condition
 
 logger = get_logger(__name__)
 
@@ -324,13 +325,27 @@ class PandasTaGenerator:
             for key, value in bp.exit_params.items():
                 exit_logic = exit_logic.replace(f'{{{key}}}', str(value))
 
+        # Derive effective direction from entry conditions
+        # This ensures we don't set direction='bidi' which requires separate
+        # long_signal/short_signal columns that we don't create
+        effective_direction = bp.direction
+        if bp.direction == 'BIDI' and bp.entry_conditions:
+            # Use first entry condition's direction
+            first_ec = bp.entry_conditions[0]
+            derived = get_direction_for_condition(
+                first_ec.indicator.category,
+                first_ec.condition_type
+            )
+            # Only use if it's concrete (LONG/SHORT), else default to LONG
+            effective_direction = derived if derived in ('LONG', 'SHORT') else 'LONG'
+
         return self.template.render(
             # Meta
             strategy_id=bp.strategy_id,
             class_name=bp.get_class_name(),
             strategy_type=bp.get_strategy_type(),
             timeframe=bp.timeframe,
-            direction=bp.direction,
+            direction=effective_direction,
             regime_type=bp.regime_type,
             generated_at=datetime.now(timezone.utc).isoformat(),
             # Entry

@@ -491,14 +491,14 @@ class ParametricGenerator:
         import re
 
         # Find existing class name pattern (supports all prefixes)
-        pattern = r'class (?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+_\w+\(StrategyCore\)'
+        pattern = r'class (?:Strategy|PatStrat|UngStrat|UggStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+_\w+\(StrategyCore\)'
         new_class = f'class Strategy_{strategy_type}_{strategy_id}(StrategyCore)'
 
         updated = re.sub(pattern, new_class, code)
 
         if updated == code:
             # Pattern didn't match, try simpler pattern
-            pattern = r'class (?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+\(StrategyCore\)'
+            pattern = r'class (?:Strategy|PatStrat|UngStrat|UggStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+\(StrategyCore\)'
             updated = re.sub(pattern, new_class, code)
 
         return updated

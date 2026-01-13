@@ -1,10 +1,10 @@
 """
-Pattern-Gen Strategy: Historical Volatility Breakout + ADX Trending Market
-Type: HVO (template)
-Timeframe: 30m
-Direction: long
-Blocks: HV_BREAKOUT, ADX_TRENDING
-Generated: 2026-01-13T00:59:05.808846+00:00
+Pattern-Gen Strategy: EMA Fast Cross Down (fast_period8_slow_period50)
+Type: CRS (parametric)
+Timeframe: 1h
+Direction: short
+Blocks: EMA_CROSS_DOWN
+Generated: 2026-01-13T02:03:10.264055+00:00
 """
 
 import talib as ta
@@ -13,34 +13,34 @@ import numpy as np
 from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType
 
 
-class PGnStrat_HVO_9b4d08c6d3d12afe(StrategyCore):
+class PGnStrat_CRS_a02b7c64f7752cf1(StrategyCore):
     """
-    Pattern: Historical Volatility Breakout + ADX Trending Market
-    Direction: long
-    Lookback: 40 bars
-    Execution: touch_based
+    Pattern: EMA Fast Cross Down (fast_period8_slow_period50)
+    Direction: short
+    Lookback: 100 bars
+    Execution: close_based
     """
 
     # Direction
-    direction = 'long'
+    direction = 'short'
 
     # Timeframe (for Sharpe annualization)
-    timeframe = '30m'
+    timeframe = '1h'
 
     # Execution type for parametric optimization
-    execution_type = 'touch_based'
+    execution_type = 'close_based'
 
     # Signal column for vectorized backtest
     signal_column = 'entry_signal'
 
     # Lookback required
-    LOOKBACK = 40
+    LOOKBACK = 100
 
     # Risk management parameters (to be optimized by parametric backtest)
-    SL_PCT = 0.12
+    SL_PCT = 0.6
     TP_PCT = 0.0
     LEVERAGE = 1
-    exit_after_bars = 45
+    exit_after_bars = 30
 
     # Stop Loss config
     sl_type = StopLossType.PERCENTAGE
@@ -52,25 +52,17 @@ class PGnStrat_HVO_9b4d08c6d3d12afe(StrategyCore):
         """
         Calculate indicators and entry_signal for vectorized backtesting.
 
-        Pattern: Historical Volatility Breakout + ADX Trending Market
-        Composition: template
+        Pattern: EMA Fast Cross Down (fast_period8_slow_period50)
+        Composition: parametric
         """
         df = df.copy()
 
         # === INDICATOR CALCULATIONS ===
-        df['returns'] = np.log(df['close'] / df['close'].shift(1))
-        df['hv'] = df['returns'].rolling(20).std() * np.sqrt(252) * 100
-        df['hv_ma'] = df['hv'].rolling(20).mean()
-        df['was_low'] = df['hv'].shift(3) < df['hv_ma'].shift(3)
-        df['now_high'] = df['hv'] > df['hv_ma']
-        df['breakout'] = df['was_low'] & df['now_high']
-        df['price_up'] = df['close'] > df['close'].shift(3)
-        df['adx'] = ta.ADX(df['high'], df['low'], df['close'], timeperiod=20)
+        df['ema_fast'] = ta.EMA(df['close'], timeperiod=8)
+        df['ema_slow'] = ta.EMA(df['close'], timeperiod=50)
 
         # === ENTRY SIGNAL ===
-        df['entry_cond1'] = df['breakout'] & df['price_up']
-        df['entry_cond2'] = df['adx'] > 30
-        df['entry_signal'] = df['entry_cond1'] & df['entry_cond2']
+        df['entry_signal'] = (df['ema_fast'] < df['ema_slow']) & (df['ema_fast'].shift(1) >= df['ema_slow'].shift(1))
 
         # Ensure entry_signal is boolean
         df['entry_signal'] = df['entry_signal'].fillna(False).astype(bool)
@@ -99,5 +91,5 @@ class PGnStrat_HVO_9b4d08c6d3d12afe(StrategyCore):
             tp_type=TakeProfitType.PERCENTAGE,
             tp_pct=self.TP_PCT,
             exit_after_bars=self.exit_after_bars,
-            reason='Historical Volatility Breakout + ADX Trending Market',
+            reason='EMA Fast Cross Down (fast_period8_slow_period50)',
         )

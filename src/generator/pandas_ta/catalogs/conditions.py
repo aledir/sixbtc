@@ -51,110 +51,450 @@ class ConditionTemplate:
 # STANDARD THRESHOLDS FOR INDICATORS
 # =============================================================================
 
-# Thresholds with market sense (not random values)
+# Thresholds with market sense - EXPANDED with extreme values
+# Philosophy: let backtest decide what works, explore all possibilities
 INDICATOR_THRESHOLDS = {
-    # Momentum oscillators (0-100 scale)
+    # ==========================================================================
+    # MOMENTUM OSCILLATORS (0-100 scale)
+    # ==========================================================================
     "RSI": {
-        "oversold": [20, 25, 30, 35],       # LONG entry
-        "overbought": [65, 70, 75, 80],     # SHORT entry
-        "neutral_low": [40, 45],
-        "neutral_high": [55, 60],
+        "oversold": [5, 10, 15, 20, 25, 30, 35, 40],      # Extreme to mild
+        "overbought": [60, 65, 70, 75, 80, 85, 90, 95],   # Mild to extreme
+        "neutral_low": [40, 45, 48],
+        "neutral_high": [52, 55, 60],
     },
     "STOCH_K": {
-        "oversold": [15, 20, 25],
-        "overbought": [75, 80, 85],
+        "oversold": [5, 10, 15, 20, 25, 30],
+        "overbought": [70, 75, 80, 85, 90, 95],
     },
     "MFI": {
-        "oversold": [15, 20, 25],
-        "overbought": [75, 80, 85],
+        "oversold": [5, 10, 15, 20, 25, 30],
+        "overbought": [70, 75, 80, 85, 90, 95],
     },
     "WILLR": {
         # Williams %R: -100 to 0
-        "oversold": [-90, -85, -80],        # Near bottom = oversold
-        "overbought": [-20, -15, -10],      # Near top = overbought
-    },
-
-    # Unbounded oscillators
-    "CCI": {
-        "oversold": [-150, -100, -80],
-        "overbought": [80, 100, 150],
-    },
-    "CMO": {
-        "oversold": [-50, -40, -30],
-        "overbought": [30, 40, 50],
-    },
-    "ROC": {
-        "negative": [-5, -3, -2],           # % change
-        "positive": [2, 3, 5],
-    },
-    "MOM": {
-        "negative": [-2, -1, 0],
-        "positive": [0, 1, 2],
-    },
-    "TSI": {
-        "oversold": [-25, -20, -15],
-        "overbought": [15, 20, 25],
+        "oversold": [-99, -95, -90, -85, -80, -75],       # Near bottom = oversold
+        "overbought": [-25, -20, -15, -10, -5, -1],       # Near top = overbought
     },
     "UO": {
-        "oversold": [25, 30, 35],
-        "overbought": [65, 70, 75],
-    },
-    "AO": {
-        "negative": [-100, -50, 0],
-        "positive": [0, 50, 100],
+        # Ultimate Oscillator: 0-100
+        "oversold": [15, 20, 25, 30, 35],
+        "overbought": [65, 70, 75, 80, 85],
     },
 
-    # Trend strength
+    # ==========================================================================
+    # UNBOUNDED OSCILLATORS
+    # ==========================================================================
+    "CCI": {
+        "oversold": [-250, -200, -150, -100, -80, -50],
+        "overbought": [50, 80, 100, 150, 200, 250],
+    },
+    "CMO": {
+        # Chande Momentum: -100 to 100
+        "oversold": [-70, -60, -50, -40, -30, -20],
+        "overbought": [20, 30, 40, 50, 60, 70],
+    },
+    "ROC": {
+        # Rate of Change: % change
+        "negative": [-10, -7, -5, -3, -2, -1],
+        "positive": [1, 2, 3, 5, 7, 10],
+    },
+    "MOM": {
+        # Momentum: unbounded
+        "negative": [-5, -3, -2, -1, 0],
+        "positive": [0, 1, 2, 3, 5],
+    },
+    "TSI": {
+        # True Strength Index: -100 to 100
+        "oversold": [-40, -35, -30, -25, -20, -15, -10],
+        "overbought": [10, 15, 20, 25, 30, 35, 40],
+    },
+    "AO": {
+        # Awesome Oscillator: unbounded
+        "negative": [-200, -150, -100, -50, 0],
+        "positive": [0, 50, 100, 150, 200],
+    },
+    "PPO": {
+        # Percentage Price Oscillator: unbounded %
+        "negative": [-3, -2, -1.5, -1, -0.5, 0],
+        "positive": [0, 0.5, 1, 1.5, 2, 3],
+    },
+    "TRIX": {
+        # TRIX: unbounded small values
+        "negative": [-0.3, -0.2, -0.1, -0.05, 0],
+        "positive": [0, 0.05, 0.1, 0.2, 0.3],
+    },
+    "DPO": {
+        # Detrended Price Oscillator: unbounded
+        "negative": [-5, -3, -2, -1, 0],
+        "positive": [0, 1, 2, 3, 5],
+    },
+
+    # ==========================================================================
+    # TREND STRENGTH
+    # ==========================================================================
     "ADX": {
-        "weak_trend": [15, 20],
-        "strong_trend": [25, 30, 40],
+        "weak_trend": [10, 15, 20],
+        "strong_trend": [25, 30, 35, 40, 50],
     },
     "AROON": {
         # AROONOSC: -100 to 100
-        "bearish": [-50, -25],
-        "bullish": [25, 50],
+        "bearish": [-80, -60, -50, -40, -25],
+        "bullish": [25, 40, 50, 60, 80],
     },
 
-    # Bollinger Bands %B (0-1 typically, can go outside)
+    # ==========================================================================
+    # BOLLINGER BANDS
+    # ==========================================================================
     "BBANDS": {
-        "below_lower": [-0.1, 0, 0.1],      # Below/at lower band
-        "above_upper": [0.9, 1.0, 1.1],     # Above/at upper band
-        "middle_low": [0.2, 0.3],
-        "middle_high": [0.7, 0.8],
+        "below_lower": [-0.2, -0.1, 0, 0.05, 0.1],        # Below/at lower band
+        "above_upper": [0.9, 0.95, 1.0, 1.1, 1.2],        # Above/at upper band
+        "middle_low": [0.15, 0.2, 0.25, 0.3, 0.35],
+        "middle_high": [0.65, 0.7, 0.75, 0.8, 0.85],
     },
 
-    # MACD (histogram crosses zero)
+    # ==========================================================================
+    # MACD
+    # ==========================================================================
     "MACD": {
-        "histogram_negative": [-0.5, -0.2, 0],
-        "histogram_positive": [0, 0.2, 0.5],
+        "histogram_negative": [-1, -0.5, -0.3, -0.2, -0.1, 0],
+        "histogram_positive": [0, 0.1, 0.2, 0.3, 0.5, 1],
     },
 
-    # Supertrend direction (1 = bullish, -1 = bearish)
+    # ==========================================================================
+    # TREND FOLLOWING
+    # ==========================================================================
     "SUPERTREND": {
         "bullish": [1],
         "bearish": [-1],
     },
+    "PSAR": {
+        # PSAR: slope indicates direction change
+        "bullish": [1],
+        "bearish": [-1],
+    },
 
-    # Volume indicators (typically compare to moving average)
+    # ==========================================================================
+    # VOLATILITY
+    # ==========================================================================
+    "ATR": {
+        # ATR as % of price (normalized)
+        "low_vol": [0.5, 1.0, 1.5, 2.0],
+        "high_vol": [3.0, 4.0, 5.0, 6.0],
+    },
+    "NATR": {
+        # Normalized ATR: % of price
+        "low_vol": [0.5, 1.0, 1.5, 2.0],
+        "high_vol": [3.0, 4.0, 5.0, 6.0],
+    },
+    "KC": {
+        # Keltner %B similar to BB %B
+        "below_lower": [-0.1, 0, 0.1],
+        "above_upper": [0.9, 1.0, 1.1],
+    },
+    "DONCHIAN": {
+        # Donchian %B
+        "below_lower": [0, 0.1, 0.2],
+        "above_upper": [0.8, 0.9, 1.0],
+    },
+    "MASSI": {
+        # Mass Index
+        "squeeze": [21, 25, 26],
+        "expansion": [27, 28, 30],
+    },
+    "UI": {
+        # Ulcer Index: lower is better
+        "low": [1, 2, 3, 4],
+        "high": [6, 8, 10, 15],
+    },
+
+    # ==========================================================================
+    # VOLUME INDICATORS
+    # ==========================================================================
     "CMF": {
-        "outflow": [-0.2, -0.1, -0.05],
-        "inflow": [0.05, 0.1, 0.2],
+        "outflow": [-0.3, -0.25, -0.2, -0.15, -0.1, -0.05],
+        "inflow": [0.05, 0.1, 0.15, 0.2, 0.25, 0.3],
     },
     "EFI": {
-        "negative": [-1000000, -100000, 0],
-        "positive": [0, 100000, 1000000],
+        # Elder Force Index: volume-weighted price change
+        "negative": [-2000000, -1000000, -500000, -100000, 0],
+        "positive": [0, 100000, 500000, 1000000, 2000000],
+    },
+    "OBV": {
+        # OBV: slope matters more than absolute value
+        "slope": [0],  # Cross zero
+    },
+    "AD": {
+        # A/D Line: slope matters
+        "slope": [0],
+    },
+    "ADOSC": {
+        # A/D Oscillator
+        "negative": [-1000000, -500000, -100000, 0],
+        "positive": [0, 100000, 500000, 1000000],
+    },
+    "NVI": {
+        # Negative Volume Index: slope
+        "slope": [0],
+    },
+    "PVI": {
+        # Positive Volume Index: slope
+        "slope": [0],
+    },
+    "VWAP": {
+        # VWAP: price vs VWAP
+        "below": [-3, -2, -1, -0.5],  # % below
+        "above": [0.5, 1, 2, 3],      # % above
     },
 
-    # Price vs MA (percentage distance)
+    # ==========================================================================
+    # MOVING AVERAGES (price distance)
+    # ==========================================================================
+    "EMA": {
+        "below": [-5, -3, -2, -1, -0.5],    # % below MA
+        "above": [0.5, 1, 2, 3, 5],         # % above MA
+    },
+    "SMA": {
+        "below": [-5, -3, -2, -1, -0.5],
+        "above": [0.5, 1, 2, 3, 5],
+    },
+    "HMA": {
+        "below": [-5, -3, -2, -1, -0.5],
+        "above": [0.5, 1, 2, 3, 5],
+    },
+    "DEMA": {
+        "below": [-5, -3, -2, -1, -0.5],
+        "above": [0.5, 1, 2, 3, 5],
+    },
+    "TEMA": {
+        "below": [-5, -3, -2, -1, -0.5],
+        "above": [0.5, 1, 2, 3, 5],
+    },
+    "T3": {
+        "below": [-5, -3, -2, -1, -0.5],
+        "above": [0.5, 1, 2, 3, 5],
+    },
+    "KAMA": {
+        "below": [-5, -3, -2, -1, -0.5],
+        "above": [0.5, 1, 2, 3, 5],
+    },
+    "ZLMA": {
+        "below": [-5, -3, -2, -1, -0.5],
+        "above": [0.5, 1, 2, 3, 5],
+    },
+
+    # ==========================================================================
+    # PRICE VS MA (generic)
+    # ==========================================================================
     "PRICE_VS_MA": {
-        "below": [-5, -3, -2, -1],          # % below MA
-        "above": [1, 2, 3, 5],              # % above MA
+        "below": [-7, -5, -3, -2, -1, -0.5],
+        "above": [0.5, 1, 2, 3, 5, 7],
     },
 
-    # ATR-normalized distance
+    # ==========================================================================
+    # ATR-NORMALIZED DISTANCE
+    # ==========================================================================
     "ATR_DISTANCE": {
-        "close": [0.5, 1.0, 1.5],
-        "far": [2.0, 2.5, 3.0],
+        "close": [0.3, 0.5, 0.75, 1.0, 1.5],
+        "far": [2.0, 2.5, 3.0, 4.0, 5.0],
+    },
+
+    # ==========================================================================
+    # NEW MOMENTUM INDICATORS
+    # ==========================================================================
+    "APO": {
+        "negative": [-3, -2, -1.5, -1, -0.5, 0],
+        "positive": [0, 0.5, 1, 1.5, 2, 3],
+    },
+    "BIAS": {
+        "negative": [-5, -3, -2, -1],
+        "positive": [1, 2, 3, 5],
+    },
+    "BOP": {
+        # Balance of Power: -1 to 1
+        "negative": [-0.8, -0.6, -0.4, -0.2],
+        "positive": [0.2, 0.4, 0.6, 0.8],
+    },
+    "CFO": {
+        "negative": [-20, -15, -10, -5, 0],
+        "positive": [0, 5, 10, 15, 20],
+    },
+    "CG": {
+        "negative": [-2, -1.5, -1, -0.5, 0],
+        "positive": [0, 0.5, 1, 1.5, 2],
+    },
+    "COPPOCK": {
+        "negative": [-100, -50, -25, 0],
+        "positive": [0, 25, 50, 100],
+    },
+    "CTI": {
+        # Correlation Trend Indicator: -1 to 1
+        "negative": [-0.8, -0.6, -0.4, -0.2],
+        "positive": [0.2, 0.4, 0.6, 0.8],
+    },
+    "ER": {
+        # Efficiency Ratio: 0 to 1
+        "low": [0.1, 0.2, 0.3],
+        "high": [0.5, 0.6, 0.7, 0.8],
+    },
+    "FISHER": {
+        "negative": [-2, -1.5, -1, -0.5],
+        "positive": [0.5, 1, 1.5, 2],
+    },
+    "INERTIA": {
+        "oversold": [20, 30, 40],
+        "overbought": [60, 70, 80],
+    },
+    "KDJ": {
+        "oversold": [10, 20, 30],
+        "overbought": [70, 80, 90],
+    },
+    "KST": {
+        "negative": [-20, -10, -5, 0],
+        "positive": [0, 5, 10, 20],
+    },
+    "PGO": {
+        "negative": [-3, -2, -1, 0],
+        "positive": [0, 1, 2, 3],
+    },
+    "PSL": {
+        # Psychological Line: 0-100
+        "oversold": [20, 30, 40],
+        "overbought": [60, 70, 80],
+    },
+    "QQE": {
+        "oversold": [20, 30],
+        "overbought": [70, 80],
+    },
+    "RSX": {
+        # Similar to RSI: 0-100
+        "oversold": [10, 20, 30],
+        "overbought": [70, 80, 90],
+    },
+    "RVGI": {
+        "negative": [-0.5, -0.3, -0.1, 0],
+        "positive": [0, 0.1, 0.3, 0.5],
+    },
+    "SLOPE": {
+        "negative": [-1, -0.5, -0.2, 0],
+        "positive": [0, 0.2, 0.5, 1],
+    },
+    "SMI": {
+        # Stochastic Momentum Index: -100 to 100
+        "oversold": [-60, -50, -40, -30],
+        "overbought": [30, 40, 50, 60],
+    },
+    "SQUEEZE": {
+        # Squeeze values around zero
+        "negative": [-1, -0.5, -0.2, 0],
+        "positive": [0, 0.2, 0.5, 1],
+    },
+    "SQUEEZE_PRO": {
+        "negative": [-1, -0.5, -0.2, 0],
+        "positive": [0, 0.2, 0.5, 1],
+    },
+    "STC": {
+        # Schaff Trend Cycle: 0-100
+        "oversold": [10, 20, 25],
+        "overbought": [75, 80, 90],
+    },
+    "STOCHRSI": {
+        # Stochastic RSI: 0-100
+        "oversold": [5, 10, 15, 20],
+        "overbought": [80, 85, 90, 95],
+    },
+    "TMO": {
+        "negative": [-10, -5, 0],
+        "positive": [0, 5, 10],
+    },
+
+    # ==========================================================================
+    # NEW TREND INDICATORS
+    # ==========================================================================
+    "CHOP": {
+        # Choppiness Index: 0-100, high = choppy, low = trending
+        "trending": [30, 38, 40],
+        "choppy": [55, 60, 62],
+    },
+    "VORTEX": {
+        # Vortex: crossover around 1.0
+        "negative": [0.8, 0.9, 1.0],
+        "positive": [1.0, 1.1, 1.2],
+    },
+    "VHF": {
+        # Vertical Horizontal Filter
+        "low": [0.2, 0.3, 0.35],
+        "high": [0.4, 0.5, 0.6],
+    },
+
+    # ==========================================================================
+    # NEW VOLATILITY INDICATORS
+    # ==========================================================================
+    "RVI": {
+        # Relative Volatility Index: 0-100
+        "low_vol": [30, 40, 50],
+        "high_vol": [60, 70, 80],
+    },
+    "ABERRATION": {
+        "negative": [-2, -1, 0],
+        "positive": [0, 1, 2],
+    },
+    "THERMO": {
+        "low": [0.5, 1, 1.5],
+        "high": [2, 2.5, 3],
+    },
+
+    # ==========================================================================
+    # NEW VOLUME INDICATORS
+    # ==========================================================================
+    "EOM": {
+        "negative": [-100, -50, 0],
+        "positive": [0, 50, 100],
+    },
+    "KVO": {
+        "negative": [-1000000, -500000, 0],
+        "positive": [0, 500000, 1000000],
+    },
+    "PVO": {
+        "negative": [-10, -5, -2, 0],
+        "positive": [0, 2, 5, 10],
+    },
+
+    # ==========================================================================
+    # STATISTICS INDICATORS
+    # ==========================================================================
+    "ZSCORE": {
+        "oversold": [-3, -2.5, -2, -1.5],
+        "overbought": [1.5, 2, 2.5, 3],
+    },
+    "ENTROPY": {
+        "low": [0.3, 0.4, 0.5],
+        "high": [0.7, 0.8, 0.9],
+    },
+    "SKEW": {
+        "negative": [-2, -1.5, -1, -0.5],
+        "positive": [0.5, 1, 1.5, 2],
+    },
+    "KURTOSIS": {
+        "low": [0, 1, 2],
+        "high": [4, 5, 6],
+    },
+
+    # ==========================================================================
+    # CYCLE INDICATORS
+    # ==========================================================================
+    "EBSW": {
+        "negative": [-0.8, -0.5, -0.3],
+        "positive": [0.3, 0.5, 0.8],
+    },
+
+    # ==========================================================================
+    # CANDLE PATTERNS
+    # Candle patterns return 100 (bullish), -100 (bearish), or 0 (no pattern)
+    # ==========================================================================
+    "CANDLE": {
+        "bullish": [100],    # Pattern detected = 100
+        "bearish": [-100],   # Pattern detected = -100
     },
 }
 
@@ -250,6 +590,22 @@ CATEGORY_CONDITIONS = {
         ConditionType.SLOPE_UP,
         ConditionType.SLOPE_DOWN,
     ],
+    "statistics": [
+        ConditionType.THRESHOLD_BELOW,    # Z-score < -2 = oversold
+        ConditionType.THRESHOLD_ABOVE,    # Z-score > 2 = overbought
+        ConditionType.CROSSED_ABOVE,
+        ConditionType.CROSSED_BELOW,
+    ],
+    "cycle": [
+        ConditionType.THRESHOLD_BELOW,
+        ConditionType.THRESHOLD_ABOVE,
+        ConditionType.CROSSED_ABOVE,
+        ConditionType.CROSSED_BELOW,
+    ],
+    "candle": [
+        ConditionType.THRESHOLD_ABOVE,    # Pattern detected = 100
+        ConditionType.THRESHOLD_BELOW,    # Pattern detected = -100
+    ],
 }
 
 
@@ -286,6 +642,22 @@ CONDITION_DIRECTION = {
     ("volume", ConditionType.THRESHOLD_BELOW): "SHORT",
     ("volume", ConditionType.SLOPE_UP): "LONG",
     ("volume", ConditionType.SLOPE_DOWN): "SHORT",
+
+    # Statistics - similar to momentum (mean reversion)
+    ("statistics", ConditionType.THRESHOLD_BELOW): "LONG",  # Z-score < -2 = oversold
+    ("statistics", ConditionType.THRESHOLD_ABOVE): "SHORT",  # Z-score > 2 = overbought
+    ("statistics", ConditionType.CROSSED_ABOVE): "LONG",
+    ("statistics", ConditionType.CROSSED_BELOW): "SHORT",
+
+    # Cycle - similar to momentum
+    ("cycle", ConditionType.THRESHOLD_BELOW): "LONG",
+    ("cycle", ConditionType.THRESHOLD_ABOVE): "SHORT",
+    ("cycle", ConditionType.CROSSED_ABOVE): "LONG",
+    ("cycle", ConditionType.CROSSED_BELOW): "SHORT",
+
+    # Candle - pattern detection
+    ("candle", ConditionType.THRESHOLD_ABOVE): "LONG",   # Bullish pattern = 100
+    ("candle", ConditionType.THRESHOLD_BELOW): "SHORT",  # Bearish pattern = -100
 }
 
 

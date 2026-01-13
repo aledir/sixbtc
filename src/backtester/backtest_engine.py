@@ -20,6 +20,7 @@ from src.utils.logger import get_logger
 from src.config.loader import load_config
 from src.executor.risk_manager import RiskManager
 from src.data.coin_registry import get_registry, CoinNotFoundError
+from src.backtester.numba_kernels import calculate_atr_full_numba
 
 logger = get_logger(__name__)
 
@@ -50,6 +51,7 @@ def _simulate_portfolio_numba(
     initial_capital: float,
     fee_rate: float,
     slippage: float,
+    funding_cumsum: np.ndarray,     # (n_bars, n_symbols) cumulative funding rates
     breakeven_buffer: float
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
            np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
@@ -231,6 +233,19 @@ def _simulate_portfolio_numba(
                 fees = notional * fee_rate * 2.0
                 pnl -= fees
 
+                # Apply funding costs (O(1) lookup using cumsum)
+                entry_idx = pos_entry_idx[j]
+                if entry_idx > 0:
+                    total_funding = funding_cumsum[i, j] - funding_cumsum[entry_idx - 1, j]
+                else:
+                    total_funding = funding_cumsum[i, j]
+                funding_cost = notional * total_funding
+                # Long pays when rate positive, short receives (and vice versa)
+                if pos_direction[j] == 1:  # Long
+                    pnl -= funding_cost
+                else:  # Short
+                    pnl += funding_cost
+
                 equity += pnl
 
                 # Record trade
@@ -347,6 +362,19 @@ def _simulate_portfolio_numba(
         notional = pos_entry_price[j] * pos_size[j]
         fees = notional * fee_rate * 2.0
         pnl -= fees
+
+        # Apply funding costs (O(1) lookup using cumsum)
+        entry_idx = pos_entry_idx[j]
+        exit_idx = n_bars - 1
+        if entry_idx > 0:
+            total_funding = funding_cumsum[exit_idx, j] - funding_cumsum[entry_idx - 1, j]
+        else:
+            total_funding = funding_cumsum[exit_idx, j]
+        funding_cost = notional * total_funding
+        if pos_direction[j] == 1:  # Long
+            pnl -= funding_cost
+        else:  # Short
+            pnl += funding_cost
 
         equity += pnl
 
@@ -609,6 +637,11 @@ class BacktestEngine:
                 f"exit_bars=({exit_bars_at_entries.min()}-{exit_bars_at_entries.max()})"
             )
 
+        # Prepare funding cumsum (zeros if not provided - caller should pass real data)
+        n_bars_arr = arrays['close'].shape[0]
+        n_symbols_arr = arrays['close'].shape[1]
+        funding_cumsum = np.zeros((n_bars_arr, n_symbols_arr), dtype=np.float64)
+
         # Run Numba-optimized simulation
         _t0 = time.perf_counter()
         (equity_curve_arr, trade_symbol_idx, trade_entry_idx, trade_exit_idx,
@@ -634,6 +667,7 @@ class BacktestEngine:
             self.initial_capital,
             self.fee_rate,
             self.slippage,
+            funding_cumsum,
             self.breakeven_buffer
         )
         _t_simulation = time.perf_counter() - _t0
@@ -1494,39 +1528,54 @@ class BacktestEngine:
         dynamic_cap = 1.0 / max(max_open_positions, 1)
 
         if sl_type == StopLossType.ATR:
-            # ATR-based: calculate effective SL/TP % per entry bar
-            # Check if strategy pre-calculated ATR column
+            # ATR-based: calculate effective SL/TP % per entry bar (VECTORIZED)
+            # Pre-calculate ATR for all bars using Numba kernel
             has_atr_column = 'atr' in df.columns
 
-            for entry_idx in entry_indices:
-                entry_price = df['close'].iloc[entry_idx]
+            if has_atr_column:
+                # Use pre-calculated ATR from strategy
+                atr_arr = df['atr'].values.astype(np.float64)
+            else:
+                # Calculate ATR using Numba-optimized kernel
+                # Reshape to 2D for Numba function: (n_bars, 1)
+                high_2d = df['high'].values.reshape(-1, 1).astype(np.float64)
+                low_2d = df['low'].values.reshape(-1, 1).astype(np.float64)
+                close_2d = df['close'].values.reshape(-1, 1).astype(np.float64)
+                atr_2d = calculate_atr_full_numba(high_2d, low_2d, close_2d, atr_period)
+                atr_arr = atr_2d[:, 0]  # Reshape back to 1D
 
-                # Get ATR value (pre-calculated or on-the-fly)
-                if has_atr_column:
-                    atr_val = df['atr'].iloc[entry_idx]
-                    if pd.isna(atr_val) or atr_val <= 0:
-                        atr_val = _calculate_atr_at_bar(df, entry_idx, atr_period)
-                else:
-                    atr_val = _calculate_atr_at_bar(df, entry_idx, atr_period)
+            # Get entry prices at entry indices (vectorized)
+            entry_prices = df['close'].values[entry_indices]
 
-                # Convert ATR to percentage of entry price
-                if atr_val > 0 and entry_price > 0:
-                    effective_sl_pct = (atr_val * atr_stop_multiplier) / entry_price
-                    effective_tp_pct = (atr_val * atr_take_multiplier) / entry_price
-                else:
-                    # Fallback to default percentages if ATR unavailable
-                    effective_sl_pct = sl_pct if sl_pct else 0.02
-                    effective_tp_pct = tp_pct if tp_pct else 0.03
+            # Get ATR values at entry indices
+            atr_at_entries = atr_arr[entry_indices]
 
-                sl_pcts_arr[entry_idx] = effective_sl_pct
-                tp_pcts_arr[entry_idx] = effective_tp_pct
+            # Calculate effective SL/TP percentages (vectorized)
+            valid_mask = (atr_at_entries > 0) & (entry_prices > 0) & ~np.isnan(atr_at_entries)
 
-                # Position sizing for this entry
-                # Divide by leverage to match live executor risk calculation
-                # Kernel does: notional = margin * leverage, so we pre-divide to keep risk accurate
-                effective_leverage = max(leverage, 1)
-                position_size = min(risk_pct / (effective_sl_pct * effective_leverage), dynamic_cap) if effective_sl_pct > 0 else 0.1
-                sizes_arr[entry_idx] = position_size
+            # Vectorized SL/TP calculation
+            sl_pcts_entries = np.where(
+                valid_mask,
+                (atr_at_entries * atr_stop_multiplier) / entry_prices,
+                sl_pct if sl_pct else np.nan  # No fallback - NaN for invalid
+            )
+            tp_pcts_entries = np.where(
+                valid_mask,
+                (atr_at_entries * atr_take_multiplier) / entry_prices,
+                tp_pct if tp_pct else np.nan  # No fallback - NaN for invalid
+            )
+
+            sl_pcts_arr[entry_indices] = sl_pcts_entries
+            tp_pcts_arr[entry_indices] = tp_pcts_entries
+
+            # Position sizing (vectorized)
+            effective_leverage = max(leverage, 1)
+            position_sizes = np.where(
+                sl_pcts_entries > 0,
+                np.minimum(risk_pct / (sl_pcts_entries * effective_leverage), dynamic_cap),
+                0.1  # Minimum size for invalid SL
+            )
+            sizes_arr[entry_indices] = position_sizes
 
         elif sl_type == StopLossType.TRAILING:
             # Trailing: use trailing_stop_pct as initial SL distance

@@ -221,7 +221,11 @@ def instantiate_strategy(code: str, strategy_name: str):
             if isinstance(obj, type) and (
                 name.startswith('Strategy_') or
                 name.startswith('PatStrat_') or
+                name.startswith('PGnStrat_') or
+                name.startswith('PGgStrat_') or
                 name.startswith('UngStrat_') or
+                name.startswith('UggStrat_') or
+                name.startswith('PtaStrat_') or
                 name.startswith('AIFStrat_') or
                 name.startswith('AIAStrat_')
             ):

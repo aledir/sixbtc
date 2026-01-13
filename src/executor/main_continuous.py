@@ -397,7 +397,7 @@ class ContinuousExecutorProcess:
         try:
             # Extract class name (supports all prefixes)
             import re
-            match = re.search(r'class\s+((?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+)\s*\(', code)
+            match = re.search(r'class\s+((?:Strategy|PatStrat|UngStrat|UggStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+)\s*\(', code)
             if not match:
                 return None
 

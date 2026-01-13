@@ -36,9 +36,11 @@ from src.database.models import ValidationCache
 from src.backtester.backtest_engine import BacktestEngine
 from src.backtester.data_loader import BacktestDataLoader
 from src.backtester.parametric_backtest import ParametricBacktester
-from src.strategies.base import StopLossType
+# NOTE: detect_structure not used - all strategies forced to PERCENTAGE for Numba parametric
+from src.strategies.base import StopLossType, TakeProfitType
 # NOTE: MultiWindowValidator removed - replaced by WFA with parameter re-optimization
 from src.data.coin_registry import get_registry, get_active_pairs
+from src.data.funding_loader import FundingLoader
 from src.scorer import BacktestScorer, PoolManager
 from src.validator.lookahead_test import LookaheadTester
 from src.utils import get_logger, setup_logging
@@ -138,6 +140,10 @@ class ContinuousBacktesterProcess:
             )
         else:
             self.parametric_backtester = None
+
+        # Funding loader - lazy init
+        self._funding_loader = None
+        self.funding_enabled = self.config.get('funding.enabled', False)
 
         # Backtest thresholds - NO defaults
         self.min_sharpe = self.config.get_required('backtesting.thresholds.min_sharpe')
@@ -602,6 +608,20 @@ class ContinuousBacktesterProcess:
             assigned_tf = original_tf
             use_parametric = True
 
+            # Detect SL/TP types from strategy for typed parametric backtest
+            # This enables full parametric optimization for ATR, STRUCTURE, TRAILING, RR_RATIO
+            detected_sl_type = getattr(strategy_instance, 'sl_type', StopLossType.PERCENTAGE)
+            detected_tp_type = getattr(strategy_instance, 'tp_type', TakeProfitType.PERCENTAGE)
+            use_typed_backtest = (
+                detected_sl_type != StopLossType.PERCENTAGE or
+                (detected_tp_type is not None and detected_tp_type != TakeProfitType.PERCENTAGE)
+            )
+            if use_typed_backtest:
+                logger.info(
+                    f"[{strategy_name}] Using typed parametric backtest: "
+                    f"SL={detected_sl_type.value}, TP={detected_tp_type.value if detected_tp_type else 'None'}"
+                )
+
             # Begin single-timeframe backtest (previously a loop over [original_tf])
             # Validate pattern coins for this timeframe (3-level validation)
             if pattern_coins:
@@ -636,13 +656,19 @@ class ContinuousBacktesterProcess:
 
             # STEP 1: PARAMETRIC OPTIMIZATION (screening)
             # Tests ~1050 combinations, finds best combo, discards #2-1050
+            # Supports all SL/TP types via typed parametric backtest:
+            # - PERCENTAGE: standard optimization
+            # - ATR, STRUCTURE, TRAILING: pre-calculated, then optimized
+            # - RR_RATIO: TP = SL × ratio
             try:
                 if use_parametric:
                     # Initial parametric to find best combo
                     parametric_results = self._run_parametric_backtest(
                         strategy_instance, is_data, assigned_tf,
                         strategy_id=strategy_id, strategy_name=strategy_name,
-                        base_code_hash=base_code_hash
+                        base_code_hash=base_code_hash,
+                        sl_type=detected_sl_type if use_typed_backtest else None,
+                        tp_type=detected_tp_type if use_typed_backtest else None,
                     )
 
                     if not parametric_results:
@@ -664,13 +690,24 @@ class ContinuousBacktesterProcess:
                     all_parametric_results = parametric_results
 
                     # Apply best params from parametric to strategy instance
-                    # CRITICAL: Force sl_type to PERCENTAGE for consistency with parametric
-                    # (parametric uses fixed SL%, not ATR-based)
-                    # NOTE: Use UPPERCASE (SL_PCT, TP_PCT, LEVERAGE) to match template definitions
-                    # Base class has lowercase defaults that would override if we used lowercase
-                    strategy_instance.sl_type = StopLossType.PERCENTAGE
-                    strategy_instance.SL_PCT = initial_params.get('sl_pct', 0.02)
-                    strategy_instance.TP_PCT = initial_params.get('tp_pct', 0.03)
+                    # For typed strategies: preserve original sl_type, apply converted pct values
+                    # For percentage strategies: use optimized sl_pct/tp_pct directly
+                    if use_typed_backtest:
+                        # Typed backtest: preserve original SL/TP types
+                        # The parametric returns median sl_pct/tp_pct (pre-calculated from ATR/STRUCTURE)
+                        # These are the EFFECTIVE percentages for the strategy's exit conditions
+                        # Strategy code uses original type (ATR, STRUCTURE, etc.)
+                        # Backtest/live will calculate SL/TP based on original type, not these pcts
+                        strategy_instance.SL_PCT = initial_params.get('sl_pct', 0.02)
+                        strategy_instance.TP_PCT = initial_params.get('tp_pct', 0.03)
+                        # sl_type preserved from original strategy (not overwritten)
+                    else:
+                        # Standard percentage-based: set sl_type=PERCENTAGE
+                        strategy_instance.sl_type = StopLossType.PERCENTAGE
+                        strategy_instance.SL_PCT = initial_params.get('sl_pct', 0.02)
+                        strategy_instance.TP_PCT = initial_params.get('tp_pct', 0.03)
+
+                    # Common params always applied
                     strategy_instance.LEVERAGE = initial_params.get('leverage', 1)
                     strategy_instance.exit_after_bars = initial_params.get('exit_bars', 0)
 
@@ -711,12 +748,20 @@ class ContinuousBacktesterProcess:
                         )
 
                 else:
-                    # Standard: use strategy's original parameters (no WFA)
-                    is_start_time = time.time()  # Track IS phase timing
+                    # Fallback: parametric disabled (should not happen normally)
+                    # Force PERCENTAGE and use original params
+                    is_start_time = time.time()
+                    strategy_instance.sl_type = StopLossType.PERCENTAGE
                     is_result = self._run_multi_symbol_backtest(
                         strategy_instance, is_data, assigned_tf
                     )
-                    optimal_params = None
+                    optimal_params = {
+                        'sl_pct': getattr(strategy_instance, 'SL_PCT', 0.02),
+                        'tp_pct': getattr(strategy_instance, 'TP_PCT', 0.0),
+                        'leverage': getattr(strategy_instance, 'LEVERAGE', 1),
+                        'exit_bars': getattr(strategy_instance, 'exit_after_bars', 0),
+                    }
+                    logger.warning(f"[{strategy_name}] Parametric disabled, using original params")
 
             except Exception as e:
                 self._delete_strategy(strategy_id, f"IS backtest failed: {e}")
@@ -871,18 +916,25 @@ class ContinuousBacktesterProcess:
             oos_data_stored = oos_data
 
             # Save backtest results (only for strategies that pass OOS validation)
+            # Extract date ranges from data for accurate period tracking
+            is_start, is_end = self._extract_date_range(is_data)
             is_backtest_id = self._save_backtest_result(
                 strategy_id, is_result, pairs, assigned_tf,
                 period_type='in_sample',
-                period_days=self.is_days
+                period_days=self.is_days,
+                start_date=is_start,
+                end_date=is_end
             )
 
             oos_backtest_id = None
             if oos_result:
+                oos_start, oos_end = self._extract_date_range(oos_data)
                 oos_backtest_id = self._save_backtest_result(
                     strategy_id, oos_result, pairs, assigned_tf,
                     period_type='out_of_sample',
-                    period_days=self.oos_days
+                    period_days=self.oos_days,
+                    start_date=oos_start,
+                    end_date=oos_end
                 )
 
                 # Link IS result to OOS and add validation metrics
@@ -1074,7 +1126,9 @@ class ContinuousBacktesterProcess:
         timeframe: str,
         strategy_id=None,
         strategy_name: str = None,
-        base_code_hash: str = None
+        base_code_hash: str = None,
+        sl_type: StopLossType = None,
+        tp_type: TakeProfitType = None,
     ) -> List[Dict]:
         """
         Run parametric backtest generating strategies with different SL/TP/leverage/exit.
@@ -1115,9 +1169,11 @@ class ContinuousBacktesterProcess:
             return [result] if result.get('total_trades', 0) > 0 else []
 
         # Build parameter space based on execution_type
-        # - If strategy has execution_type (touch_based/close_based): use specialized space
-        # - Otherwise: use absolute space (generic, per-timeframe ranges)
-        # No fallback - follows "No Fallback, Fast Fail" principle from CLAUDE.md
+        # NOTE: Non-percentage strategies are filtered BEFORE calling this method
+        # (use_parametric=False for ATR, structure, trailing strategies)
+        # So this method only handles percentage-based strategies:
+        # 1. execution_type (touch_based/close_based) → use execution_type_space
+        # 2. Default → use absolute_space
         execution_type = getattr(strategy_instance, 'execution_type', None)
 
         if execution_type in ('touch_based', 'close_based'):
@@ -1193,6 +1249,53 @@ class ContinuousBacktesterProcess:
 
         n_bars = len(common_index)
 
+        # PRE-FILTER DataFrames with fast-path optimization
+        # If all symbols have exactly n_bars rows, they're already aligned (skip filtering)
+        all_aligned = all(len(valid_data[s]) == n_bars for s in symbols)
+
+        if all_aligned:
+            # Fast path: data already aligned, just reset index
+            filtered_data = {
+                symbol: valid_data[symbol].reset_index(drop=True)
+                for symbol in symbols
+            }
+        else:
+            # Slow path: need to filter by common timestamps
+            common_index_set = set(common_index)
+            filtered_data = {}
+            for symbol in symbols:
+                raw_df = valid_data[symbol]
+                if 'timestamp' in raw_df.columns:
+                    mask = raw_df['timestamp'].isin(common_index_set)
+                    filtered_data[symbol] = raw_df[mask].reset_index(drop=True)
+                else:
+                    filtered_data[symbol] = raw_df.loc[common_index].reset_index(drop=True)
+
+        # Load funding rates if enabled
+        funding_cumsum = None
+        if self.funding_enabled:
+            try:
+                # Extract coin names (BTCUSDT -> BTC)
+                coin_symbols = [s.replace('USDT', '').replace('PERP', '') for s in symbols]
+
+                # Align funding to OHLCV timestamps
+                funding_rates = self.funding_loader.get_funding_array_aligned(
+                    symbols=coin_symbols,
+                    timestamps=common_index,
+                    timeframe=timeframe
+                )
+
+                # Pre-calculate cumsum for O(1) lookup in kernel
+                funding_cumsum = np.cumsum(funding_rates, axis=0)
+
+                logger.debug(
+                    f"Funding loaded: {len(coin_symbols)} symbols, "
+                    f"mean_rate={funding_rates.mean():.8f}"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to load funding rates: {e}")
+                funding_cumsum = None
+
         # Build aligned 2D arrays (n_bars, n_symbols)
         close_2d = np.zeros((n_bars, n_symbols), dtype=np.float64)
         high_2d = np.zeros((n_bars, n_symbols), dtype=np.float64)
@@ -1205,54 +1308,42 @@ class ContinuousBacktesterProcess:
         is_bidi = direction in ('both', 'bidi', 'bidir')
         # For non-BIDI: 1 for long, -1 for short
         dir_value = 1 if direction == 'long' else -1
+        signal_column = getattr(strategy_instance, 'signal_column', 'entry_signal')
 
+        # Process each symbol: calculate indicators and extract signals
         for j, symbol in enumerate(symbols):
-            raw_df = valid_data[symbol]
-            if 'timestamp' in raw_df.columns:
-                # Filter by timestamp to match common_index (which is DatetimeIndex)
-                df = raw_df[raw_df['timestamp'].isin(common_index)].copy()
-                df = df.reset_index(drop=True)  # Ensure clean RangeIndex for numpy ops
-            else:
-                # Fallback to loc if index-based
-                df = raw_df.loc[common_index].copy()
+            df = filtered_data[symbol]  # Already filtered, no copy needed
 
-            # Calculate indicators and extract signals
+            # Calculate indicators
             try:
                 df_with_indicators = strategy_instance.calculate_indicators(df)
-                signal_column = getattr(strategy_instance, 'signal_column', 'entry_signal')
-
-                if signal_column in df_with_indicators.columns:
-                    entries_2d[:, j] = df_with_indicators[signal_column].values.astype(bool)
-                else:
-                    entries_2d[:, j] = False
-
-                # Handle BIDI: determine direction per-signal from long_signal/short_signal
-                if is_bidi:
-                    has_long = 'long_signal' in df_with_indicators.columns
-                    has_short = 'short_signal' in df_with_indicators.columns
-                    if has_long and has_short:
-                        long_signals = df_with_indicators['long_signal'].values.astype(bool)
-                        short_signals = df_with_indicators['short_signal'].values.astype(bool)
-                        # Set 1 for long, -1 for short, 0 otherwise
-                        directions_2d[:, j] = np.where(
-                            long_signals, 1, np.where(short_signals, -1, 0)
-                        )
-                    else:
-                        # Fallback: no separate columns, default to long
-                        logger.debug(f"BIDI strategy missing long_signal/short_signal for {symbol}, defaulting to long")
-                        directions_2d[:, j] = 1
-                else:
-                    # LONG or SHORT: uniform direction
-                    directions_2d[:, j] = dir_value
             except Exception as e:
                 logger.warning(f"Failed to calculate indicators for {symbol}: {e}")
-                entries_2d[:, j] = False
-                directions_2d[:, j] = 0
+                continue
 
-            # Fill OHLC data
-            close_2d[:, j] = df['close'].values
-            high_2d[:, j] = df['high'].values
-            low_2d[:, j] = df['low'].values
+            # Extract OHLC
+            close_2d[:, j] = df['close'].values.astype(np.float64)
+            high_2d[:, j] = df['high'].values.astype(np.float64)
+            low_2d[:, j] = df['low'].values.astype(np.float64)
+
+            # Extract entry signals
+            if signal_column in df_with_indicators.columns:
+                entries_2d[:, j] = df_with_indicators[signal_column].values.astype(bool)
+
+            # Handle directions
+            if is_bidi:
+                has_long = 'long_signal' in df_with_indicators.columns
+                has_short = 'short_signal' in df_with_indicators.columns
+                if has_long and has_short:
+                    long_signals = df_with_indicators['long_signal'].values.astype(bool)
+                    short_signals = df_with_indicators['short_signal'].values.astype(bool)
+                    directions_2d[:, j] = np.where(
+                        long_signals, 1, np.where(short_signals, -1, 0)
+                    ).astype(np.int8)
+                else:
+                    directions_2d[:, j] = 1
+            else:
+                directions_2d[:, j] = dir_value
 
         # Apply warmup (first 100 bars = no signal)
         entries_2d[:100, :] = False
@@ -1293,14 +1384,30 @@ class ContinuousBacktesterProcess:
                 logger.warning(f"Could not get max_leverage for {symbol}, using default 10")
 
         # Run parametric backtest
+        # Route to typed backtest if non-percentage SL/TP types are specified
         try:
-            results_df = self.parametric_backtester.backtest_pattern(
-                pattern_signals=entries_2d,
-                ohlc_data={'close': close_2d, 'high': high_2d, 'low': low_2d},
-                directions=directions_2d,
-                max_leverages=max_leverages,
-                strategy_name=strategy_name,
-            )
+            if sl_type is not None and sl_type != StopLossType.PERCENTAGE:
+                # Use typed backtest for ATR, STRUCTURE, TRAILING, etc.
+                results_df = self.parametric_backtester.backtest_typed(
+                    pattern_signals=entries_2d,
+                    ohlc_data={'close': close_2d, 'high': high_2d, 'low': low_2d},
+                    directions=directions_2d,
+                    max_leverages=max_leverages,
+                    sl_type=sl_type,
+                    tp_type=tp_type if tp_type else TakeProfitType.PERCENTAGE,
+                    strategy_name=strategy_name,
+                    funding_cumsum=funding_cumsum,
+                )
+            else:
+                # Standard percentage-based parametric backtest
+                results_df = self.parametric_backtester.backtest_pattern(
+                    pattern_signals=entries_2d,
+                    ohlc_data={'close': close_2d, 'high': high_2d, 'low': low_2d},
+                    directions=directions_2d,
+                    max_leverages=max_leverages,
+                    strategy_name=strategy_name,
+                    funding_cumsum=funding_cumsum,
+                )
         except Exception as e:
             logger.error(f"Parametric backtest failed: {e}")
             # Emit parametric_stats with zero counts for metrics consistency
@@ -1401,12 +1508,23 @@ class ContinuousBacktesterProcess:
         # Use float() to convert np.float64 to native Python float (required for DB)
         results = []
         for _, row in valid_results.iterrows():
-            params = {
-                'sl_pct': float(row['sl_pct']),
-                'tp_pct': float(row['tp_pct']),
-                'leverage': int(row['leverage']),
-                'exit_bars': int(row['exit_bars']),
-            }
+            # Check if row has full params from typed backtest
+            if 'params' in row and isinstance(row['params'], dict):
+                # Use full params (includes sl_type, tp_type for typed backtest)
+                params = row['params'].copy()
+                # Ensure numeric types are native Python (not numpy)
+                params['sl_pct'] = float(params.get('sl_pct', row['sl_pct']))
+                params['tp_pct'] = float(params.get('tp_pct', row['tp_pct']))
+                params['leverage'] = int(params.get('leverage', row['leverage']))
+                params['exit_bars'] = int(params.get('exit_bars', row['exit_bars']))
+            else:
+                # Standard percentage-based backtest
+                params = {
+                    'sl_pct': float(row['sl_pct']),
+                    'tp_pct': float(row['tp_pct']),
+                    'leverage': int(row['leverage']),
+                    'exit_bars': int(row['exit_bars']),
+                }
 
             result = {
                 'sharpe_ratio': float(row['sharpe']),
@@ -1969,6 +2087,43 @@ class ContinuousBacktesterProcess:
             return bool(value)
         return value
 
+    def _extract_date_range(self, data: Dict[str, pd.DataFrame]) -> tuple:
+        """
+        Extract start and end dates from backtest data.
+
+        Args:
+            data: Dict mapping symbol -> DataFrame with 'timestamp' column
+
+        Returns:
+            (start_date, end_date) tuple
+        """
+        if not data:
+            return datetime.now(), datetime.now()
+
+        all_starts = []
+        all_ends = []
+
+        for symbol, df in data.items():
+            if df.empty or 'timestamp' not in df.columns:
+                continue
+            all_starts.append(df['timestamp'].iloc[0])
+            all_ends.append(df['timestamp'].iloc[-1])
+
+        if not all_starts:
+            return datetime.now(), datetime.now()
+
+        # Use the common range across all symbols
+        start_date = max(all_starts)  # Latest start (intersection)
+        end_date = min(all_ends)      # Earliest end (intersection)
+
+        # Convert to datetime if needed
+        if hasattr(start_date, 'to_pydatetime'):
+            start_date = start_date.to_pydatetime()
+        if hasattr(end_date, 'to_pydatetime'):
+            end_date = end_date.to_pydatetime()
+
+        return start_date, end_date
+
     def _save_backtest_result(
         self,
         strategy_id,
@@ -1976,7 +2131,9 @@ class ContinuousBacktesterProcess:
         pairs: List[str],
         timeframe: str,
         period_type: str = 'training',
-        period_days: Optional[int] = None
+        period_days: Optional[int] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
     ) -> Optional[str]:
         """
         Save backtest results to database.
@@ -1991,15 +2148,19 @@ class ContinuousBacktesterProcess:
             timeframe: Timeframe tested
             period_type: 'training' or 'holdout'
             period_days: Number of days in this period
+            start_date: Start date of backtest data range
+            end_date: End date of backtest data range
 
         Returns:
             BacktestResult UUID
         """
         try:
             with get_session() as session:
-                # Get start/end dates from symbol_breakdown if available
-                start_date = datetime.now()
-                end_date = datetime.now()
+                # Use provided dates or fallback to now (shouldn't happen)
+                if start_date is None:
+                    start_date = datetime.now()
+                if end_date is None:
+                    end_date = datetime.now()
 
                 # Determine period_days if not provided
                 if period_days is None:
@@ -2096,6 +2257,11 @@ class ContinuousBacktesterProcess:
                         strategy.parameters['tp_pct'] = optimal_params.get('tp_pct')
                         strategy.parameters['leverage'] = optimal_params.get('leverage')
                         strategy.parameters['exit_bars'] = optimal_params.get('exit_bars')
+                        # Save sl_type/tp_type for typed strategies (for retest consistency)
+                        if optimal_params.get('sl_type'):
+                            strategy.parameters['sl_type'] = optimal_params.get('sl_type')
+                        if optimal_params.get('tp_type'):
+                            strategy.parameters['tp_type'] = optimal_params.get('tp_type')
                         flag_modified(strategy, 'parameters')
 
                     session.commit()
@@ -2143,7 +2309,7 @@ class ContinuousBacktesterProcess:
             # Rename class if new name provided
             if new_class_name:
                 updated = re.sub(
-                    r'class\s+((?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+)\s*\(',
+                    r'class\s+((?:Strategy|PatStrat|UngStrat|UggStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+)\s*\(',
                     f'class {new_class_name}(',
                     updated
                 )
@@ -2218,7 +2384,7 @@ class ContinuousBacktesterProcess:
     def _extract_class_name(self, code: str) -> Optional[str]:
         """Extract class name from strategy code (supports all prefixes)"""
         import re
-        match = re.search(r'class\s+((?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+)\s*\(', code)
+        match = re.search(r'class\s+((?:Strategy|PatStrat|UngStrat|UggStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+)\s*\(', code)
         return match.group(1) if match else None
 
     def _load_strategy_instance(self, code: str, class_name: str):
@@ -2353,22 +2519,36 @@ class ContinuousBacktesterProcess:
 
             # CRITICAL: Apply stored optimized parameters from database
             # The code contains template defaults, but optimal params are in strategy.parameters
+            # For typed strategies: sl_type/tp_type are preserved from original strategy
+            # For percentage strategies: sl_type defaults to PERCENTAGE
             with get_session() as param_session:
                 strategy_record = param_session.query(Strategy).filter(
                     Strategy.id == strategy_id
                 ).first()
                 if strategy_record and strategy_record.parameters:
                     stored_params = strategy_record.parameters
-                    # Apply UPPERCASE attrs (matches what BacktestEngine reads)
+
+                    # Apply sl_type: use stored if present, else PERCENTAGE
+                    stored_sl_type = stored_params.get('sl_type')
+                    if stored_sl_type:
+                        # Typed strategy: preserve original sl_type
+                        try:
+                            strategy_instance.sl_type = StopLossType(stored_sl_type)
+                        except ValueError:
+                            strategy_instance.sl_type = StopLossType.PERCENTAGE
+                    else:
+                        # Legacy/percentage strategy
+                        strategy_instance.sl_type = StopLossType.PERCENTAGE
+
                     strategy_instance.SL_PCT = stored_params.get('sl_pct', 0.02)
                     strategy_instance.TP_PCT = stored_params.get('tp_pct', 0.04)
                     strategy_instance.LEVERAGE = stored_params.get('leverage', 1)
                     strategy_instance.exit_after_bars = stored_params.get('exit_bars', 0)
-                    strategy_instance.sl_type = StopLossType.PERCENTAGE
                     logger.info(
                         f"[{strategy_name}] RETEST: Applied stored params: "
                         f"SL={stored_params.get('sl_pct'):.2%}, TP={stored_params.get('tp_pct'):.2%}, "
-                        f"Lev={stored_params.get('leverage')}, Exit={stored_params.get('exit_bars')}"
+                        f"Lev={stored_params.get('leverage')}, Exit={stored_params.get('exit_bars')}, "
+                        f"sl_type={strategy_instance.sl_type.value}"
                     )
 
             # Validate pairs (same 3-level validation as initial backtest)
@@ -2441,9 +2621,11 @@ class ContinuousBacktesterProcess:
             )
 
             # Update backtest result (save new metrics)
+            is_start, is_end = self._extract_date_range(is_data)
             self._save_backtest_result(
                 strategy_id, is_result, validated_pairs, assigned_tf,
-                period_type='in_sample', period_days=self.is_days
+                period_type='in_sample', period_days=self.is_days,
+                start_date=is_start, end_date=is_end
             )
 
             # Revalidate pool membership with new score
@@ -2589,6 +2771,13 @@ class ContinuousBacktesterProcess:
         except ValueError as e:
             logger.warning(f"Cannot calculate score for {strategy_id}: {e}")
             return (False, str(e))
+
+    @property
+    def funding_loader(self) -> FundingLoader:
+        """Lazy init FundingLoader for funding rate data"""
+        if self._funding_loader is None:
+            self._funding_loader = FundingLoader()
+        return self._funding_loader
 
     @property
     def test_data(self) -> pd.DataFrame:
@@ -2795,6 +2984,12 @@ class ContinuousBacktesterProcess:
             logger.critical("Fix the backtester bugs before running the daemon.")
             sys.exit(1)
         logger.info("Backtester validation passed - starting daemon")
+
+        # STEP 2: Warm up Numba kernels to avoid compilation delay on first use
+        logger.info("Warming up Numba kernels...")
+        from src.backtester.numba_kernels import warmup_numba_kernels
+        warmup_numba_kernels()
+        logger.info("Numba kernels ready")
 
         signal.signal(signal.SIGINT, self.handle_shutdown)
         signal.signal(signal.SIGTERM, self.handle_shutdown)
