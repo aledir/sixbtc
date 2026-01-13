@@ -521,7 +521,7 @@ class ParametricBacktester:
             count *= len(values)
         return count
 
-    def _generate_parameter_sets(self) -> List[Tuple[float, float, int, int]]:
+    def _generate_parameter_sets(self) -> Tuple[List[Tuple[float, float, int, int]], dict]:
         """
         Generate all parameter sets (each will create a strategy).
 
@@ -538,26 +538,33 @@ class ParametricBacktester:
         Common filters:
         - tp_pct=0 AND exit_bars=0: No exit condition except SL (invalid)
         - ANTI-LIQUIDATION: leverage must be safe given SL distance
+
+        Returns:
+            Tuple of (valid_sets, filter_stats) where filter_stats contains counts
         """
-        all_combos = itertools.product(
+        all_combos = list(itertools.product(
             self.parameter_space['sl_pct'],
             self.parameter_space['tp_pct'],
             self.parameter_space['leverage'],
             self.parameter_space['exit_bars'],
-        )
+        ))
 
         valid_sets = []
+        no_exit_filtered = 0
+        rr_filtered = 0
         liquidation_filtered = 0
 
         for sl, tp, lev, exit_b in all_combos:
             # FILTER 1: Must have an exit condition (not just SL)
             if tp == 0 and exit_b == 0:
+                no_exit_filtered += 1
                 continue
 
             # FILTER 2: Mode-specific validation
             if tp > 0:
                 # TOUCH_BASED mode: require favorable R:R (TP > SL)
                 if tp <= sl:
+                    rr_filtered += 1
                     continue
             # CLOSE_BASED mode (tp == 0): exit_bars > 0 already guaranteed by FILTER 1
 
@@ -576,12 +583,16 @@ class ParametricBacktester:
 
             valid_sets.append((sl, tp, lev, exit_b))
 
-        if liquidation_filtered > 0:
-            logger.debug(
-                f"Anti-liquidation filter removed {liquidation_filtered} combinations"
-            )
+        filter_stats = {
+            'total_raw': len(all_combos),
+            'no_exit_filtered': no_exit_filtered,
+            'rr_filtered': rr_filtered,
+            'liquidation_filtered': liquidation_filtered,
+            'total_filtered': no_exit_filtered + rr_filtered + liquidation_filtered,
+            'valid': len(valid_sets),
+        }
 
-        return valid_sets
+        return valid_sets, filter_stats
 
     def _calculate_score(self, result: ParametricResult) -> float:
         """Calculate composite score matching classifier logic"""
@@ -637,13 +648,19 @@ class ParametricBacktester:
         max_levs = max_leverages.astype(np.int32)
 
         n_bars, n_symbols = close.shape
+
+        # Generate valid parameter sets (applies filters)
+        param_sets, filter_stats = self._generate_parameter_sets()
+
         logger.info(
-            f"{log_prefix}Running parametric: {n_bars} bars, {n_symbols} symbols, "
-            f"{self._count_strategies()} candidates, "
-            f"max_lev range: {max_levs.min()}-{max_levs.max()}x"
+            f"{log_prefix}Parametric: {n_bars} bars, {n_symbols} symbols, "
+            f"{filter_stats['valid']}/{filter_stats['total_raw']} combos "
+            f"(filtered: no_exit={filter_stats['no_exit_filtered']}, "
+            f"R:R={filter_stats['rr_filtered']}, "
+            f"anti-liq={filter_stats['liquidation_filtered']}), "
+            f"max_lev={max_levs.min()}-{max_levs.max()}x"
         )
 
-        param_sets = self._generate_parameter_sets()
         results = []
 
         for sl_pct, tp_pct, leverage, exit_bars in param_sets:
@@ -720,117 +737,6 @@ class ParametricBacktester:
         """
         self.parameter_space.update(space)
         logger.info(f"Parameter space updated: {self._count_strategies()} candidate strategies")
-
-    def build_pattern_centered_space(
-        self,
-        base_tp_pct: float,
-        base_sl_pct: float,
-        base_exit_bars: int,
-        base_leverage: int = 1
-    ) -> Dict[str, List]:
-        """
-        Build parameter space centered on pattern's values.
-
-        HYPOTHESIS B: Favorable R:R (max 1.5:1 SL:TP ratio)
-
-        TP (Take Profit) - 5 values (NO zero):
-        - Pattern's magnitude is the expected move
-        - Range 75%-200% of magnitude
-        - Higher values let winners run further
-        - NO TP=0: always take profit, don't rely on time exit alone
-
-        SL (Stop Loss) - 3 values:
-        - Based on magnitude (NOT pre-calculated SL)
-        - Range 100%-150% of magnitude
-        - Moderate SL allows breathing room
-        - Combined with 1.5:1 max ratio filter
-
-        EXIT BARS (Time Exit) - 3 values:
-        - Pattern's holding_period is statistically optimal
-        - Range 50%-150% of base
-        - NO zero: always have time exit as backstop
-
-        LEVERAGE - 3 values: [1, 2, 3]
-
-        R:R FILTERING:
-        - Max SL:TP ratio = 1.5:1 (needs ~60% WR to break even)
-        - Patterns with 55-65% WR can be profitable
-
-        TOTAL: 5 x 3 x 3 x 3 = 135 combinations
-        After R:R filter: ~60-80 valid combinations
-
-        Args:
-            base_tp_pct: Pattern's target magnitude (e.g., 0.06 for 6%)
-            base_sl_pct: Pattern's stop loss (ignored, we use magnitude)
-            base_exit_bars: Pattern's holding period in bars
-            base_leverage: Starting leverage (not used)
-
-        Returns:
-            Parameter space dict suitable for set_parameter_space()
-        """
-        # Use magnitude as base for SL (pattern's expected move)
-        # If base_tp_pct is 0 or too small, use a default magnitude
-        magnitude = base_tp_pct if base_tp_pct >= 0.01 else 0.03  # Default 3% if missing
-
-        if base_tp_pct < 0.01:
-            logger.warning(f"base_tp_pct={base_tp_pct:.4f} too small, using default magnitude=3%")
-
-        # FAVORABLE R:R APPROACH:
-        # For ~55% WR patterns to be profitable, TP must be > SL
-        # Break-even WR = SL / (SL + TP)
-        # With TP = 1.5x SL: break-even = 1/(1+1.5) = 40% WR
-        # With 55% WR and TP=1.5x SL: Exp = 0.55*1.5 - 0.45*1 = +0.375 per unit risked
-
-        # SL: based on magnitude (the pattern's expected move)
-        # Range from 1x to 2.5x magnitude to give room for volatility
-        sl_multipliers = [1.0, 1.5, 2.0, 2.5]
-        sl_pcts = sorted(set([round(magnitude * m, 4) for m in sl_multipliers]))
-        # Ensure minimum SL of 1% and max of 10%
-        sl_pcts = [max(0.01, min(0.10, sl)) for sl in sl_pcts]
-        sl_pcts = sorted(set(sl_pcts))
-
-        # TP: MUST be larger than SL for favorable R:R
-        # TP = SL * [1.5, 2.0, 2.5] gives favorable risk/reward
-        # We'll generate all combos and filter for TP > SL
-        tp_multipliers = [1.5, 2.0, 2.5, 3.0]  # Applied to SL to get TP
-        # Generate TP values based on SL range
-        base_sl = magnitude  # Use magnitude as reference
-        tp_pcts = sorted(set([round(base_sl * sl_m * tp_m, 4)
-                              for sl_m in sl_multipliers
-                              for tp_m in tp_multipliers]))
-        # Ensure reasonable TP range (2% to 15%)
-        tp_pcts = [max(0.02, min(0.15, tp)) for tp in tp_pcts]
-        tp_pcts = sorted(set(tp_pcts))
-
-        # Exit bars: Include 0 (no time exit - only SL/TP) plus longer periods
-        # With favorable R:R (TP > SL), we WANT trades to resolve via SL/TP not time
-        # exit_bars=0 forces this, higher values give more time to hit targets
-        exit_multipliers = [0, 2.0, 4.0, 8.0]  # 0=no time exit, then 2x-8x base
-        exit_bars = sorted(set([int(base_exit_bars * m) for m in exit_multipliers]))
-
-        # Leverage: conservative range
-        leverages = [1, 2, 3]
-
-        space = {
-            'sl_pct': sl_pcts,
-            'tp_pct': tp_pcts,
-            'leverage': leverages,
-            'exit_bars': exit_bars,
-        }
-
-        # Count combos where TP > SL (favorable R:R)
-        favorable_combos = sum(1 for sl in sl_pcts for tp in tp_pcts if tp > sl)
-        total_combos = favorable_combos * len(leverages) * len(exit_bars)
-
-        logger.info(
-            f"Built pattern-centered space (Favorable R:R): "
-            f"SL={[f'{p:.1%}' for p in sl_pcts]}, "
-            f"TP={[f'{p:.1%}' for p in tp_pcts]}, "
-            f"exit={exit_bars}, lev={leverages} "
-            f"({total_combos} combos with TP>SL)"
-        )
-
-        return space
 
     def build_execution_type_space(
         self,

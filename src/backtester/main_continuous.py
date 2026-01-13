@@ -42,6 +42,7 @@ from src.data.coin_registry import get_registry, get_active_pairs
 from src.scorer import BacktestScorer, PoolManager
 from src.validator.lookahead_test import LookaheadTester
 from src.utils import get_logger, setup_logging
+from src.utils.strategy_files import sync_directories_with_db
 
 # Initialize logging at module load
 _config = load_config()
@@ -175,6 +176,9 @@ class ContinuousBacktesterProcess:
         self.scorer = BacktestScorer(self.config._raw_config)
         self.pool_manager = PoolManager(self.config._raw_config)
 
+        # Sync strategy files with DB at startup (ensures consistency)
+        self._sync_strategy_files()
+
         # Lookahead tester for post-scoring shuffle test (anti-lookahead)
         self.lookahead_tester = LookaheadTester()
         self._test_data: Optional[pd.DataFrame] = None  # Lazy loaded
@@ -193,6 +197,16 @@ class ContinuousBacktesterProcess:
             f"{len(self.timeframes)} TFs, {self.max_coins} coins, "
             f"retest every {self.retest_interval_days}d, pool max {self.pool_max_size}"
         )
+
+    def _sync_strategy_files(self):
+        """Sync strategy files (pool/live dirs) with database at startup."""
+        try:
+            with get_session() as session:
+                stats = sync_directories_with_db(session)
+                if any(stats.values()):
+                    logger.info(f"Strategy files synced: {stats}")
+        except Exception as e:
+            logger.warning(f"Failed to sync strategy files: {e}")
 
     def _scroll_down_coverage(
         self,
@@ -623,12 +637,10 @@ class ContinuousBacktesterProcess:
             # STEP 1: PARAMETRIC OPTIMIZATION (screening)
             # Tests ~1050 combinations, finds best combo, discards #2-1050
             try:
-                is_pattern_based = pattern_coins is not None and len(pattern_coins) > 0
-
                 if use_parametric:
                     # Initial parametric to find best combo
                     parametric_results = self._run_parametric_backtest(
-                        strategy_instance, is_data, assigned_tf, is_pattern_based,
+                        strategy_instance, is_data, assigned_tf,
                         strategy_id=strategy_id, strategy_name=strategy_name,
                         base_code_hash=base_code_hash
                     )
@@ -654,16 +666,24 @@ class ContinuousBacktesterProcess:
                     # Apply best params from parametric to strategy instance
                     # CRITICAL: Force sl_type to PERCENTAGE for consistency with parametric
                     # (parametric uses fixed SL%, not ATR-based)
+                    # NOTE: Use UPPERCASE (SL_PCT, TP_PCT, LEVERAGE) to match template definitions
+                    # Base class has lowercase defaults that would override if we used lowercase
                     strategy_instance.sl_type = StopLossType.PERCENTAGE
-                    strategy_instance.sl_pct = initial_params.get('sl_pct', 0.02)
-                    strategy_instance.tp_pct = initial_params.get('tp_pct', 0.03)
-                    strategy_instance.leverage = initial_params.get('leverage', 1)
+                    strategy_instance.SL_PCT = initial_params.get('sl_pct', 0.02)
+                    strategy_instance.TP_PCT = initial_params.get('tp_pct', 0.03)
+                    strategy_instance.LEVERAGE = initial_params.get('leverage', 1)
                     strategy_instance.exit_after_bars = initial_params.get('exit_bars', 0)
 
+                    # BUG FIX: Store optimal params for strategy code update
+                    # Without this, _update_strategy_assigned_tf receives None and
+                    # doesn't update the code - causing retest to use wrong params
+                    optimal_params = initial_params
+
                     # DEBUG: Log strategy params before IS backtest
+                    # Read UPPERCASE attrs (set by parametric) for accurate logging
                     logger.info(
-                        f"[{strategy_name}] IS params: sl_pct={strategy_instance.sl_pct:.2%}, "
-                        f"tp_pct={strategy_instance.tp_pct:.2%}, leverage={strategy_instance.leverage}, "
+                        f"[{strategy_name}] IS params: SL_PCT={strategy_instance.SL_PCT:.2%}, "
+                        f"TP_PCT={strategy_instance.TP_PCT:.2%}, LEVERAGE={strategy_instance.LEVERAGE}, "
                         f"exit_bars={strategy_instance.exit_after_bars}, sl_type={strategy_instance.sl_type}"
                     )
 
@@ -1052,7 +1072,6 @@ class ContinuousBacktesterProcess:
         strategy_instance,
         data: Dict[str, any],
         timeframe: str,
-        is_pattern_based: bool = False,
         strategy_id=None,
         strategy_name: str = None,
         base_code_hash: str = None
@@ -1063,27 +1082,24 @@ class ContinuousBacktesterProcess:
         Extracts entry signals from the strategy once, then tests N parameter sets
         using the Numba-optimized ParametricBacktester to generate candidate strategies.
 
-        TWO APPROACHES based on strategy origin:
+        Parameter space selection based on execution_type:
 
-        1. PATTERN STRATEGIES (is_pattern_based=True):
-           - Have validated base values from pattern-discovery (magnitude, SL, holding)
-           - Use build_pattern_centered_space() to explore variations AROUND base
-           - Rationale: Pattern's edge is proven, optimize management params
+        1. execution_type = 'touch_based' or 'close_based':
+           - Uses build_execution_type_space() with specialized logic
+           - touch_based: TP is primary exit (optimize around magnitude)
+           - close_based: TIME EXIT is primary (TP=0, SL based on ATR)
 
-        2. AI STRATEGIES (is_pattern_based=False):
-           - No validated base values, AI invented the params
-           - Use build_absolute_space() with fixed reasonable ranges
-           - Rationale: Must search wider space to find what works
-
-        Both approaches: 5x5x5x3 = 375 combinations
+        2. No execution_type:
+           - Uses build_absolute_space() with per-timeframe ranges
+           - Generic exploration of SL/TP/leverage/exit parameter space
 
         Args:
             strategy_instance: StrategyCore instance
             data: Dict mapping symbol -> DataFrame
             timeframe: Timeframe being tested
-            is_pattern_based: True for pattern strategies, False for AI strategies
             strategy_id: Strategy UUID for event tracking
             strategy_name: Strategy name for event tracking
+            base_code_hash: Hash for batch processing
 
         Returns:
             List of top K results with different parameters
@@ -1098,44 +1114,37 @@ class ContinuousBacktesterProcess:
             result = self._run_multi_symbol_backtest(strategy_instance, data, timeframe)
             return [result] if result.get('total_trades', 0) > 0 else []
 
-        # Build parameter space based on strategy origin
-        if is_pattern_based:
-            # PATTERN STRATEGY: use execution_type-aware parameter space
-            # This respects the pattern's validated semantics:
+        # Build parameter space based on execution_type
+        # - If strategy has execution_type (touch_based/close_based): use specialized space
+        # - Otherwise: use absolute space (generic, per-timeframe ranges)
+        # No fallback - follows "No Fallback, Fast Fail" principle from CLAUDE.md
+        execution_type = getattr(strategy_instance, 'execution_type', None)
+
+        if execution_type in ('touch_based', 'close_based'):
+            # Strategy has execution_type: use specialized parameter space
             # - touch_based: TP is primary exit (optimize around magnitude)
             # - close_based: TIME EXIT is primary (TP=0, SL based on ATR)
-
-            base_tp_pct = getattr(strategy_instance, 'tp_pct', 0.05)
+            # CRITICAL: Read UPPERCASE attrs first (template definitions), then lowercase (base class defaults)
+            base_tp_pct = getattr(strategy_instance, 'TP_PCT', None)
+            if base_tp_pct is None:
+                base_tp_pct = getattr(strategy_instance, 'tp_pct', 0.05)
             base_exit_bars = getattr(strategy_instance, 'exit_after_bars', 20)
-            execution_type = getattr(strategy_instance, 'execution_type', None)
             atr_signal_median = getattr(strategy_instance, 'atr_signal_median', None)
 
-            if execution_type:
-                # Use execution_type-aware space (respects pattern semantics)
-                logger.info(
-                    f"Pattern execution_type={execution_type}, "
-                    f"magnitude={base_tp_pct:.2%}, exit_bars={base_exit_bars}, "
-                    f"atr_median={atr_signal_median}"
-                )
-                space = self.parametric_backtester.build_execution_type_space(
-                    execution_type=execution_type,
-                    base_magnitude=base_tp_pct,
-                    base_exit_bars=base_exit_bars,
-                    atr_signal_median=atr_signal_median,
-                )
-            else:
-                # Fallback to pattern-centered (legacy patterns without execution_type)
-                base_sl_pct = getattr(strategy_instance, 'sl_pct', 0.15)
-                base_leverage = getattr(strategy_instance, 'leverage', 1)
-                logger.debug("Pattern without execution_type, using pattern_centered_space")
-                space = self.parametric_backtester.build_pattern_centered_space(
-                    base_tp_pct=base_tp_pct,
-                    base_sl_pct=base_sl_pct,
-                    base_exit_bars=base_exit_bars,
-                    base_leverage=base_leverage
-                )
+            logger.info(
+                f"Using execution_type_space: type={execution_type}, "
+                f"magnitude={base_tp_pct:.2%}, exit_bars={base_exit_bars}, "
+                f"atr_median={atr_signal_median}"
+            )
+            space = self.parametric_backtester.build_execution_type_space(
+                execution_type=execution_type,
+                base_magnitude=base_tp_pct,
+                base_exit_bars=base_exit_bars,
+                atr_signal_median=atr_signal_median,
+            )
         else:
-            # AI STRATEGY: use timeframe-scaled absolute ranges
+            # No execution_type: use absolute space (generic per-timeframe ranges)
+            logger.info(f"Using absolute_space for timeframe={timeframe}")
             space = self.parametric_backtester.build_absolute_space(timeframe)
 
         self.parametric_backtester.set_parameter_space(space)
@@ -1193,6 +1202,8 @@ class ContinuousBacktesterProcess:
 
         # Get strategy direction
         direction = getattr(strategy_instance, 'direction', 'long')
+        is_bidi = direction in ('both', 'bidi', 'bidir')
+        # For non-BIDI: 1 for long, -1 for short
         dir_value = 1 if direction == 'long' else -1
 
         for j, symbol in enumerate(symbols):
@@ -1214,15 +1225,34 @@ class ContinuousBacktesterProcess:
                     entries_2d[:, j] = df_with_indicators[signal_column].values.astype(bool)
                 else:
                     entries_2d[:, j] = False
+
+                # Handle BIDI: determine direction per-signal from long_signal/short_signal
+                if is_bidi:
+                    has_long = 'long_signal' in df_with_indicators.columns
+                    has_short = 'short_signal' in df_with_indicators.columns
+                    if has_long and has_short:
+                        long_signals = df_with_indicators['long_signal'].values.astype(bool)
+                        short_signals = df_with_indicators['short_signal'].values.astype(bool)
+                        # Set 1 for long, -1 for short, 0 otherwise
+                        directions_2d[:, j] = np.where(
+                            long_signals, 1, np.where(short_signals, -1, 0)
+                        )
+                    else:
+                        # Fallback: no separate columns, default to long
+                        logger.debug(f"BIDI strategy missing long_signal/short_signal for {symbol}, defaulting to long")
+                        directions_2d[:, j] = 1
+                else:
+                    # LONG or SHORT: uniform direction
+                    directions_2d[:, j] = dir_value
             except Exception as e:
                 logger.warning(f"Failed to calculate indicators for {symbol}: {e}")
                 entries_2d[:, j] = False
+                directions_2d[:, j] = 0
 
             # Fill OHLC data
             close_2d[:, j] = df['close'].values
             high_2d[:, j] = df['high'].values
             low_2d[:, j] = df['low'].values
-            directions_2d[:, j] = dir_value
 
         # Apply warmup (first 100 bars = no signal)
         entries_2d[:100, :] = False
@@ -1760,7 +1790,7 @@ class ContinuousBacktesterProcess:
         self,
         strategy: 'Strategy',
         timeframe: str
-    ) -> Tuple[bool, str]:
+    ) -> Tuple[bool, str, float, float]:
         """
         Walk-Forward Validation with FIXED parameters.
 
@@ -1775,32 +1805,56 @@ class ContinuousBacktesterProcess:
             timeframe: Timeframe to test
 
         Returns:
-            (passed: bool, reason: str)
+            (passed: bool, reason: str, avg_sharpe: float, cv: float)
+            - avg_sharpe: Average Sharpe ratio across windows
+            - cv: Coefficient of variation (std/mean) of Sharpe ratios
         """
         try:
             # Get WFA validation config
             wfa_config = self.config._raw_config['backtesting'].get('wfa_validation', {})
             if not wfa_config.get('enabled', True):
                 logger.debug(f"[{strategy.name}] WFA validation disabled, skipping")
-                return (True, "wfa_disabled")
+                return (True, "wfa_disabled", 0.0, 0.0)
 
             window_percentages = wfa_config.get('window_percentages', [0.25, 0.50, 0.75, 1.0])
             min_profitable_windows = wfa_config.get('min_profitable_windows', 4)
 
+            # CRITICAL: Reload strategy from DB to get updated code with optimal params
+            # The strategy passed in via relationship may have stale code (loaded before
+            # _update_strategy_assigned_tf committed the params update)
+            from src.database.models import Strategy as StrategyModel
+            with get_session() as fresh_session:
+                fresh_strategy = fresh_session.query(StrategyModel).filter(
+                    StrategyModel.id == strategy.id
+                ).first()
+                if not fresh_strategy:
+                    return (False, "strategy_not_found", 0.0, 0.0)
+                strategy_code = fresh_strategy.code
+                strategy_backtest_pairs = fresh_strategy.backtest_pairs
+                strategy_pattern_coins = fresh_strategy.pattern_coins
+
             # Load strategy instance (has fixed params embedded)
-            strategy_instance = self._load_strategy(strategy)
+            class_name = self._extract_class_name(strategy_code)
+            if not class_name:
+                return (False, "failed_to_extract_class_name", 0.0, 0.0)
+            strategy_instance = self._load_strategy_instance(strategy_code, class_name)
             if strategy_instance is None:
-                return (False, "failed_to_load_strategy")
+                return (False, "failed_to_load_strategy", 0.0, 0.0)
+
+            # Get symbols from strategy's backtest_pairs (same pairs used for IS/OOS)
+            symbols = strategy_backtest_pairs or strategy_pattern_coins or []
+            if not symbols:
+                return (False, "no_symbols_for_wfa", 0.0, 0.0)
 
             # Load IS data for this timeframe
             is_data = self.data_loader.load_multi_symbol(
-                symbols=self.symbols,
+                symbols=symbols,
                 timeframe=timeframe,
                 days=self.is_days
             )
 
             if not is_data:
-                return (False, "no_is_data")
+                return (False, "no_is_data", 0.0, 0.0)
 
             # Get min_expectancy threshold from config
             min_expectancy = self.config._raw_config['backtesting']['thresholds'].get(
@@ -1810,9 +1864,13 @@ class ContinuousBacktesterProcess:
             profitable_windows = 0
             window_results = []
 
+            # DEBUG: Log params being used by WFA (read UPPERCASE first like BacktestEngine)
+            wfa_sl = getattr(strategy_instance, 'SL_PCT', None) or getattr(strategy_instance, 'sl_pct', 0.02)
+            wfa_tp = getattr(strategy_instance, 'TP_PCT', None) or getattr(strategy_instance, 'tp_pct', 0.04)
+            wfa_lev = getattr(strategy_instance, 'LEVERAGE', None) or getattr(strategy_instance, 'leverage', 1)
             logger.info(
                 f"[{strategy.name}] WFA validation: testing fixed params on "
-                f"{len(window_percentages)} windows"
+                f"{len(window_percentages)} windows (sl={wfa_sl}, tp={wfa_tp}, lev={wfa_lev})"
             )
 
             for window_idx, window_pct in enumerate(window_percentages):
@@ -1837,6 +1895,7 @@ class ContinuousBacktesterProcess:
                     continue
 
                 window_expectancy = result.get('expectancy', 0)
+                window_sharpe = result.get('sharpe_ratio', 0) or 0  # Handle None
                 is_profitable = window_expectancy >= min_expectancy
 
                 if is_profitable:
@@ -1846,14 +1905,30 @@ class ContinuousBacktesterProcess:
                     'window': window_idx + 1,
                     'pct': window_pct,
                     'expectancy': window_expectancy,
+                    'sharpe': window_sharpe,
                     'profitable': is_profitable
                 })
 
                 logger.info(
                     f"[{strategy.name}] WFA window {window_idx+1}/{len(window_percentages)}: "
                     f"{window_pct:.0%} data, expectancy={window_expectancy:.4f}, "
-                    f"profitable={'YES' if is_profitable else 'NO'}"
+                    f"sharpe={window_sharpe:.3f}, profitable={'YES' if is_profitable else 'NO'}"
                 )
+
+            # Calculate avg_sharpe and cv from window results
+            sharpe_values = [w['sharpe'] for w in window_results]
+            if sharpe_values:
+                avg_sharpe = sum(sharpe_values) / len(sharpe_values)
+                if len(sharpe_values) > 1 and avg_sharpe > 0:
+                    # CV = coefficient of variation = std / mean
+                    import statistics
+                    std_sharpe = statistics.stdev(sharpe_values)
+                    cv = std_sharpe / avg_sharpe
+                else:
+                    cv = 0.0
+            else:
+                avg_sharpe = 0.0
+                cv = 0.0
 
             # Check if enough windows are profitable
             n_windows = len(window_percentages)
@@ -1862,18 +1937,19 @@ class ContinuousBacktesterProcess:
                     f"[{strategy.name}] WFA FAILED: only {profitable_windows}/{n_windows} "
                     f"windows profitable (need {min_profitable_windows})"
                 )
-                return (False, f"insufficient_profitable_windows:{profitable_windows}/{n_windows}")
+                return (False, f"insufficient_profitable_windows:{profitable_windows}/{n_windows}", avg_sharpe, cv)
 
             logger.info(
-                f"[{strategy.name}] WFA PASSED: {profitable_windows}/{n_windows} windows profitable"
+                f"[{strategy.name}] WFA PASSED: {profitable_windows}/{n_windows} windows profitable, "
+                f"avg_sharpe={avg_sharpe:.3f}, cv={cv:.3f}"
             )
-            return (True, f"wfa_passed:{profitable_windows}/{n_windows}")
+            return (True, f"wfa_passed:{profitable_windows}/{n_windows}", avg_sharpe, cv)
 
         except Exception as e:
             logger.error(f"[{strategy.name}] WFA validation error: {e}")
             import traceback
             traceback.print_exc()
-            return (False, f"error:{str(e)}")
+            return (False, f"error:{str(e)}", 0.0, 0.0)
 
     def _to_python_type(self, value):
         """
@@ -2009,6 +2085,19 @@ class ContinuousBacktesterProcess:
                         if updated_code:
                             strategy.code = updated_code
 
+                        # Also update strategy.parameters with optimal params
+                        # This ensures retest uses correct params (code is source of truth,
+                        # but parameters dict is used for metrics/display)
+                        # CRITICAL: Use flag_modified to ensure SQLAlchemy detects JSONB changes
+                        from sqlalchemy.orm.attributes import flag_modified
+                        if strategy.parameters is None:
+                            strategy.parameters = {}
+                        strategy.parameters['sl_pct'] = optimal_params.get('sl_pct')
+                        strategy.parameters['tp_pct'] = optimal_params.get('tp_pct')
+                        strategy.parameters['leverage'] = optimal_params.get('leverage')
+                        strategy.parameters['exit_bars'] = optimal_params.get('exit_bars')
+                        flag_modified(strategy, 'parameters')
+
                     session.commit()
 
                     params_str = ""
@@ -2054,39 +2143,64 @@ class ContinuousBacktesterProcess:
             # Rename class if new name provided
             if new_class_name:
                 updated = re.sub(
-                    r'class\s+((?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat)_\w+)\s*\(',
+                    r'class\s+((?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+)\s*\(',
                     f'class {new_class_name}(',
                     updated
                 )
 
-            # Update sl_pct
+            # Update sl_pct (lowercase for AI templates)
             if 'sl_pct' in params:
                 updated = re.sub(
                     r'(\s+sl_pct\s*=\s*)[\d.]+',
                     rf'\g<1>{params["sl_pct"]}',
                     updated
                 )
+                # Also update SL_PCT (uppercase for pattern_gen/unger/pandas_ta templates)
+                updated = re.sub(
+                    r'(\s+SL_PCT\s*=\s*)[\d.]+',
+                    rf'\g<1>{params["sl_pct"]}',
+                    updated
+                )
 
-            # Update tp_pct
+            # Update tp_pct (lowercase for AI templates)
             if 'tp_pct' in params:
                 updated = re.sub(
                     r'(\s+tp_pct\s*=\s*)[\d.]+',
                     rf'\g<1>{params["tp_pct"]}',
                     updated
                 )
+                # Also update TP_PCT (uppercase for pattern_gen/unger/pandas_ta templates)
+                updated = re.sub(
+                    r'(\s+TP_PCT\s*=\s*)[\d.]+',
+                    rf'\g<1>{params["tp_pct"]}',
+                    updated
+                )
 
-            # Update leverage
+            # Update leverage (lowercase for AI templates)
             if 'leverage' in params:
                 updated = re.sub(
                     r'(\s+leverage\s*=\s*)\d+',
                     rf'\g<1>{int(params["leverage"])}',
                     updated
                 )
+                # Also update LEVERAGE (uppercase for pattern_gen template)
+                updated = re.sub(
+                    r'(\s+LEVERAGE\s*=\s*)\d+',
+                    rf'\g<1>{int(params["leverage"])}',
+                    updated
+                )
 
-            # Update exit_after_bars
+            # Update exit_after_bars (lowercase for AI templates that use exit_after_bars = N)
             if 'exit_bars' in params:
                 updated = re.sub(
                     r'(\s+exit_after_bars\s*=\s*)\d+',
+                    rf'\g<1>{int(params["exit_bars"])}',
+                    updated
+                )
+                # Also update EXIT_BARS (uppercase for pattern_gen template)
+                # Pattern: EXIT_BARS = N  (then exit_after_bars = EXIT_BARS references it)
+                updated = re.sub(
+                    r'(\s+EXIT_BARS\s*=\s*)\d+',
                     rf'\g<1>{int(params["exit_bars"])}',
                     updated
                 )
@@ -2104,7 +2218,7 @@ class ContinuousBacktesterProcess:
     def _extract_class_name(self, code: str) -> Optional[str]:
         """Extract class name from strategy code (supports all prefixes)"""
         import re
-        match = re.search(r'class\s+((?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat)_\w+)\s*\(', code)
+        match = re.search(r'class\s+((?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+)\s*\(', code)
         return match.group(1) if match else None
 
     def _load_strategy_instance(self, code: str, class_name: str):
@@ -2236,6 +2350,26 @@ class ContinuousBacktesterProcess:
             strategy_instance = self._load_strategy_instance(code, class_name)
             if strategy_instance is None:
                 return (False, "Could not load strategy instance")
+
+            # CRITICAL: Apply stored optimized parameters from database
+            # The code contains template defaults, but optimal params are in strategy.parameters
+            with get_session() as param_session:
+                strategy_record = param_session.query(Strategy).filter(
+                    Strategy.id == strategy_id
+                ).first()
+                if strategy_record and strategy_record.parameters:
+                    stored_params = strategy_record.parameters
+                    # Apply UPPERCASE attrs (matches what BacktestEngine reads)
+                    strategy_instance.SL_PCT = stored_params.get('sl_pct', 0.02)
+                    strategy_instance.TP_PCT = stored_params.get('tp_pct', 0.04)
+                    strategy_instance.LEVERAGE = stored_params.get('leverage', 1)
+                    strategy_instance.exit_after_bars = stored_params.get('exit_bars', 0)
+                    strategy_instance.sl_type = StopLossType.PERCENTAGE
+                    logger.info(
+                        f"[{strategy_name}] RETEST: Applied stored params: "
+                        f"SL={stored_params.get('sl_pct'):.2%}, TP={stored_params.get('tp_pct'):.2%}, "
+                        f"Lev={stored_params.get('leverage')}, Exit={stored_params.get('exit_bars')}"
+                    )
 
             # Validate pairs (same 3-level validation as initial backtest)
             # Use all provided pairs (pattern strategies may have > max_coins)
@@ -2405,12 +2539,32 @@ class ContinuousBacktesterProcess:
 
             # Run WFA validation with fixed params
             # Tests if the best combo performs consistently across 4 time windows
-            wfa_passed, wfa_reason = self._run_wfa_fixed_params(
-                strategy, strategy.assigned_timeframe
+            wfa_start = time.time()
+            wfa_passed, wfa_reason, wfa_avg_sharpe, wfa_cv = self._run_wfa_fixed_params(
+                strategy, strategy.optimal_timeframe
             )
+            wfa_duration_ms = int((time.time() - wfa_start) * 1000)
+
             if not wfa_passed:
+                EventTracker.multi_window_failed(
+                    strategy_id=strategy_id,
+                    strategy_name=strategy_name,
+                    reason=wfa_reason,
+                    duration_ms=wfa_duration_ms,
+                    base_code_hash=base_hash
+                )
                 logger.info(f"[{strategy_name}] WFA validation failed: {wfa_reason}")
                 return (False, f"wfa_validation_failed:{wfa_reason}")
+
+            # WFA passed - emit event with calculated avg_sharpe and cv
+            EventTracker.multi_window_passed(
+                strategy_id=strategy_id,
+                strategy_name=strategy_name,
+                avg_sharpe=wfa_avg_sharpe,
+                cv=wfa_cv,
+                duration_ms=wfa_duration_ms,
+                base_code_hash=base_hash
+            )
 
             # Try to enter pool (handles leaderboard logic)
             EventTracker.pool_attempted(

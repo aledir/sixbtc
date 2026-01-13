@@ -947,25 +947,25 @@ class StrategyBuilder:
         return self.parametric_generator.estimate_batch_size(templates)
 
     def _fetch_all_patterns(self) -> list[Pattern]:
-        """Fetch all available patterns from pattern-discovery"""
+        """Fetch all available patterns from pattern-discovery (all enabled tiers)"""
         try:
-            min_quality = self.config.get('pattern_discovery', {}).get('min_quality_score', 0.75)
-            return self.pattern_fetcher.get_tier_1_patterns(
-                limit=100,  # Fetch up to 100 patterns
-                min_quality_score=min_quality
+            pd_config = self.config.get('pattern_discovery', {})
+            return self.pattern_fetcher.get_multi_tier_patterns(
+                config=pd_config,
+                limit_per_tier=50  # 50 per tier
             )
         except Exception as e:
             logger.warning(f"Failed to fetch patterns: {e}")
             return []
 
     def _fetch_patterns(self, timeframe: str) -> list[Pattern]:
-        """Fetch patterns from pattern-discovery"""
+        """Fetch patterns from pattern-discovery for a specific timeframe"""
         try:
-            min_quality = self.config.get('pattern_discovery', {}).get('min_quality_score', 0.75)
-            return self.pattern_fetcher.get_tier_1_patterns(
-                timeframe=timeframe,
-                limit=10,
-                min_quality_score=min_quality
+            pd_config = self.config.get('pattern_discovery', {})
+            return self.pattern_fetcher.get_multi_tier_patterns(
+                config=pd_config,
+                limit_per_tier=10,
+                timeframe=timeframe
             )
         except Exception as e:
             logger.warning(f"Failed to fetch patterns: {e}")

@@ -14,6 +14,7 @@ Total: ~15-30 million base strategies, expandable with parametric backtest.
 
 import hashlib
 import random
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -273,6 +274,90 @@ class UngerGenerator:
             result = result.replace(f'{{{key}}}', str(value))
         return result
 
+    def _vectorize_logic(self, logic: str) -> str:
+        """
+        Convert point-in-time logic to vectorized logic for calculate_indicators().
+
+        Transforms:
+        - df["col"].iloc[-1] → df["col"]
+        - df["col"].iloc[-2] → df["col"].shift(1)
+        - df["col"].iloc[-N] → df["col"].shift(N-1)
+        - variable.iloc[-1] → variable
+        - variable.iloc[-2] → variable.shift(1)
+        - df["col"].iloc[-N-1:-1].max() → df["col"].shift(1).rolling(N).max()
+        - entry_condition = X → entry_signal = X
+        - and → &  (for pandas Series boolean ops)
+        - or → |
+        """
+        result = logic
+
+        # Handle slice patterns like df["col"].iloc[-N-1:-1].max()
+        # Convert to df["col"].shift(1).rolling(N).max()
+        slice_pattern = r'(\w+(?:\["[^"]+"\])?(?:\.[^.]+)*)\.iloc\[-(\d+)-1:-1\]\.(max|min)\(\)'
+        def replace_slice(m):
+            expr, n, func = m.groups()
+            return f'{expr}.shift(1).rolling({n}).{func}()'
+        result = re.sub(slice_pattern, replace_slice, result)
+
+        # Handle slice patterns like df["col"].iloc[-N:-1].max() (without -1 in first part)
+        # Convert to df["col"].shift(1).rolling(N-1).max()
+        slice_pattern2 = r'(\w+(?:\["[^"]+"\])?(?:\.[^.]+)*)\.iloc\[-(\d+):-1\]\.(max|min)\(\)'
+        def replace_slice2(m):
+            expr, n, func = m.groups()
+            n = int(n)
+            return f'{expr}.shift(1).rolling({n-1}).{func}()'
+        result = re.sub(slice_pattern2, replace_slice2, result)
+
+        # Handle df["col"].iloc[-N] patterns (specific index)
+        # df["col"].iloc[-1] → df["col"]
+        # df["col"].iloc[-2] → df["col"].shift(1)
+        iloc_pattern = r'(df\["[^"]+"\])\.iloc\[-(\d+)\]'
+        def replace_iloc_df(m):
+            expr, n = m.groups()
+            n = int(n)
+            if n == 1:
+                return expr  # Current bar
+            else:
+                return f'{expr}.shift({n-1})'
+        result = re.sub(iloc_pattern, replace_iloc_df, result)
+
+        # Handle variable.iloc[-N] patterns (intermediate variables like atr, ma_fast)
+        var_iloc_pattern = r'(\b[a-z_][a-z0-9_]*(?:\[[^\]]+\])?)\.iloc\[-(\d+)\]'
+        def replace_iloc_var(m):
+            expr, n = m.groups()
+            n = int(n)
+            if n == 1:
+                return expr
+            else:
+                return f'{expr}.shift({n-1})'
+        result = re.sub(var_iloc_pattern, replace_iloc_var, result, flags=re.IGNORECASE)
+
+        # Handle function_call(...).iloc[-1] patterns
+        # e.g., UngerPatterns.pattern_65(df).iloc[-1] → UngerPatterns.pattern_65(df)
+        func_iloc_pattern = r'(\w+(?:\.\w+)*\([^)]*\))\.iloc\[-1\]'
+        result = re.sub(func_iloc_pattern, r'\1', result)
+
+        # Convert Python boolean operators to pandas bitwise operators
+        # Use word boundaries to avoid replacing within identifiers
+        result = re.sub(r'\)\s+and\s+\(', ') & (', result)
+        result = re.sub(r'\)\s+or\s+\(', ') | (', result)
+
+        # Rename entry_condition to entry_signal for vectorized output
+        result = result.replace('entry_condition', 'entry_signal')
+
+        return result
+
+    def _vectorize_filter_logic(self, logic: str) -> str:
+        """
+        Convert filter logic to vectorized form.
+
+        Similar to _vectorize_logic but keeps filter_pass as the variable name.
+        """
+        result = self._vectorize_logic(logic)
+        # Filter logic uses filter_pass, not entry_condition
+        result = result.replace('entry_signal', 'filter_pass')
+        return result
+
     def _render_strategy(self, bp: StrategyBlueprint) -> str:
         """
         Render blueprint to Python strategy code.
@@ -288,6 +373,8 @@ class UngerGenerator:
             bp.entry_condition.logic_template,
             bp.entry_params
         )
+        # Create vectorized version for calculate_indicators()
+        entry_logic_vectorized = self._vectorize_logic(entry_logic)
 
         # Pre-process filter logic templates
         processed_filters = []
@@ -296,6 +383,7 @@ class UngerGenerator:
                 flt.logic_template,
                 flt_params
             )
+            # Template expects (filter, filter_params, filter_logic) - 3 elements
             processed_filters.append((flt, flt_params, processed_logic))
 
         # Pre-process exit condition logic
@@ -318,6 +406,7 @@ class UngerGenerator:
             entry=bp.entry_condition,
             entry_params=bp.entry_params,
             entry_logic=entry_logic,
+            entry_logic_vectorized=entry_logic_vectorized,
             filters=processed_filters,
             # Exit
             exit_mechanism=bp.exit_mechanism,

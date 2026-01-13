@@ -332,6 +332,215 @@ class PatternFetcher:
             logger.error(f"Error fetching patterns: {e}")
             return []
 
+    def get_patterns_by_tier(
+        self,
+        tier: int,
+        limit: int = 100,
+        min_edge: Optional[float] = None,
+        timeframe: Optional[str] = None
+    ) -> List[Pattern]:
+        """
+        Fetch patterns of a specific tier from pattern-discovery.
+
+        Args:
+            tier: Tier number (1, 2, or 3)
+            limit: Maximum number of patterns to return
+            min_edge: Optional minimum edge filter (overrides tier default)
+            timeframe: Optional timeframe filter (e.g., '15m', '1h')
+
+        Returns:
+            List of Pattern objects
+        """
+        if not self._available:
+            return []
+
+        # Map tier to status
+        tier_status_map = {
+            1: 'PRODUCTION',
+            2: 'BETA',
+            3: 'ALPHA',
+        }
+
+        status = tier_status_map.get(tier, 'PRODUCTION')
+
+        try:
+            params = {
+                'status': status,
+                'tier': tier,
+                'limit': limit,
+                'include_coin_performance': 'true',
+            }
+
+            response = requests.get(
+                f"{self.api_base}/patterns",
+                params=params,
+                timeout=10
+            )
+
+            if response.status_code != 200:
+                logger.error(
+                    f"Failed to fetch Tier {tier} patterns: {response.status_code} {response.text}"
+                )
+                return []
+
+            data = response.json()
+            raw_patterns = data.get('patterns', [])
+
+            # Filter by minimum edge if specified
+            if min_edge is not None:
+                raw_patterns = [
+                    p for p in raw_patterns
+                    if (p.get('test_edge') or 0) >= min_edge
+                ]
+
+            # Filter by timeframe if specified
+            if timeframe:
+                raw_patterns = [
+                    p for p in raw_patterns
+                    if p.get('timeframe') == timeframe
+                ]
+
+            patterns = [self._parse_pattern(p) for p in raw_patterns]
+
+            logger.info(
+                f"Fetched {len(patterns)} Tier {tier} patterns"
+                + (f" (min_edge={min_edge:.1%})" if min_edge else "")
+                + (f" (timeframe={timeframe})" if timeframe else "")
+            )
+            return patterns
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching Tier {tier} patterns: {e}")
+            return []
+
+    def get_multi_tier_patterns(
+        self,
+        config: dict,
+        limit_per_tier: int = 50,
+        timeframe: Optional[str] = None
+    ) -> List[Pattern]:
+        """
+        Fetch patterns from multiple tiers based on configuration.
+
+        Applies tier-specific min_edge overrides and returns patterns
+        from all enabled tiers, sorted by weighted score.
+
+        Args:
+            config: pattern_discovery section of config.yaml
+            limit_per_tier: Max patterns to fetch per tier
+            timeframe: Optional timeframe filter
+
+        Returns:
+            List of Pattern objects from all enabled tiers, sorted by weighted score
+        """
+        if not self._available:
+            return []
+
+        # Get tier configuration
+        tiers_config = config.get('tiers', {})
+        enabled_tiers = tiers_config.get('enabled', [1])
+        weights = tiers_config.get('weights', {1: 1.0, 2: 0.7, 3: 0.4})
+        min_edge_override = tiers_config.get('min_edge_override', {})
+
+        all_patterns = []
+
+        for tier in enabled_tiers:
+            # Get min_edge override for this tier (if any)
+            min_edge = min_edge_override.get(tier)
+
+            patterns = self.get_patterns_by_tier(
+                tier=tier,
+                limit=limit_per_tier,
+                min_edge=min_edge,
+                timeframe=timeframe
+            )
+
+            # Add tier weight to each pattern for sorting
+            tier_weight = weights.get(tier, 0.5)
+            for p in patterns:
+                # Store weight for later sorting (not persisted)
+                p._tier_weight = tier_weight
+
+            all_patterns.extend(patterns)
+
+        # Sort by weighted score: test_edge * tier_weight
+        all_patterns.sort(
+            key=lambda p: (p.test_edge * getattr(p, '_tier_weight', 1.0)),
+            reverse=True
+        )
+
+        # Clean up temporary weight attribute
+        for p in all_patterns:
+            if hasattr(p, '_tier_weight'):
+                delattr(p, '_tier_weight')
+
+        tier_counts = {}
+        for p in all_patterns:
+            tier_counts[p.tier] = tier_counts.get(p.tier, 0) + 1
+
+        logger.info(
+            f"Fetched {len(all_patterns)} patterns from tiers {enabled_tiers}: "
+            f"{tier_counts}"
+        )
+
+        return all_patterns
+
+    def get_multi_tier_patterns_expanded(
+        self,
+        config: dict,
+        limit_per_tier: int = 50,
+        timeframe: Optional[str] = None,
+        expand_multi_target: bool = True
+    ) -> List[Pattern]:
+        """
+        Fetch patterns from multiple tiers with multi-target expansion.
+
+        Combines multi-tier fetching with the ability to expand patterns
+        that have multiple validated targets into separate virtual patterns.
+
+        Args:
+            config: pattern_discovery section of config.yaml
+            limit_per_tier: Max patterns to fetch per tier
+            timeframe: Optional timeframe filter
+            expand_multi_target: If True, expand patterns with multiple targets
+
+        Returns:
+            List of Pattern objects (may include virtual expanded patterns)
+        """
+        base_patterns = self.get_multi_tier_patterns(
+            config=config,
+            limit_per_tier=limit_per_tier,
+            timeframe=timeframe
+        )
+
+        if not expand_multi_target:
+            return base_patterns
+
+        # Get expansion config
+        multi_target_config = config.get('multi_target', {})
+        if not multi_target_config.get('enabled', True):
+            return base_patterns
+
+        min_edge_for_expansion = multi_target_config.get('min_edge_for_expansion', 0.05)
+        max_targets_per_pattern = multi_target_config.get('max_targets_per_pattern', 5)
+
+        # Expand patterns with multiple targets
+        expanded = []
+        for pattern in base_patterns:
+            virtual_patterns = self.expand_pattern_to_targets(
+                pattern,
+                min_edge=min_edge_for_expansion,
+                max_targets=max_targets_per_pattern
+            )
+            expanded.extend(virtual_patterns)
+
+        logger.info(
+            f"Expanded {len(base_patterns)} base patterns to "
+            f"{len(expanded)} total patterns (including virtual)"
+        )
+
+        return expanded
+
     def get_pattern_by_id(self, pattern_id: str) -> Optional[Pattern]:
         """
         Get specific pattern by ID

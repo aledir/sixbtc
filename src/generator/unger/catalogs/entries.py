@@ -1071,7 +1071,7 @@ entry_condition = (st_dir.iloc[-1] == -1) and (st_dir.iloc[-2] == 1)''',
 psar = ta.psar(df["high"], df["low"], df["close"])
 psar_long = psar["PSARl_0.02_0.2"]
 psar_short = psar["PSARs_0.02_0.2"]
-entry_condition = psar_long.iloc[-1].notna() and psar_short.iloc[-2].notna()''',
+entry_condition = pd.notna(psar_long.iloc[-1]) and pd.notna(psar_short.iloc[-2])''',
         params={},
         lookback_required=20,
         indicators_used=["PSAR"],
@@ -1086,7 +1086,7 @@ entry_condition = psar_long.iloc[-1].notna() and psar_short.iloc[-2].notna()''',
 psar = ta.psar(df["high"], df["low"], df["close"])
 psar_long = psar["PSARl_0.02_0.2"]
 psar_short = psar["PSARs_0.02_0.2"]
-entry_condition = psar_short.iloc[-1].notna() and psar_long.iloc[-2].notna()''',
+entry_condition = pd.notna(psar_short.iloc[-1]) and pd.notna(psar_long.iloc[-2])''',
         params={},
         lookback_required=20,
         indicators_used=["PSAR"],
@@ -1262,7 +1262,7 @@ entry_condition = chop.iloc[-1] < {threshold}''',
         direction="LONG",
         logic_template='''import pandas_ta as ta
 ce = ta.chandelier_exit(df["high"], df["low"], df["close"], length={length}, mult={mult})
-ce_long = ce[f"CHANDELIERl_{length}_{mult}"]
+ce_long = ce.iloc[:, 0]  # CHDLREXTl column (long)
 entry_condition = (df["close"].iloc[-1] > ce_long.iloc[-1]) and (df["close"].iloc[-2] <= ce_long.iloc[-2])''',
         params={"length": [22], "mult": [3.0]},
         lookback_required=30,
@@ -1276,7 +1276,7 @@ entry_condition = (df["close"].iloc[-1] > ce_long.iloc[-1]) and (df["close"].ilo
         direction="SHORT",
         logic_template='''import pandas_ta as ta
 ce = ta.chandelier_exit(df["high"], df["low"], df["close"], length={length}, mult={mult})
-ce_short = ce[f"CHANDELIERs_{length}_{mult}"]
+ce_short = ce.iloc[:, 1]  # CHDLREXTs column (short)
 entry_condition = (df["close"].iloc[-1] < ce_short.iloc[-1]) and (df["close"].iloc[-2] >= ce_short.iloc[-2])''',
         params={"length": [22], "mult": [3.0]},
         lookback_required=30,
@@ -1337,7 +1337,7 @@ MOMENTUM_ADVANCED_ENTRIES = [
         direction="LONG",
         logic_template='''import pandas_ta as ta
 tsi = ta.tsi(df["close"], fast={fast}, slow={slow})
-tsi_val = tsi[f"TSI_{fast}_{slow}_{slow//2}"]
+tsi_val = tsi.iloc[:, 0]  # TSI value column
 entry_condition = (tsi_val.iloc[-1] > 0) and (tsi_val.iloc[-2] <= 0)''',
         params={"fast": [13], "slow": [25]},
         lookback_required=35,
@@ -1351,7 +1351,7 @@ entry_condition = (tsi_val.iloc[-1] > 0) and (tsi_val.iloc[-2] <= 0)''',
         direction="SHORT",
         logic_template='''import pandas_ta as ta
 tsi = ta.tsi(df["close"], fast={fast}, slow={slow})
-tsi_val = tsi[f"TSI_{fast}_{slow}_{slow//2}"]
+tsi_val = tsi.iloc[:, 0]  # TSI value column
 entry_condition = (tsi_val.iloc[-1] < 0) and (tsi_val.iloc[-2] >= 0)''',
         params={"fast": [13], "slow": [25]},
         lookback_required=35,
@@ -1365,8 +1365,8 @@ entry_condition = (tsi_val.iloc[-1] < 0) and (tsi_val.iloc[-2] >= 0)''',
         direction="LONG",
         logic_template='''import pandas_ta as ta
 tsi = ta.tsi(df["close"], fast={fast}, slow={slow})
-tsi_val = tsi[f"TSI_{fast}_{slow}_{slow//2}"]
-tsi_sig = tsi[f"TSIs_{fast}_{slow}_{slow//2}"]
+tsi_val = tsi.iloc[:, 0]  # TSI value column
+tsi_sig = tsi.iloc[:, 1]  # TSI signal column
 entry_condition = (tsi_val.iloc[-1] > tsi_sig.iloc[-1]) and (tsi_val.iloc[-2] <= tsi_sig.iloc[-2])''',
         params={"fast": [13], "slow": [25]},
         lookback_required=35,
@@ -1380,8 +1380,8 @@ entry_condition = (tsi_val.iloc[-1] > tsi_sig.iloc[-1]) and (tsi_val.iloc[-2] <=
         direction="SHORT",
         logic_template='''import pandas_ta as ta
 tsi = ta.tsi(df["close"], fast={fast}, slow={slow})
-tsi_val = tsi[f"TSI_{fast}_{slow}_{slow//2}"]
-tsi_sig = tsi[f"TSIs_{fast}_{slow}_{slow//2}"]
+tsi_val = tsi.iloc[:, 0]  # TSI value column
+tsi_sig = tsi.iloc[:, 1]  # TSI signal column
 entry_condition = (tsi_val.iloc[-1] < tsi_sig.iloc[-1]) and (tsi_val.iloc[-2] >= tsi_sig.iloc[-2])''',
         params={"fast": [13], "slow": [25]},
         lookback_required=35,
@@ -1477,7 +1477,7 @@ entry_condition = uo.iloc[-1] > {threshold}''',
         direction="LONG",
         logic_template='''import pandas_ta as ta
 sqz = ta.squeeze_pro(df["high"], df["low"], df["close"], bb_length=20, kc_length=20)
-sqz_val = sqz["SQZPRO_20_2.0_20_1.5"]
+sqz_val = sqz.iloc[:, 0]  # SQZPRO momentum value column
 in_squeeze = sqz_val.iloc[-2] != 0
 firing_long = sqz_val.iloc[-1] > 0
 entry_condition = in_squeeze and firing_long''',
@@ -1493,7 +1493,7 @@ entry_condition = in_squeeze and firing_long''',
         direction="SHORT",
         logic_template='''import pandas_ta as ta
 sqz = ta.squeeze_pro(df["high"], df["low"], df["close"], bb_length=20, kc_length=20)
-sqz_val = sqz["SQZPRO_20_2.0_20_1.5"]
+sqz_val = sqz.iloc[:, 0]  # SQZPRO momentum value column
 in_squeeze = sqz_val.iloc[-2] != 0
 firing_short = sqz_val.iloc[-1] < 0
 entry_condition = in_squeeze and firing_short''',
@@ -1597,8 +1597,7 @@ entry_condition = (rvgi_val.iloc[-1] < rvgi_sig.iloc[-1]) and (rvgi_val.iloc[-2]
         direction="LONG",
         logic_template='''import pandas_ta as ta
 qqe = ta.qqe(df["close"], length={length})
-qqe_line = qqe[f"QQE_{length}_5_4.236"]
-qqe_long = qqe[f"QQEl_{length}_5_4.236"]
+qqe_long = qqe.iloc[:, 2]  # QQEl column (long signal)
 entry_condition = qqe_long.iloc[-1] == 1''',
         params={"length": [14]},
         lookback_required=30,
@@ -1612,7 +1611,7 @@ entry_condition = qqe_long.iloc[-1] == 1''',
         direction="SHORT",
         logic_template='''import pandas_ta as ta
 qqe = ta.qqe(df["close"], length={length})
-qqe_short = qqe[f"QQEs_{length}_5_4.236"]
+qqe_short = qqe.iloc[:, 3]  # QQEs column (short signal)
 entry_condition = qqe_short.iloc[-1] == 1''',
         params={"length": [14]},
         lookback_required=30,
@@ -1811,7 +1810,8 @@ entry_condition = (nvi.iloc[-1] > nvi_ma.iloc[-1]) and (nvi.iloc[-2] <= nvi_ma.i
         category="volume_flow",
         direction="SHORT",
         logic_template='''import pandas_ta as ta
-pvi = ta.pvi(df["close"], df["volume"])
+pvi_df = ta.pvi(df["close"], df["volume"])
+pvi = pvi_df.iloc[:, 0]  # PVI value column
 pvi_ma = pvi.rolling(255).mean()
 entry_condition = (pvi.iloc[-1] < pvi_ma.iloc[-1]) and (pvi.iloc[-2] >= pvi_ma.iloc[-2])''',
         params={},

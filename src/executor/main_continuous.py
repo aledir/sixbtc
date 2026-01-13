@@ -397,7 +397,7 @@ class ContinuousExecutorProcess:
         try:
             # Extract class name (supports all prefixes)
             import re
-            match = re.search(r'class\s+((?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat)_\w+)\s*\(', code)
+            match = re.search(r'class\s+((?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+)\s*\(', code)
             if not match:
                 return None
 
@@ -573,10 +573,10 @@ class ContinuousExecutorProcess:
                         trailing_activation_pct=getattr(signal, 'trailing_activation_pct', 0.01),
                     )
 
-                # Register TIME_BASED exit tracking if applicable
-                exit_type = getattr(signal, 'exit_type', None)
-                if exit_type == ExitType.TIME_BASED:
-                    exit_after_bars = getattr(signal, 'exit_after_bars', 20)
+                # Register TIME_BASED exit tracking if exit_after_bars > 0
+                # Check exit_after_bars directly (templates set this, not exit_type)
+                exit_after_bars = getattr(signal, 'exit_after_bars', 0)
+                if exit_after_bars and exit_after_bars > 0:
                     key = f"{symbol}:{subaccount['id']}"
                     self._time_exit_tracking[key] = {
                         'entry_time': datetime.now(UTC),

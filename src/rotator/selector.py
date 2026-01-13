@@ -5,10 +5,11 @@ Single Responsibility: Select best strategies from ACTIVE pool with diversificat
 
 Selection criteria:
 - Score >= min_score (from active_pool config - single threshold)
-- Diversification: max N per type, max M per timeframe
+- Diversification: max N per type, max M per timeframe, max K per direction
 - Not already in LIVE status
 """
 
+import re
 from collections import defaultdict
 from typing import Dict, List, Optional
 from uuid import UUID
@@ -20,6 +21,58 @@ from src.database.models import Strategy, BacktestResult
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def detect_direction(code: str) -> str:
+    """
+    Detect trading direction from strategy code.
+
+    Analyzes class attributes and Signal() calls to determine direction:
+    - LONG: Only long positions
+    - SHORT: Only short positions
+    - BIDIR: Both directions (or explicit bidi)
+
+    Args:
+        code: Strategy source code
+
+    Returns:
+        Direction string: "LONG", "SHORT", or "BIDIR"
+    """
+    if not code:
+        return "LONG"  # Default
+
+    code_lower = code.lower()
+
+    # Check for explicit BIDI/BIDIR class attribute first
+    has_bidi = (
+        "direction='bidi'" in code_lower or
+        'direction="bidi"' in code_lower or
+        "direction = 'bidi'" in code_lower or
+        'direction = "bidi"' in code_lower
+    )
+    if has_bidi:
+        return "BIDIR"
+
+    # Check both Signal() calls and class attribute definitions
+    has_long = (
+        "direction='long'" in code_lower or
+        'direction="long"' in code_lower or
+        "direction = 'long'" in code_lower or
+        'direction = "long"' in code_lower
+    )
+    has_short = (
+        "direction='short'" in code_lower or
+        'direction="short"' in code_lower or
+        "direction = 'short'" in code_lower or
+        'direction = "short"' in code_lower
+    )
+
+    if has_long and has_short:
+        return "BIDIR"
+    elif has_short:
+        return "SHORT"
+    else:
+        return "LONG"  # Default
 
 
 class StrategySelector:
@@ -51,21 +104,24 @@ class StrategySelector:
         selection_config = rotator_config['selection']
         self.max_per_type = selection_config['max_per_type']
         self.max_per_timeframe = selection_config['max_per_timeframe']
+        self.max_per_direction = selection_config.get('max_per_direction', 5)
 
         logger.info(
             f"StrategySelector initialized: min_score={self.min_score}, "
             f"max_live={self.max_live_strategies}, min_pool={self.min_pool_size}, "
-            f"max_per_type={self.max_per_type}, max_per_timeframe={self.max_per_timeframe}"
+            f"max_per_type={self.max_per_type}, max_per_timeframe={self.max_per_timeframe}, "
+            f"max_per_direction={self.max_per_direction}"
         )
 
     def get_candidates(self, slots_available: int) -> List[Dict]:
         """
         Get top candidates from ACTIVE pool for deployment.
 
-        Applies:
-        1. Score threshold (>= min_score from active_pool)
-        2. Diversification constraints (type, timeframe)
-        3. Sorts by score descending
+        Uses progressive constraint relaxation:
+        - Round 1: All constraints (type, timeframe, direction)
+        - Round 2: Relax direction (direction=∞)
+        - Round 3: Relax timeframe (timeframe=∞, direction=∞)
+        - Round 4: Relax all (pure score ranking)
 
         Args:
             slots_available: Number of free LIVE slots
@@ -97,58 +153,86 @@ class StrategySelector:
                 .all()
             )
 
-            # Count existing LIVE by type and timeframe
+            # Count existing LIVE by type, timeframe, and direction
             type_counts = defaultdict(int)
             tf_counts = defaultdict(int)
+            dir_counts = defaultdict(int)
             for s in live_strategies:
                 if s.strategy_type:
                     type_counts[s.strategy_type] += 1
                 if s.optimal_timeframe:
                     tf_counts[s.optimal_timeframe] += 1
+                direction = detect_direction(s.code)
+                dir_counts[direction] += 1
 
-            # Select with diversification
+            # Progressive relaxation levels
+            # (max_type, max_tf, max_dir, level_name)
+            INF = 999999
+            relaxation_levels = [
+                (self.max_per_type, self.max_per_timeframe, self.max_per_direction, "strict"),
+                (self.max_per_type, self.max_per_timeframe, INF, "relax_direction"),
+                (self.max_per_type, INF, INF, "relax_timeframe"),
+                (INF, INF, INF, "relax_all"),
+            ]
+
             candidates = []
-            for strategy in eligible:
+            selected_ids = set()
+
+            for max_type, max_tf, max_dir, level_name in relaxation_levels:
                 if len(candidates) >= slots_available:
                     break
 
-                strategy_type = strategy.strategy_type or 'UNKNOWN'
-                timeframe = strategy.optimal_timeframe or 'UNKNOWN'
+                # Try to fill remaining slots with current constraints
+                for strategy in eligible:
+                    if len(candidates) >= slots_available:
+                        break
 
-                # Check diversification constraints
-                if type_counts[strategy_type] >= self.max_per_type:
+                    # Skip already selected
+                    if strategy.id in selected_ids:
+                        continue
+
+                    strategy_type = strategy.strategy_type or 'UNKNOWN'
+                    timeframe = strategy.optimal_timeframe or 'UNKNOWN'
+                    direction = detect_direction(strategy.code)
+
+                    # Check constraints for this level
+                    if type_counts[strategy_type] >= max_type:
+                        continue
+                    if tf_counts[timeframe] >= max_tf:
+                        continue
+                    if dir_counts[direction] >= max_dir:
+                        continue
+
+                    # Add to candidates
+                    candidates.append({
+                        'id': strategy.id,
+                        'name': strategy.name,
+                        'strategy_type': strategy_type,
+                        'timeframe': timeframe,
+                        'direction': direction,
+                        'score': strategy.score_backtest,
+                        'code': strategy.code,
+                        'backtest_pairs': strategy.backtest_pairs,
+                        'relaxation_level': level_name,
+                    })
+
+                    selected_ids.add(strategy.id)
+                    type_counts[strategy_type] += 1
+                    tf_counts[timeframe] += 1
+                    dir_counts[direction] += 1
+
                     logger.debug(
-                        f"Skipped {strategy.name}: max {self.max_per_type} "
-                        f"strategies of type {strategy_type}"
+                        f"Candidate [{level_name}]: {strategy.name} "
+                        f"(type={strategy_type}, tf={timeframe}, dir={direction}, "
+                        f"score={strategy.score_backtest:.1f})"
                     )
-                    continue
 
-                if tf_counts[timeframe] >= self.max_per_timeframe:
-                    logger.debug(
-                        f"Skipped {strategy.name}: max {self.max_per_timeframe} "
-                        f"strategies on timeframe {timeframe}"
+                # Log if we needed relaxation
+                if level_name != "strict" and len(candidates) > 0:
+                    logger.info(
+                        f"Constraint relaxation [{level_name}]: "
+                        f"{len(candidates)}/{slots_available} slots filled"
                     )
-                    continue
-
-                # Add to candidates
-                candidates.append({
-                    'id': strategy.id,
-                    'name': strategy.name,
-                    'strategy_type': strategy_type,
-                    'timeframe': timeframe,
-                    'score': strategy.score_backtest,
-                    'code': strategy.code,
-                    'backtest_pairs': strategy.backtest_pairs,
-                })
-
-                # Update counts for next iteration
-                type_counts[strategy_type] += 1
-                tf_counts[timeframe] += 1
-
-                logger.debug(
-                    f"Candidate: {strategy.name} (type={strategy_type}, "
-                    f"tf={timeframe}, score={strategy.score_backtest:.1f})"
-                )
 
             logger.info(
                 f"Selected {len(candidates)} candidates from {len(eligible)} eligible "
@@ -220,11 +304,14 @@ class StrategySelector:
 
             type_dist = defaultdict(int)
             tf_dist = defaultdict(int)
+            dir_dist = defaultdict(int)
             for s in live_strategies:
                 if s.strategy_type:
                     type_dist[s.strategy_type] += 1
                 if s.optimal_timeframe:
                     tf_dist[s.optimal_timeframe] += 1
+                direction = detect_direction(s.code)
+                dir_dist[direction] += 1
 
             return {
                 'active_count': active_count,
@@ -235,4 +322,5 @@ class StrategySelector:
                 'free_slots': max(0, self.max_live_strategies - live_count),
                 'type_distribution': dict(type_dist),
                 'timeframe_distribution': dict(tf_dist),
+                'direction_distribution': dict(dir_dist),
             }

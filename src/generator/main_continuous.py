@@ -209,24 +209,24 @@ class ContinuousGeneratorProcess:
         Fetch all Tier 1 patterns that haven't been used yet.
 
         Uses multi-target expansion to create virtual patterns for each
-        Tier 1 target (e.g., one pattern with 3 targets -> 3 virtual patterns).
+        validated target (e.g., one pattern with 3 targets -> 3 virtual patterns).
+
+        Fetches from multiple tiers based on config (tiers.enabled).
 
         Returns:
             List of unused Pattern objects (including virtual patterns)
         """
         try:
-            # Get multi-target config
-            multi_target_config = self.config.get('pattern_discovery', {}).get('multi_target', {})
+            # Get pattern_discovery config section
+            pd_config = self.config.get('pattern_discovery', {})
+            multi_target_config = pd_config.get('multi_target', {})
             expand_enabled = multi_target_config.get('enabled', True)
-            min_edge = multi_target_config.get('min_edge_for_expansion', 0.05)
-            max_targets = multi_target_config.get('max_targets_per_pattern', 5)
 
-            # Fetch patterns with multi-target expansion
-            all_patterns = self.pattern_fetcher.get_tier_1_patterns_expanded(
-                limit=100,
-                expand_multi_target=expand_enabled,
-                min_edge_for_expansion=min_edge,
-                max_targets_per_pattern=max_targets
+            # Fetch patterns from all enabled tiers with multi-target expansion
+            all_patterns = self.pattern_fetcher.get_multi_tier_patterns_expanded(
+                config=pd_config,
+                limit_per_tier=50,  # 50 per tier, sorted by weighted score
+                expand_multi_target=expand_enabled
             )
 
             if not all_patterns:
@@ -303,13 +303,13 @@ class ContinuousGeneratorProcess:
         """
         Get list of enabled generation sources in priority order.
 
-        Order: pattern, unger, ai_free, ai_assigned
+        Order: pattern, pattern_gen, unger, pandas_ta, ai_free, ai_assigned
         This order determines round-robin sequence.
 
         Returns:
             List of enabled source names
         """
-        all_sources = ['pattern', 'unger', 'ai_free', 'ai_assigned']
+        all_sources = ['pattern', 'pattern_gen', 'unger', 'pandas_ta', 'ai_free', 'ai_assigned']
         return [s for s in all_sources if self._is_source_enabled(s)]
 
     def _get_next_source(self) -> Optional[str]:
@@ -542,8 +542,12 @@ class ContinuousGeneratorProcess:
             # Dispatch to appropriate generator based on source
             if source == 'pattern':
                 return self._generate_from_pattern(timeframe, remaining_capacity)
+            elif source == 'pattern_gen':
+                return self._generate_from_pattern_gen(timeframe)
             elif source == 'unger':
                 return self._generate_from_unger(timeframe)
+            elif source == 'pandas_ta':
+                return self._generate_from_pandas_ta(timeframe)
             elif source == 'ai_free':
                 return self._generate_from_ai(timeframe, remaining_capacity, source='ai_free')
             elif source == 'ai_assigned':
@@ -586,6 +590,153 @@ class ContinuousGeneratorProcess:
             return (False, 0, "unger_no_coins")
 
         return self._generate_unger_batch(timeframe, regime_type)
+
+    def _generate_from_pandas_ta(self, timeframe: str) -> Tuple[bool, int, str]:
+        """
+        Generate strategy using pandas_ta indicator combinations.
+
+        Uses PandasTaGenerator to create strategies from:
+        - 50+ pandas_ta indicators
+        - Compatibility matrices for sensible combinations
+        - 1-3 indicators per strategy (max to avoid overfitting)
+        - Reused exit mechanisms from Unger
+
+        Args:
+            timeframe: Target timeframe
+
+        Returns:
+            (success, count, source_name) tuple
+        """
+        try:
+            from src.generator.pandas_ta import PandasTaGenerator
+
+            gen_start = time.time()
+            pta_gen = PandasTaGenerator(self.config)
+
+            # Select random regime (or None for mixed)
+            regime_type = random.choice(['TREND', 'REVERSAL', None])
+
+            # Generate one strategy
+            results = pta_gen.generate(
+                timeframe=timeframe,
+                regime_type=regime_type,
+                count=1
+            )
+
+            gen_duration_ms = int((time.time() - gen_start) * 1000)
+
+            if not results:
+                logger.debug("No pandas_ta strategy generated")
+                return (False, 0, "pandas_ta_empty")
+
+            # Save strategies
+            saved_count = 0
+            for result in results:
+                # PtaStrat_ prefix for pandas_ta strategies
+                strategy_name = f"PtaStrat_{result.strategy_type}_{result.strategy_id}"
+
+                self._save_to_database(
+                    name=strategy_name,
+                    strategy_type=result.strategy_type,
+                    timeframe=result.timeframe,
+                    code=result.code,
+                    ai_provider="pandas_ta",
+                    pattern_based=False,
+                    pattern_ids=[],
+                    template_id=None,
+                    parameters=result.parameters,
+                    pattern_coins=result.pattern_coins,
+                    base_code_hash=result.base_code_hash,
+                    generation_mode="pandas_ta",
+                    duration_ms=gen_duration_ms,
+                    leverage=None
+                )
+                saved_count += 1
+
+                logger.info(
+                    f"Saved PtaStrat_{result.strategy_type}_{result.strategy_id} "
+                    f"({result.regime_type}, {len(result.entry_indicators)} indicators: "
+                    f"{'+'.join(result.entry_indicators)})"
+                )
+
+            return (True, saved_count, "pandas_ta")
+
+        except Exception as e:
+            logger.error(f"Pandas-TA generation error: {e}", exc_info=True)
+            return (False, 0, str(e))
+
+    def _generate_from_pattern_gen(self, timeframe: str) -> Tuple[bool, int, str]:
+        """
+        Generate strategy using internal pattern generator (pattern_gen).
+
+        Uses FormulaComposer to create trading formulas from building blocks,
+        then renders them into complete strategy code.
+
+        Args:
+            timeframe: Target timeframe
+
+        Returns:
+            (success, count, source_name) tuple
+        """
+        try:
+            from src.generator.pattern_gen import PatternGenGenerator
+
+            gen_start = time.time()
+            pattern_gen = PatternGenGenerator(self.config)
+
+            # Generate one strategy
+            results = pattern_gen.generate(
+                timeframe=timeframe,
+                direction=random.choice(['long', 'short']),
+                count=1
+            )
+
+            gen_duration_ms = int((time.time() - gen_start) * 1000)
+
+            if not results:
+                logger.debug("No pattern_gen strategy generated")
+                return (False, 0, "pattern_gen_empty")
+
+            # Save strategies
+            saved_count = 0
+            for result in results:
+                # Determine prefix: PGnStrat_ = smart, PGgStrat_ = genetic
+                is_genetic = getattr(result, 'is_genetic', False)
+                prefix = "PGgStrat" if is_genetic else "PGnStrat"
+                strategy_name = f"{prefix}_{result.strategy_type}_{result.strategy_id}"
+
+                # Use generation_mode from result (pattern_gen or pattern_gen_genetic)
+                gen_mode = getattr(result, 'generation_mode', 'pattern_gen')
+
+                self._save_to_database(
+                    name=strategy_name,
+                    strategy_type=result.strategy_type,
+                    timeframe=result.timeframe,
+                    code=result.code,
+                    ai_provider="pattern_gen",
+                    pattern_based=False,
+                    pattern_ids=[],
+                    template_id=None,
+                    parameters=result.parameters,
+                    pattern_coins=None,
+                    base_code_hash=result.base_code_hash,
+                    generation_mode=gen_mode,
+                    duration_ms=gen_duration_ms,
+                    leverage=result.parameters.get('leverage')
+                )
+                saved_count += 1
+
+                mode_str = "genetic" if is_genetic else result.composition_type
+                logger.info(
+                    f"Saved {prefix}_{result.strategy_type}_{result.strategy_id} "
+                    f"({mode_str}, {result.direction}, blocks={result.blocks_used})"
+                )
+
+            return (True, saved_count, "pattern_gen")
+
+        except Exception as e:
+            logger.error(f"Pattern-gen generation error: {e}", exc_info=True)
+            return (False, 0, str(e))
 
     def _generate_from_ai(
         self, timeframe: str, remaining_capacity: int, source: str
@@ -675,6 +826,7 @@ class ContinuousGeneratorProcess:
             # Pat = pattern, Ung = unger, AIF = ai_free, AIA = ai_assigned
             prefix_map = {
                 'pattern': 'PatStrat',
+                'pattern_gen': 'PGnStrat',
                 'unger': 'UngStrat',
                 'ai_free': 'AIFStrat',
                 'ai_assigned': 'AIAStrat',
@@ -721,6 +873,17 @@ class ContinuousGeneratorProcess:
             Direction string: "LONG", "SHORT", or "BIDIR"
         """
         code_lower = code.lower()
+
+        # Check for explicit BIDI/BIDIR class attribute first
+        # Unger strategies use: direction = 'bidi' (class attribute)
+        has_bidi = (
+            "direction='bidi'" in code_lower or
+            'direction="bidi"' in code_lower or
+            "direction = 'bidi'" in code_lower or
+            'direction = "bidi"' in code_lower
+        )
+        if has_bidi:
+            return "BIDIR"
 
         # Check both Signal() calls and class attribute definitions
         # Pattern strategies use: direction = 'long' (class attribute)

@@ -188,6 +188,22 @@ generation:
   strategy_sources:
     pattern:
       enabled: false           # PatStrat_* from pattern-discovery API
+    pattern_gen:
+      enabled: true            # PGnStrat_*/PGgStrat_* - Internal pattern generator
+      parametric_ratio: 0.50   # 50% single-block parametric variations
+      template_ratio: 0.30     # 30% 2-3 block combinations (AND logic)
+      innovative_ratio: 0.20   # 20% sequential/multi-lookback/volatility patterns
+
+      # Genetic evolution settings (Phase 2)
+      genetic:
+        enabled: true            # Enable genetic evolution
+        min_pool_score: 40       # Min score to enter genetic pool
+        min_pool_size: 50        # Min ACTIVE strategies before genetic starts
+        smart_ratio: 0.70        # 70% smart when both available
+        genetic_ratio: 0.30      # 30% genetic when both available
+        tournament_size: 3       # Tournament selection size
+        mutation_rate: 0.20      # 20% mutation probability
+        crossover_rate: 0.80     # 80% crossover probability
     ai_free:
       enabled: false           # AIFStrat_* - AI chooses indicators freely
     ai_assigned:
@@ -195,6 +211,13 @@ generation:
     unger:
       enabled: true            # UngStrat_* - Regime-coherent strategies (Unger method)
       min_regime_strength: 0.5 # Minimum regime strength to generate (uses regime.min_strength)
+    pandas_ta:
+      enabled: true            # PtaStrat_* - Pandas-TA indicator combinations
+      min_regime_strength: 0.5 # Minimum regime strength to generate
+      indicator_ratios:        # Distribution of indicator counts per strategy
+        single: 0.30           # 30% strategies with 1 indicator
+        double: 0.50           # 50% strategies with 2 indicators
+        triple: 0.20           # 20% strategies with 3 indicators
 
   # When both AI sources are enabled, this ratio controls the mix
   # ai_free_ratio: 0.7 means 70% ai_free, 30% ai_assigned
@@ -249,20 +272,48 @@ pipeline:
 # ==============================================================================
 pattern_discovery:
   api_url: http://localhost:8001
-  tier_filter: 1               # Only use Tier 1 validated patterns
-  # min_quality_score removed: Tier 1 patterns are already validated by pattern-discovery
 
-  # Coin selection from pattern's coin_performance
+  # --------------------------------------------------------------------------
+  # TIER CONFIGURATION
+  # --------------------------------------------------------------------------
+  # Tier 1: edge>=5%, N>=500/window, stability<1%, coins>=20 (PRODUCTION)
+  # Tier 2: edge>=3%, N>=200/window, stability<2%, coins>=10 (BETA)
+  # Tier 3: edge>=2%, N>=100/window, stability<3%, coins>=5 (ALPHA)
+  #
+  # All tiers are walk-forward validated by pattern-discovery.
+  # Lower tiers have less strict requirements but still positive edge.
+  tiers:
+    enabled: [1, 2]            # Which tiers to use: [1], [1,2], [1,2,3]
+    weights:                   # Relative weight when mixing tiers (for selection)
+      1: 1.0                   # Tier 1: full weight (highest confidence)
+      2: 0.7                   # Tier 2: 70% weight (good confidence)
+      3: 0.4                   # Tier 3: 40% weight (moderate confidence)
+    min_edge_override:         # Override minimum edge per tier (optional)
+      2: 0.04                  # Tier 2: require at least 4% edge (stricter than default 3%)
+      3: 0.03                  # Tier 3: require at least 3% edge (stricter than default 2%)
+
+  # --------------------------------------------------------------------------
+  # COIN SELECTION
+  # --------------------------------------------------------------------------
   # Uses ALL coins meeting edge/signals criteria + liquidity filter from trading.min_volume_24h
   coin_selection:
     min_edge: 0.10             # 10% minimum edge to include coin
     min_signals: 50            # Minimum signals for statistical reliability
 
-  # Multi-target expansion: one pattern with N Tier 1 targets -> N strategies
+  # --------------------------------------------------------------------------
+  # MULTI-TARGET EXPANSION
+  # --------------------------------------------------------------------------
+  # One pattern with N validated targets -> N strategies
   multi_target:
     enabled: true              # Enable multi-target expansion
     min_edge_for_expansion: 0.05  # 5% min edge per target to expand
     max_targets_per_pattern: 5    # Limit expansion per pattern
+
+  # --------------------------------------------------------------------------
+  # HELPERS (timeframe scaling functions)
+  # --------------------------------------------------------------------------
+  helpers:
+    cache_ttl_seconds: 3600    # Cache helper functions for 1 hour
 
 # ==============================================================================
 # VALIDATION (Strategy Code Validation)
@@ -366,6 +417,7 @@ rotator:
   selection:
     max_per_type: 3              # Max strategies per type (MOM, REV, etc.)
     max_per_timeframe: 3         # Max strategies per timeframe
+    max_per_direction: 5         # Max strategies per direction (LONG, SHORT, BIDIR)
 
 # ==============================================================================
 # MONITOR (LIVE Performance & Retirement)

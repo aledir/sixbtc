@@ -97,6 +97,8 @@ class MetricsCollector:
                 ai_calls_today = self._get_ai_calls_today()
                 unused_patterns = self._get_unused_patterns(session)
                 funnel = self._get_funnel_24h(session, window_24h)
+                validation_by_source = self._get_validation_by_source_24h(session, window_24h)
+                pool_added_by_source = self._get_pool_added_by_source_24h(session, window_24h)
                 timing = self._get_timing_avg_24h(session, window_24h)
                 throughput = self._get_throughput_interval(session, window_1min)
                 failures = self._get_failures_24h(session, window_24h)
@@ -130,6 +132,7 @@ class MetricsCollector:
                     ai_calls_today=ai_calls_today,
                     unused_patterns=unused_patterns,
                     funnel=funnel,
+                    validation_by_source=validation_by_source,
                     timing=timing,
                     failures=failures,
                     backpressure=backpressure,
@@ -139,6 +142,7 @@ class MetricsCollector:
                     pool_stats=pool_stats,
                     pool_quality=pool_quality,
                     pool_by_source=pool_by_source,
+                    pool_added_by_source=pool_added_by_source,
                     retest_stats=retest_stats,
                     live_stats=live_stats,
                     combo_stats=combo_stats,
@@ -283,7 +287,15 @@ class MetricsCollector:
 
         # Parse results
         total = 0
-        by_source = {'pattern': 0, 'ai_free': 0, 'ai_assigned': 0}
+        by_source = {
+            'pattern': 0,
+            'pattern_gen': 0,
+            'pattern_gen_genetic': 0,
+            'unger': 0,
+            'pandas_ta': 0,
+            'ai_free': 0,
+            'ai_assigned': 0,
+        }
         by_type = {}
         by_direction = {'LONG': 0, 'SHORT': 0, 'BIDIR': 0}
         by_timeframe = {}
@@ -321,7 +333,15 @@ class MetricsCollector:
             {'since': since}
         ).all()
 
-        timing_by_source = {'pattern': None, 'ai_free': None, 'ai_assigned': None}
+        timing_by_source = {
+            'pattern': None,
+            'pattern_gen': None,
+            'pattern_gen_genetic': None,
+            'unger': None,
+            'pandas_ta': None,
+            'ai_free': None,
+            'ai_assigned': None,
+        }
         for source, avg_ms in timing_result:
             if source in timing_by_source and avg_ms is not None:
                 timing_by_source[source] = float(avg_ms)
@@ -516,8 +536,17 @@ class MetricsCollector:
             .group_by(Strategy.generation_mode)
         ).all()
 
-        # Build dict with defaults
-        sources = {'pattern': 0, 'ai_free': 0, 'ai_assigned': 0, 'optimized': 0, 'unknown': 0}
+        # Build dict with defaults (matches config.yaml strategy_sources)
+        sources = {
+            'pattern': 0,
+            'pattern_gen': 0,
+            'pattern_gen_genetic': 0,
+            'unger': 0,
+            'pandas_ta': 0,
+            'ai_free': 0,
+            'ai_assigned': 0,
+            'unknown': 0,
+        }
         for mode, count in result:
             if mode in sources:
                 sources[mode] = count
@@ -736,6 +765,88 @@ class MetricsCollector:
             'pool': pool_entered,
             'pool_pct': pct(pool_entered, mw_ok if mw_ok > 0 else shuffle_ok),
         }
+
+    def _get_validation_by_source_24h(self, session, since: datetime) -> Dict[str, Dict[str, int]]:
+        """
+        Get validation passed/failed counts by generation_mode (source).
+
+        Joins strategy_events with strategies table to get generation_mode.
+        Returns dict with 'passed' and 'failed' sub-dicts by source.
+        """
+        # Query validation events joined with strategies for generation_mode
+        result = session.execute(
+            text("""
+                WITH validation_events AS (
+                    SELECT
+                        e.strategy_id,
+                        CASE
+                            WHEN e.event_type = 'completed' AND e.status = 'completed' THEN 'passed'
+                            WHEN e.status = 'failed' THEN 'failed'
+                        END as result
+                    FROM strategy_events e
+                    WHERE e.timestamp >= :since
+                      AND e.stage = 'validation'
+                      AND (
+                          (e.event_type = 'completed' AND e.status = 'completed')
+                          OR e.status = 'failed'
+                      )
+                )
+                SELECT
+                    COALESCE(s.generation_mode, 'unknown') as source,
+                    v.result,
+                    COUNT(*) as cnt
+                FROM validation_events v
+                JOIN strategies s ON s.id = v.strategy_id
+                GROUP BY s.generation_mode, v.result
+            """),
+            {'since': since}
+        ).all()
+
+        # Initialize with all known sources
+        sources = ['pattern', 'pattern_gen', 'pattern_gen_genetic', 'unger', 'pandas_ta', 'ai_free', 'ai_assigned']
+        passed = {s: 0 for s in sources}
+        failed = {s: 0 for s in sources}
+
+        for source, result_type, cnt in result:
+            if source in passed:
+                if result_type == 'passed':
+                    passed[source] = cnt
+                elif result_type == 'failed':
+                    failed[source] = cnt
+
+        return {'passed': passed, 'failed': failed}
+
+    def _get_pool_added_by_source_24h(self, session, since: datetime) -> Dict[str, int]:
+        """
+        Get pool entries (24h added) by generation_mode (source).
+
+        Joins strategy_events (pool.entered) with strategies table.
+        """
+        result = session.execute(
+            text("""
+                SELECT
+                    COALESCE(s.generation_mode, 'unknown') as source,
+                    COUNT(*) as cnt
+                FROM strategy_events e
+                JOIN strategies s ON s.id = e.strategy_id
+                WHERE e.timestamp >= :since
+                  AND e.stage = 'pool'
+                  AND e.event_type = 'entered'
+                GROUP BY s.generation_mode
+            """),
+            {'since': since}
+        ).all()
+
+        # Initialize with all known sources
+        sources = {
+            'pattern': 0, 'pattern_gen': 0, 'pattern_gen_genetic': 0,
+            'unger': 0, 'pandas_ta': 0, 'ai_free': 0, 'ai_assigned': 0
+        }
+        for source, cnt in result:
+            if source in sources:
+                sources[source] = cnt
+
+        return sources
 
     def _get_combo_stats_24h(self, session, since: datetime) -> Dict:
         """
@@ -1706,6 +1817,7 @@ class MetricsCollector:
         ai_calls_today: Dict[str, Any],
         unused_patterns: Dict[str, Any],
         funnel: Dict[str, Any],
+        validation_by_source: Dict[str, Dict[str, int]],
         timing: Dict[str, Optional[float]],
         failures: Dict[str, int],
         backpressure: Dict[str, Any],
@@ -1715,6 +1827,7 @@ class MetricsCollector:
         pool_stats: Dict[str, Any],
         pool_quality: Dict[str, Any],
         pool_by_source: Dict[str, int],
+        pool_added_by_source: Dict[str, int],
         retest_stats: Dict[str, Any],
         live_stats: Dict[str, Any],
         combo_stats: Dict[str, Any],
@@ -1770,11 +1883,14 @@ class MetricsCollector:
         gen_by_tf = generator_stats['by_timeframe']
         gen_timing = generator_stats['timing_by_source']
 
-        src_pattern = gen_by_source.get('pattern', 0)
-        src_unger = gen_by_source.get('unger', 0)
-        src_ai_free = gen_by_source.get('ai_free', 0)
-        src_ai_assigned = gen_by_source.get('ai_assigned', 0)
-        logger.info(f'[1/10 GENERATOR] 24h: {gen_total} strategies | pattern={src_pattern}, unger={src_unger}, ai_free={src_ai_free}, ai_assigned={src_ai_assigned}')
+        src_pat = gen_by_source.get('pattern', 0)
+        src_pgn = gen_by_source.get('pattern_gen', 0)
+        src_pgg = gen_by_source.get('pattern_gen_genetic', 0)
+        src_ung = gen_by_source.get('unger', 0)
+        src_pta = gen_by_source.get('pandas_ta', 0)
+        src_aif = gen_by_source.get('ai_free', 0)
+        src_aia = gen_by_source.get('ai_assigned', 0)
+        logger.info(f'[1/10 GENERATOR] 24h: {gen_total} strategies | pat={src_pat}, pgn={src_pgn}, pgg={src_pgg}, ung={src_ung}, pta={src_pta}, aif={src_aif}, aia={src_aia}')
 
         type_parts = [f'{t}={c}' for t, c in sorted(gen_by_type.items()) if c > 0]
         type_str = ', '.join(type_parts) if type_parts else '--'
@@ -1802,12 +1918,15 @@ class MetricsCollector:
         else:
             logger.info(f'[1/10 GENERATOR] patterns: {pat_unique} used')
 
-        time_pattern = fmt_time(gen_timing.get('pattern'))
-        time_unger = fmt_time(gen_timing.get('unger'))
-        time_ai_free = fmt_time(gen_timing.get('ai_free'))
-        time_ai_assigned = fmt_time(gen_timing.get('ai_assigned'))
+        time_pat = fmt_time(gen_timing.get('pattern'))
+        time_pgn = fmt_time(gen_timing.get('pattern_gen'))
+        time_pgg = fmt_time(gen_timing.get('pattern_gen_genetic'))
+        time_ung = fmt_time(gen_timing.get('unger'))
+        time_pta = fmt_time(gen_timing.get('pandas_ta'))
+        time_aif = fmt_time(gen_timing.get('ai_free'))
+        time_aia = fmt_time(gen_timing.get('ai_assigned'))
         gen_failures = generator_stats.get('gen_failures', 0)
-        logger.info(f'[1/10 GENERATOR] timing: pattern={time_pattern}, unger={time_unger}, ai_free={time_ai_free}, ai_assigned={time_ai_assigned} | failures: {gen_failures}')
+        logger.info(f'[1/10 GENERATOR] timing: pat={time_pat}, pgn={time_pgn}, pgg={time_pgg}, ung={time_ung}, pta={time_pta}, aif={time_aif}, aia={time_aia} | failures: {gen_failures}')
 
         # =====================================================================
         # [2/10 VALIDATOR]
@@ -1823,6 +1942,27 @@ class MetricsCollector:
         # Recalculate validated_pct using consistent denominator
         validated_pct = int(round(100 * val / gen)) if gen > 0 else None
         logger.info(f'[2/10 VALIDATOR] 24h: {val}/{gen} passed ({fmt_pct(validated_pct)}){val_failed_str}')
+
+        # Validation breakdown by source (passed and failed)
+        val_passed = validation_by_source.get('passed', {})
+        val_failed_src = validation_by_source.get('failed', {})
+        vp_pat = val_passed.get('pattern', 0)
+        vp_pgn = val_passed.get('pattern_gen', 0)
+        vp_pgg = val_passed.get('pattern_gen_genetic', 0)
+        vp_ung = val_passed.get('unger', 0)
+        vp_pta = val_passed.get('pandas_ta', 0)
+        vp_aif = val_passed.get('ai_free', 0)
+        vp_aia = val_passed.get('ai_assigned', 0)
+        vf_pat = val_failed_src.get('pattern', 0)
+        vf_pgn = val_failed_src.get('pattern_gen', 0)
+        vf_pgg = val_failed_src.get('pattern_gen_genetic', 0)
+        vf_ung = val_failed_src.get('unger', 0)
+        vf_pta = val_failed_src.get('pandas_ta', 0)
+        vf_aif = val_failed_src.get('ai_free', 0)
+        vf_aia = val_failed_src.get('ai_assigned', 0)
+        logger.info(f'[2/10 VALIDATOR] passed: pat={vp_pat}, pgn={vp_pgn}, pgg={vp_pgg}, ung={vp_ung}, pta={vp_pta}, aif={vp_aif}, aia={vp_aia}')
+        logger.info(f'[2/10 VALIDATOR] failed: pat={vf_pat}, pgn={vf_pgn}, pgg={vf_pgg}, ung={vf_ung}, pta={vf_pta}, aif={vf_aif}, aia={vf_aia}')
+
         logger.info(f'[2/10 VALIDATOR] timing: {fmt_time(timing.get("validation"))} avg')
 
         # =====================================================================
@@ -2041,28 +2181,38 @@ class MetricsCollector:
 
         mw_in_progress_str = f" | in_progress: {mw_in_progress}" if mw_in_progress > 0 else ""
         logger.info(f'[8/10 WFA] 24h: {mw}/{shuf} passed 4-window ({fmt_pct(funnel["mw_ok_pct"])}){mw_in_progress_str}')
-        logger.info(f'[8/10 WFA] timing: {fmt_time(timing.get("multiwindow"))} | cv_failures: {mw_failed}')
+        logger.info(f'[8/10 WFA] timing: {fmt_time(timing.get("multiwindow"))} | failed: {mw_failed} (params not stable across time windows)')
 
         # =====================================================================
         # [9/10 POOL]
         # =====================================================================
         pool_size = pool_stats["size"]
         pool_limit = pool_stats["limit"]
-        pool_pattern = pool_by_source.get('pattern', 0)
-        pool_ai_free = pool_by_source.get('ai_free', 0)
-        pool_ai_assigned = pool_by_source.get('ai_assigned', 0)
-        pool_optimized = pool_by_source.get('optimized', 0)
+        pool_pat = pool_by_source.get('pattern', 0)
+        pool_pgn = pool_by_source.get('pattern_gen', 0)
+        pool_pgg = pool_by_source.get('pattern_gen_genetic', 0)
+        pool_ung = pool_by_source.get('unger', 0)
+        pool_pta = pool_by_source.get('pandas_ta', 0)
+        pool_aif = pool_by_source.get('ai_free', 0)
+        pool_aia = pool_by_source.get('ai_assigned', 0)
         pool_entered = funnel["pool"]
 
-        pool_unger = pool_by_source.get('unger', 0)
-        logger.info(f'[9/10 POOL] size: {pool_size}/{pool_limit} | 24h_added: {pool_entered}')
-        logger.info(f'[9/10 POOL] sources: pattern={pool_pattern}, unger={pool_unger}, ai_free={pool_ai_free}, ai_assigned={pool_ai_assigned}, optimized={pool_optimized}')
+        logger.info(f'[9/10 POOL] size: {pool_size}/{pool_limit} | 24h_added: {pool_entered}, 24h_retired: {retest_stats["retired"]}')
+        pa_pat = pool_added_by_source.get('pattern', 0)
+        pa_pgn = pool_added_by_source.get('pattern_gen', 0)
+        pa_pgg = pool_added_by_source.get('pattern_gen_genetic', 0)
+        pa_ung = pool_added_by_source.get('unger', 0)
+        pa_pta = pool_added_by_source.get('pandas_ta', 0)
+        pa_aif = pool_added_by_source.get('ai_free', 0)
+        pa_aia = pool_added_by_source.get('ai_assigned', 0)
+        logger.info(f'[9/10 POOL] 24h_added: pat={pa_pat}, pgn={pa_pgn}, pgg={pa_pgg}, ung={pa_ung}, pta={pa_pta}, aif={pa_aif}, aia={pa_aia}')
+        logger.info(f'[9/10 POOL] sources: pat={pool_pat}, pgn={pool_pgn}, pgg={pool_pgg}, ung={pool_ung}, pta={pool_pta}, aif={pool_aif}, aia={pool_aia}')
         logger.info(f'[9/10 POOL] scores: {fmt_float(pool_stats["score_min"])} to {fmt_float(pool_stats["score_max"])} (avg {fmt_float(pool_stats["score_avg"])})')
 
         expectancy_str = f'{pool_quality["expectancy_avg"]*100:.1f}%' if pool_quality["expectancy_avg"] else "--"
         logger.info(f'[9/10 POOL] quality: sharpe={fmt_float(pool_quality["sharpe_avg"])}, wr={fmt_pct_float(pool_quality["winrate_avg"])}, exp={expectancy_str}, dd={fmt_pct_float(pool_quality["dd_avg"])}')
 
-        logger.info(f'[9/10 POOL] retest: tested={retest_stats["tested"]}, passed={retest_stats["passed"]}, evicted={retest_stats["retired"]}')
+        logger.info(f'[9/10 POOL] retest: tested={retest_stats["tested"]}, passed={retest_stats["passed"]}, retired={retest_stats["retired"]}')
 
         # =====================================================================
         # [10/10 LIVE]

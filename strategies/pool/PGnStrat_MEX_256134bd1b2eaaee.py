@@ -1,0 +1,98 @@
+"""
+Pattern-Gen Strategy: Climax Reversal (mult2.5)
+Type: MEX (parametric)
+Timeframe: 2h
+Direction: short
+Blocks: CLIMAX_REVERSAL
+Generated: 2026-01-13T00:31:57.737015+00:00
+"""
+
+import talib as ta
+import pandas as pd
+import numpy as np
+from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType
+
+
+class PGnStrat_MEX_256134bd1b2eaaee(StrategyCore):
+    """
+    Pattern: Climax Reversal (mult2.5)
+    Direction: short
+    Lookback: 30 bars
+    Execution: close_based
+    """
+
+    # Direction
+    direction = 'short'
+
+    # Timeframe (for Sharpe annualization)
+    timeframe = '2h'
+
+    # Execution type for parametric optimization
+    execution_type = 'close_based'
+
+    # Signal column for vectorized backtest
+    signal_column = 'entry_signal'
+
+    # Lookback required
+    LOOKBACK = 30
+
+    # Risk management parameters (to be optimized by parametric backtest)
+    SL_PCT = 0.06
+    TP_PCT = 0.1
+    LEVERAGE = 1
+    exit_after_bars = 16
+
+    # Stop Loss config
+    sl_type = StopLossType.PERCENTAGE
+
+    # Take Profit config
+    tp_type = TakeProfitType.PERCENTAGE
+
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculate indicators and entry_signal for vectorized backtesting.
+
+        Pattern: Climax Reversal (mult2.5)
+        Composition: parametric
+        """
+        df = df.copy()
+
+        # === INDICATOR CALCULATIONS ===
+        df['range'] = df['high'] - df['low']
+        df['avg_range'] = df['range'].rolling(20).mean()
+        df['climax_bar'] = df['range'] > df['avg_range'] * 2.5
+        df['vol_climax'] = df['volume'] > df['volume'].rolling(20).mean() * 2
+        df['reversal'] = df['close'] < df['open']
+
+        # === ENTRY SIGNAL ===
+        df['entry_signal'] = df['climax_bar'] & df['vol_climax'] & df['reversal']
+
+        # Ensure entry_signal is boolean
+        df['entry_signal'] = df['entry_signal'].fillna(False).astype(bool)
+
+        return df
+
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
+        """
+        Generate signal for LIVE execution.
+
+        For backtest, the entry_signal column is read directly by the engine.
+        """
+        if len(df) < self.LOOKBACK + 10:
+            return None
+
+        # Read pre-calculated entry signal
+        if not df['entry_signal'].iloc[-1]:
+            return None
+
+        # Build signal
+        return Signal(
+            direction=self.direction,
+            leverage=self.LEVERAGE,
+            sl_type=StopLossType.PERCENTAGE,
+            sl_pct=self.SL_PCT,
+            tp_type=TakeProfitType.PERCENTAGE,
+            tp_pct=self.TP_PCT,
+            exit_after_bars=self.exit_after_bars,
+            reason='Climax Reversal (mult2.5)',
+        )

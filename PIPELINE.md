@@ -3,7 +3,7 @@ Pipeline Completa Aggiornata:
 ┌─────────────────────────────────────────────────────────────────┐
 │ 1. GENERAZIONE (generator daemon)                               │
 ├─────────────────────────────────────────────────────────────────┤
-│ • AI genera base code (pattern/ai_free/ai_assigned)             │
+│ • Genera base code (pattern/unger/pandas_ta/ai_free/ai_assigned)│
 │ • Status: GENERATED                                             │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
@@ -103,22 +103,25 @@ Pipeline Completa Aggiornata:
 ║                                                                              ║
 ║  Decision Flow: ROUND-ROBIN                                                  ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ Enabled sources (da config): [pattern, unger, ai_free, ai_assigned]   │  ║
+║  │ Enabled sources (config): [pattern, pattern_gen, unger, pandas_ta,    │  ║
+║  │                            ai_free, ai_assigned]                       │  ║
 ║  │                                                                        │  ║
 ║  │ Ogni ciclo:                                                            │  ║
 ║  │   source = enabled_sources[index % len(enabled_sources)]               │  ║
 ║  │   index += 1                                                           │  ║
 ║  │                                                                        │  ║
-║  │   Ciclo 1: pattern   → se esaurito, skip                               │  ║
-║  │   Ciclo 2: unger     → se no regime coins, skip                        │  ║
-║  │   Ciclo 3: ai_free   → se AI limit, skip                               │  ║
-║  │   Ciclo 4: ai_assigned → se AI limit, skip                             │  ║
-║  │   Ciclo 5: pattern   → (ricomincia)                                    │  ║
+║  │   Ciclo 1: pattern    → se esaurito, skip                              │  ║
+║  │   Ciclo 2: pattern_gen→ genera sempre                                  │  ║
+║  │   Ciclo 3: unger      → se no regime coins, skip                       │  ║
+║  │   Ciclo 4: pandas_ta  → genera sempre (regime-aware)                   │  ║
+║  │   Ciclo 5: ai_free    → se AI limit, skip                              │  ║
+║  │   Ciclo 6: ai_assigned→ se AI limit, skip                              │  ║
+║  │   Ciclo 7: pattern    → (ricomincia)                                   │  ║
 ║  │   ...                                                                  │  ║
 ║  │                                                                        │  ║
 ║  │ Config per controllare il mix:                                         │  ║
-║  │   - Solo gratis: disabilita ai_free + ai_assigned                      │  ║
-║  │   - Solo AI: disabilita pattern + unger                                │  ║
+║  │   - Solo gratis: abilita pattern_gen + unger + pandas_ta               │  ║
+║  │   - Solo AI: disabilita pattern_gen + unger + pandas_ta                │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
@@ -199,6 +202,58 @@ Pipeline Completa Aggiornata:
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
 ║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ PATTERN_GEN (generation_mode='pattern_gen')                            │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │ Fonte: Building Blocks interni + FormulaComposer                       │  ║
+║  │                                                                        │  ║
+║  │ Module: src/generator/pattern_gen/                                     │  ║
+║  │   - building_blocks.py: 36 blocks in 5 categorie                       │  ║
+║  │   - formula_composer.py: composizione formule                          │  ║
+║  │   - generator.py: PatternGenGenerator (adaptive mode)                  │  ║
+║  │   - genetic_generator.py: GeneticPatternGenerator (evoluzione)         │  ║
+║  │   - genetic_operators.py: selection, crossover, mutation               │  ║
+║  │                                                                        │  ║
+║  │ FASE 1 - SMART GENERATION (PGnStrat_):                                 │  ║
+║  │   Composizione:                                                        │  ║
+║  │     - 50% Parametric: singolo block con parametri variati              │  ║
+║  │     - 30% Template: 2-3 blocks combinati con AND                       │  ║
+║  │     - 20% Innovative: sequential, multi-lookback, volatility           │  ║
+║  │   Space: ~7,700 strategie base (× TF × direction)                      │  ║
+║  │   Dedup: formula_hash evita duplicati                                  │  ║
+║  │                                                                        │  ║
+║  │ FASE 2 - GENETIC EVOLUTION (PGgStrat_):                                │  ║
+║  │   Pool: ACTIVE pattern_gen con score >= 40                             │  ║
+║  │   Fitness: score_backtest (deferred, già calcolato)                    │  ║
+║  │   Operatori:                                                           │  ║
+║  │     - Tournament selection (size=3)                                    │  ║
+║  │     - Block crossover (combina blocks da 2 genitori)                   │  ║
+║  │     - Block mutation (swap/add/remove, rate=20%)                       │  ║
+║  │   Attivazione: pool >= 50 ACTIVE strategies                            │  ║
+║  │   Ratio: 70% smart / 30% genetic (configurable)                        │  ║
+║  │   Space: infinito (evolve continuamente)                               │  ║
+║  │                                                                        │  ║
+║  │ Adaptive Mode Selection:                                               │  ║
+║  │   - pool < 50      → Solo Smart (bootstrap)                            │  ║
+║  │   - pool >= 50     → 70% Smart / 30% Genetic                           │  ║
+║  │   - smart esaurito → Solo Genetic                                      │  ║
+║  │                                                                        │  ║
+║  │ Categorie blocks:                                                      │  ║
+║  │   - THR: Threshold (RSI, Stoch, CCI, Williams%R, MFI)                  │  ║
+║  │   - CRS: Crossover (EMA, MACD, Stoch, ADX)                             │  ║
+║  │   - VOL: Volatility (Bollinger, ATR, Keltner, Donchian)                │  ║
+║  │   - PRC: Price Action (Inside Bar, Engulfing, Hammer, Doji)            │  ║
+║  │   - STA: Statistical (Z-score, Percentile, StdDev)                     │  ║
+║  │                                                                        │  ║
+║  │ AI calls: 0 (tutto da building blocks)                                 │  ║
+║  │ Parametri: SL, TP, leverage, exit_bars (randomizzati da range)         │  ║
+║  │                                                                        │  ║
+║  │ Prefissi:                                                              │  ║
+║  │   - PGnStrat_TYPE_hash (Smart: parametric/template/innovative)         │  ║
+║  │   - PGgStrat_TYPE_hash (Genetic: evolved from pool)                    │  ║
+║  │ DB: generation_mode='pattern_gen', ai_provider='pattern_gen'           │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
 ║  │ UNGER (generation_mode='unger')                                        │  ║
 ║  ├────────────────────────────────────────────────────────────────────────┤  ║
 ║  │ Fonte: Cataloghi Unger v2 + Market Regime Detector                     │  ║
@@ -227,21 +282,73 @@ Pipeline Completa Aggiornata:
 ║  │ DB: pattern_coins=[...], ai_provider='unger', pattern_based=False      │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
+║  ┌────────────────────────────────────────────────────────────────────────┐  ║
+║  │ PANDAS_TA (generation_mode='pandas_ta')                                │  ║
+║  ├────────────────────────────────────────────────────────────────────────┤  ║
+║  │ Fonte: Indicatori pandas_ta + Matrici Compatibilità                    │  ║
+║  │                                                                        │  ║
+║  │ Cataloghi (src/generator/pandas_ta/catalogs/):                         │  ║
+║  │   - 42 Indicatori in 5 categorie:                                      │  ║
+║  │     • momentum (11): RSI, STOCH_K, CCI, WILLR, CMO, ROC, MOM, TSI...   │  ║
+║  │     • trend (10): EMA, SMA, SUPERTREND, PSAR, HMA, DEMA, TEMA...       │  ║
+║  │     • crossover (6): MACD, PPO, TRIX, ADX, AROON, DPO                  │  ║
+║  │     • volatility (7): BBANDS, ATR, NATR, KC, DONCHIAN, MASSI, UI       │  ║
+║  │     • volume (8): OBV, AD, ADOSC, CMF, EFI, NVI, PVI, VWAP             │  ║
+║  │   - 7 Condition Types: threshold_below/above, crossed_above/below,     │  ║
+║  │     between, slope_up/down                                             │  ║
+║  │   - 19 Incompatible Pairs (es: RSI+STOCH_K = ridondanti)               │  ║
+║  │   - 15 Recommended Combos (es: RSI+ADX = mean reversion + trend)       │  ║
+║  │   - Riuso 11 Exit Mechanisms da Unger                                  │  ║
+║  │   - Space totale: ~158 milioni di strategie                            │  ║
+║  │                                                                        │  ║
+║  │ Generazione:                                                           │  ║
+║  │   1. Seleziona 1-3 indicatori (30% single, 50% double, 20% triple)     │  ║
+║  │   2. Verifica compatibilità (no pair ridondanti)                       │  ║
+║  │   3. Assegna condition type e threshold (valori market-sensible)       │  ║
+║  │   4. Seleziona Exit Mechanism (11 logiche TP/EC/TS)                    │  ║
+║  │   5. Genera codice via Jinja2 template                                 │  ║
+║  │                                                                        │  ║
+║  │ Regime-aware:                                                          │  ║
+║  │   - TREND: usa indicatori trend + crossover + volatility               │  ║
+║  │   - REVERSAL: usa indicatori momentum (RSI, STOCH_K, CCI, etc.)        │  ║
+║  │   - MIXED: tutti gli indicatori disponibili                            │  ║
+║  │                                                                        │  ║
+║  │ AI calls: 0 (tutto da catalogo + template)                             │  ║
+║  │                                                                        │  ║
+║  │ Prefisso: PtaStrat_TYPE_8charID (es: PtaStrat_MOM_a7f3d8b2)            │  ║
+║  │ DB: pattern_coins=[...], ai_provider='pandas_ta', pattern_based=False  │  ║
+║  └────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                              ║
 ║  Output: Strategy record con status=GENERATED                                ║
 ║                                                                              ║
-║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ TABELLA COMPARATIVA                                                    │  ║
-║  ├────────────┬────────────┬────────────┬────────────┬────────────────────┤  ║
-║  │            │  PATTERN   │  AI_FREE   │ AI_ASSIGNED│      UNGER         │  ║
-║  ├────────────┼────────────┼────────────┼────────────┼────────────────────┤  ║
-║  │ Prefisso   │ PatStrat_  │ AIFStrat_  │ AIAStrat_  │ UngStrat_          │  ║
-║  │ Indicatori │ Da formula │ AI sceglie │ Combinator │ Da catalogo        │  ║
-║  │ Params     │ Da pattern │ Nessuno    │ Nessuno    │ Da catalogo        │  ║
-║  │ Coins      │ Per-edge   │ Backtester │ Backtester │ Per-regime         │  ║
-║  │ AI calls   │ 0 o 1      │ 1          │ 1          │ 0                  │  ║
-║  │ Timeframe  │ Dal pattern│ Random     │ Random     │ Random             │  ║
-║  │ Costo      │ Gratis/1   │ 1 call     │ 1 call     │ Gratis             │  ║
-║  └────────────┴────────────┴────────────┴────────────┴────────────────────┘  ║
+║  TABELLA COMPARATIVA SOURCES                                                 ║
+║  ┌────────┬────────┬────────┬────────┬────────┬────────┬────────┬────────┐  ║
+║  │        │  pat   │  pgn   │  pgg   │  ung   │  pta   │  aif   │  aia   │  ║
+║  ├────────┼────────┼────────┼────────┼────────┼────────┼────────┼────────┤  ║
+║  │Prefix  │  Pat   │  PGn   │  PGg   │  Ung   │  Pta   │  AIF   │  AIA   │  ║
+║  │Indicat │formula │ blocks │ blocks │catalog │pandas_t│   AI   │ combo  │  ║
+║  │AI call │  0-1   │   0    │   0    │   0    │   0    │   1    │   1    │  ║
+║  │Cost    │  free  │  free  │  free  │  free  │  free  │ 1call  │ 1call  │  ║
+║  │Space   │  150   │  7.7K  │  evol  │  30M   │  158M  │  inf   │  1K    │  ║
+║  │Exit    │   11   │   11   │   11   │   11   │   11   │ custom │ custom │  ║
+║  └────────┴────────┴────────┴────────┴────────┴────────┴────────┴────────┘  ║
+║                                                                              ║
+║  MAPPING SOURCES (1:1 con config.yaml strategy_sources)                      ║
+║  ┌──────┬───────────┬─────────────────────┬─────────────────────────────┐   ║
+║  │ Abbr │   Class   │   generation_mode   │        Config key           │   ║
+║  ├──────┼───────────┼─────────────────────┼─────────────────────────────┤   ║
+║  │ pat  │ PatStrat_ │ pattern             │ pattern                     │   ║
+║  │ pgn  │ PGnStrat_ │ pattern_gen         │ pattern_gen                 │   ║
+║  │ pgg  │ PGgStrat_ │ pattern_gen_genetic │ pattern_gen.genetic         │   ║
+║  │ ung  │ UngStrat_ │ unger               │ unger                       │   ║
+║  │ pta  │ PtaStrat_ │ pandas_ta           │ pandas_ta                   │   ║
+║  │ aif  │ AIFStrat_ │ ai_free             │ ai_free                     │   ║
+║  │ aia  │ AIAStrat_ │ ai_assigned         │ ai_assigned                 │   ║
+║  └──────┴───────────┴─────────────────────┴─────────────────────────────┘   ║
+║                                                                              ║
+║  Log format (metrics/collector.py):                                          ║
+║    [1/10 GEN] 24h: N | pat=X, pgn=X, pgg=X, ung=X, pta=X, aif=X, aia=X       ║
+║    [9/10 POOL] src: pat=X, pgn=X, pgg=X, ung=X, pta=X, aif=X, aia=X          ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -264,11 +371,13 @@ Pipeline Completa Aggiornata:
 ║  │      - pandas (o pd)                                                   │  ║
 ║  │      - StrategyCore, Signal da src.strategies.base                     │  ║
 ║  │   3. Esattamente 1 classe che eredita da StrategyCore                  │  ║
-║  │   4. Nome classe valido (prefisso 3 lettere):                          │  ║
+║  │   4. Nome classe valido (prefisso):                                    │  ║
 ║  │      - PatStrat_TYPE_hash (es: PatStrat_MOM_abc123)                    │  ║
 ║  │      - UngStrat_TYPE_hash (es: UngStrat_CRS_def456)                    │  ║
 ║  │      - AIFStrat_TYPE_hash (es: AIFStrat_REV_789abc)                    │  ║
 ║  │      - AIAStrat_TYPE_hash (es: AIAStrat_TRN_fedcba)                    │  ║
+║  │      - PGnStrat_TYPE_hash (es: PGnStrat_THR_12ab34cd) - Smart          │  ║
+║  │      - PGgStrat_TYPE_hash (es: PGgStrat_CRS_56ef78gh) - Genetic        │  ║
 ║  │   5. Metodo generate_signal(df) deve esistere                          │  ║
 ║  │                                                                        │  ║
 ║  │ Warnings (non bloccanti):                                              │  ║
@@ -1772,7 +1881,7 @@ Non fanno parte del flusso GENERATED -> LIVE, ma sono essenziali per il funziona
 ║  │  [POOL] ACTIVE pool statistics                                         │  ║
 ║  │    - count, min/max/avg score                                          │  ║
 ║  │    - quality metrics (sharpe, win_rate)                                │  ║
-║  │    - breakdown by source (pattern, ai_free, ai_assigned)               │  ║
+║  │    - breakdown by source (pattern, unger, pandas_ta, ai_free, ...)     │  ║
 ║  │                                                                        │  ║
 ║  │  [RETEST 24H] Pool freshness                                           │  ║
 ║  │    - Strategies re-tested in last 24h                                  │  ║

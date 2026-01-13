@@ -1,0 +1,277 @@
+"""
+PtaStrat: {{ entry_names }}
+Timeframe: {{ timeframe }}
+Direction: {{ direction }}
+Regime: {{ regime_type }}
+Exit Mechanism: {{ exit_mechanism.name }}
+Generated: {{ generated_at }}
+"""
+
+from src.strategies.base import StrategyCore, Signal, StopLossType, TakeProfitType, ExitType
+import pandas as pd
+import pandas_ta as ta
+import numpy as np
+
+
+class {{ class_name }}(StrategyCore):
+    """
+    Entry: {{ entry_count }} indicator(s)
+    {% for ec in entry_conditions %}
+    - {{ ec.indicator.name }} {{ ec.condition_type.value }} {{ ec.threshold }}
+    {% endfor %}
+    Exit: {{ exit_mechanism.description }}
+    SL: {{ sl_config.name }}
+    {% if tp_config %}TP: {{ tp_config.name }}{% endif %}
+    {% if trailing %}Trailing: {{ trailing.name }}{% endif %}
+    """
+
+    # Direction
+    direction = '{{ direction | lower }}'
+
+    # Timeframe (for Sharpe annualization)
+    timeframe = '{{ timeframe }}'
+
+    # Signal column for vectorized backtest
+    signal_column = 'entry_signal'
+
+    # Parametric placeholders (expanded by backtester)
+    SL_PCT = {{ sl_params.get('sl_pct', 0.02) }}
+    TP_PCT = {{ tp_params.get('tp_pct', 0.04) if tp_params else 0.04 }}
+    LEVERAGE = 1
+    LOOKBACK = {{ max_lookback }}
+    {% if exit_params and exit_params.get('N') %}
+    exit_after_bars = {{ exit_params.get('N', 20) }}
+    {% else %}
+    exit_after_bars = 0  # No time-based exit
+    {% endif %}
+
+    # Stop Loss params
+    {% if sl_config.sl_type == 'pct' %}
+    sl_type = StopLossType.PERCENTAGE
+    {% elif sl_config.sl_type == 'atr' %}
+    sl_type = StopLossType.ATR
+    atr_stop_multiplier = {{ sl_params.get('atr_mult', 2.0) }}
+    {% elif sl_config.sl_type == 'structure' %}
+    sl_type = StopLossType.STRUCTURE
+    {% endif %}
+
+    {% if tp_config %}
+    # Take Profit params
+    {% if tp_config.tp_type == 'pct' %}
+    tp_type = TakeProfitType.PERCENTAGE
+    {% elif tp_config.tp_type == 'rr_ratio' %}
+    tp_type = TakeProfitType.RR_RATIO
+    rr_ratio = {{ tp_params.get('rr_ratio', 2.0) }}
+    {% elif tp_config.tp_type == 'atr' %}
+    tp_type = TakeProfitType.ATR
+    atr_take_multiplier = {{ tp_params.get('atr_mult', 3.0) }}
+    {% endif %}
+    {% endif %}
+
+    {% if trailing %}
+    # Trailing Stop
+    trailing_stop_pct = {{ trailing_params.get('trail_pct', 0.01) }}
+    trailing_activation_pct = {{ trailing_params.get('act_pct', 0.01) }}
+    {% endif %}
+
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Pre-calculate indicators and entry_signal for vectorized backtesting.
+
+        Uses pandas_ta library for indicator calculations.
+        The backtester reads entry_signal directly (no per-bar loop).
+        """
+        df = df.copy()
+
+        # === CALCULATE INDICATORS ===
+        {% for ec in entry_conditions %}
+        # Indicator {{ loop.index }}: {{ ec.indicator.name }}
+        {% if ec.indicator.input_type == 'hlc' %}
+        {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['high'], df['low'], df['close'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={{ value }},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'hl' %}
+        {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['high'], df['low'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={{ value }},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'ohlcv' %}
+        {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['open'], df['high'], df['low'], df['close'], df['volume'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={{ value }},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'hlcv' %}
+        {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['high'], df['low'], df['close'], df['volume'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={{ value }},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'cv' %}
+        {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['close'], df['volume'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={{ value }},
+            {% endfor %}
+        )
+        {% else %}
+        {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['close'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={{ value }},
+            {% endfor %}
+        )
+        {% endif %}
+        {% if ec.indicator.output_columns | length > 1 %}
+        # Multi-column output - take first (main) column
+        if isinstance({{ ec.indicator.id | lower }}_result, pd.DataFrame):
+            df['{{ ec.indicator.id | lower }}'] = {{ ec.indicator.id | lower }}_result.iloc[:, 0]
+        else:
+            df['{{ ec.indicator.id | lower }}'] = {{ ec.indicator.id | lower }}_result
+        {% else %}
+        df['{{ ec.indicator.id | lower }}'] = {{ ec.indicator.id | lower }}_result
+        {% endif %}
+
+        {% endfor %}
+
+        {% if needs_atr %}
+        # ATR for SL/TP calculations
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        {% endif %}
+
+        # === VECTORIZED ENTRY SIGNAL ===
+        entry_signal = pd.Series(True, index=df.index)
+
+        {% for ec in entry_conditions %}
+        # Condition {{ loop.index }}: {{ ec.indicator.name }} {{ ec.condition_type.value }} {{ ec.threshold }}
+        {% if ec.condition_type.value == 'threshold_below' %}
+        cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}'] < {{ ec.threshold }}
+        {% elif ec.condition_type.value == 'threshold_above' %}
+        cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}'] > {{ ec.threshold }}
+        {% elif ec.condition_type.value == 'crossed_above' %}
+        cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}'] > {{ ec.threshold }}) & (df['{{ ec.indicator.id | lower }}'].shift(1) <= {{ ec.threshold }})
+        {% elif ec.condition_type.value == 'crossed_below' %}
+        cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}'] < {{ ec.threshold }}) & (df['{{ ec.indicator.id | lower }}'].shift(1) >= {{ ec.threshold }})
+        {% elif ec.condition_type.value == 'between' %}
+        cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}'] > {{ ec.threshold }}) & (df['{{ ec.indicator.id | lower }}'] < {{ ec.threshold_high }})
+        {% elif ec.condition_type.value == 'slope_up' %}
+        cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}'] > df['{{ ec.indicator.id | lower }}'].shift(1)
+        {% elif ec.condition_type.value == 'slope_down' %}
+        cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}'] < df['{{ ec.indicator.id | lower }}'].shift(1)
+        {% endif %}
+        entry_signal = entry_signal & cond_{{ loop.index }}
+
+        {% endfor %}
+
+        # Store as boolean column
+        df['entry_signal'] = entry_signal.astype(bool)
+
+        return df
+
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
+        """
+        Generate signal for LIVE execution (reads pre-calculated entry_signal).
+
+        For backtest, the entry_signal column is read directly by the engine.
+        """
+        if len(df) < self.LOOKBACK + 10:
+            return None
+
+        # Read pre-calculated entry signal
+        if not df['entry_signal'].iloc[-1]:
+            return None
+
+        # === BUILD SIGNAL ===
+        {% if direction == 'BIDI' %}
+        signal_direction = 'long'  # Default for BIDI entries
+        {% else %}
+        signal_direction = '{{ direction | lower }}'
+        {% endif %}
+
+        signal_kwargs = {
+            'direction': signal_direction,
+            'leverage': self.LEVERAGE,
+
+            # Stop Loss
+            {% if sl_config.sl_type == 'pct' %}
+            'sl_type': StopLossType.PERCENTAGE,
+            'sl_pct': self.SL_PCT,
+            {% elif sl_config.sl_type == 'atr' %}
+            'sl_type': StopLossType.ATR,
+            'atr_stop_multiplier': {{ sl_params.get('atr_mult', 2.0) }},
+            {% elif sl_config.sl_type == 'structure' %}
+            'sl_type': StopLossType.STRUCTURE,
+            {% if sl_config.id == 'SL_03' %}
+            {% if direction == 'LONG' %}
+            'sl_price': df['low'].iloc[-{{ sl_params.get('lookback', 5) }}:].min(),
+            {% else %}
+            'sl_price': df['high'].iloc[-{{ sl_params.get('lookback', 5) }}:].max(),
+            {% endif %}
+            {% elif sl_config.id == 'SL_04' %}
+            {% if direction == 'LONG' %}
+            'sl_price': df['low'].iloc[-{{ sl_params.get('swing_lookback', 10) }}:].min(),
+            {% else %}
+            'sl_price': df['high'].iloc[-{{ sl_params.get('swing_lookback', 10) }}:].max(),
+            {% endif %}
+            {% endif %}
+            {% endif %}
+
+            {% if tp_config and tp_params %}
+            # Take Profit
+            {% if tp_config.tp_type == 'pct' %}
+            'tp_type': TakeProfitType.PERCENTAGE,
+            'tp_pct': self.TP_PCT,
+            {% elif tp_config.tp_type == 'rr_ratio' %}
+            'tp_type': TakeProfitType.RR_RATIO,
+            'rr_ratio': {{ tp_params.get('rr_ratio', 2.0) }},
+            {% elif tp_config.tp_type == 'atr' %}
+            'tp_type': TakeProfitType.ATR,
+            'atr_take_multiplier': {{ tp_params.get('atr_mult', 3.0) }},
+            {% elif tp_config.tp_type == 'structure' %}
+            {% if direction == 'LONG' %}
+            'tp_price': df['high'].iloc[-{{ tp_params.get('lookback', 20) }}:].max(),
+            {% else %}
+            'tp_price': df['low'].iloc[-{{ tp_params.get('lookback', 20) }}:].min(),
+            {% endif %}
+            {% endif %}
+            {% endif %}
+
+            {% if trailing %}
+            # Trailing Stop
+            'trailing_stop_pct': {{ trailing_params.get('trail_pct', 0.01) }},
+            'trailing_activation_pct': {{ trailing_params.get('act_pct', 0.01) }},
+            {% endif %}
+
+            # Time-based Exit (read from class attribute, may be 0 for no time exit)
+            'exit_after_bars': self.exit_after_bars,
+
+            'reason': '{{ entry_reason }}',
+        }
+
+        return Signal(**signal_kwargs)
+
+    {% if exit_condition and exit_condition.category != 'time' and exit_logic %}
+    def should_exit(self, df: pd.DataFrame, position_bars: int) -> bool:
+        """
+        Check dynamic exit conditions.
+        Exit Mechanism: {{ exit_mechanism.name }} ({{ exit_mechanism.logic }})
+        Exit Condition: {{ exit_condition.name }}
+        """
+        # Exit Condition: {{ exit_condition.name }}
+        {{ exit_logic | indent(8) }}
+
+        {% if exit_mechanism.logic == 'AND' %}
+        # AND logic: exit only if both conditions met
+        return exit_signal
+        {% else %}
+        # OR logic: exit if exit_signal
+        return exit_signal
+        {% endif %}
+    {% endif %}

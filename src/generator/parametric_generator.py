@@ -374,6 +374,9 @@ class ParametricGenerator:
         # Fix common template syntax issues
         fixed_template = self._fix_template_syntax(template.code_template)
 
+        # Calculate base_code_hash BEFORE parameter rendering (for metrics tracking)
+        base_code_hash = hashlib.sha256(fixed_template.encode()).hexdigest()
+
         # Render template with parameters
         try:
             jinja_template = self.jinja_env.from_string(fixed_template)
@@ -411,6 +414,7 @@ class ParametricGenerator:
             template_name=template.name,
             parameters=params_with_leverage,
             parameter_hash=parameter_hash,
+            base_code_hash=base_code_hash,
             # generation_mode defaults to "ai_free", can be overridden by caller
             validation_passed=validation_passed,
             validation_errors=errors
@@ -487,14 +491,14 @@ class ParametricGenerator:
         import re
 
         # Find existing class name pattern (supports all prefixes)
-        pattern = r'class (?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat)_\w+_\w+\(StrategyCore\)'
+        pattern = r'class (?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+_\w+\(StrategyCore\)'
         new_class = f'class Strategy_{strategy_type}_{strategy_id}(StrategyCore)'
 
         updated = re.sub(pattern, new_class, code)
 
         if updated == code:
             # Pattern didn't match, try simpler pattern
-            pattern = r'class (?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat)_\w+\(StrategyCore\)'
+            pattern = r'class (?:Strategy|PatStrat|UngStrat|AIFStrat|AIAStrat|PGnStrat|PGgStrat|PtaStrat)_\w+\(StrategyCore\)'
             updated = re.sub(pattern, new_class, code)
 
         return updated

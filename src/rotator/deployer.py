@@ -19,6 +19,7 @@ from src.database.models import Strategy, Subaccount
 from src.database.event_tracker import EventTracker
 from src.executor.hyperliquid_client import HyperliquidClient
 from src.utils.logger import get_logger
+from src.utils.strategy_files import save_to_live, remove_from_pool, remove_from_live
 
 logger = get_logger(__name__)
 
@@ -162,6 +163,10 @@ class StrategyDeployer:
 
                 session.commit()
 
+                # Move .py file: pool/ -> live/
+                remove_from_pool(db_strategy.name)
+                save_to_live(db_strategy.name, db_strategy.code)
+
             # Emit events for successful deployment
             EventTracker.strategy_promoted_live(strategy_id, strategy_name, subaccount_id)
             EventTracker.deployment_succeeded(
@@ -228,6 +233,9 @@ class StrategyDeployer:
 
                     strategy.status = 'RETIRED'
                     strategy.retired_at = datetime.now(UTC)
+
+                    # Remove .py file from live/
+                    remove_from_live(strategy.name)
 
                     # Emit retirement event
                     EventTracker.strategy_retired(

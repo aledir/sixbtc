@@ -20,6 +20,7 @@ from src.database import get_session
 from src.database.models import Strategy, BacktestResult
 from src.scorer.backtest_scorer import BacktestScorer
 from src.utils.logger import get_logger
+from src.utils.strategy_files import save_to_pool, remove_from_pool
 
 logger = get_logger(__name__)
 
@@ -190,6 +191,8 @@ class PoolManager:
                 strategy.score_backtest = score
                 strategy.last_backtested_at = datetime.now(UTC)
                 session.commit()
+                # Save .py file to pool/
+                save_to_pool(strategy.name, strategy.code)
                 logger.info(f"[{strategy.name}] Entered ACTIVE pool (score={score:.1f})")
 
     def _retire_strategy(self, strategy_id: UUID, reason: str):
@@ -200,6 +203,8 @@ class PoolManager:
                 strategy.status = 'RETIRED'
                 strategy.retired_at = datetime.now(UTC)
                 session.commit()
+                # Remove .py file from pool/
+                remove_from_pool(strategy.name)
                 logger.info(f"[{strategy.name}] RETIRED: {reason}")
 
     def revalidate_after_retest(self, strategy_id: UUID, new_score: float) -> Tuple[bool, str]:

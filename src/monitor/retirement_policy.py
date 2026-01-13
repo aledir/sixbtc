@@ -17,6 +17,7 @@ from src.database import get_session
 from src.database.models import Strategy, Subaccount
 from src.database.event_tracker import EventTracker
 from src.utils.logger import get_logger
+from src.utils.strategy_files import remove_from_live
 
 logger = get_logger(__name__)
 
@@ -162,6 +163,9 @@ class RetirementPolicy:
 
                 strategy.status = 'RETIRED'
                 strategy.retired_at = datetime.now(UTC)
+
+                # Remove .py file from live/
+                remove_from_live(strategy.name)
 
                 # Emit retirement event
                 EventTracker.strategy_retired(

@@ -525,6 +525,11 @@ class BacktestEngine:
             if max_positions is None:
                 max_positions = 10
 
+        # Get timeframe from strategy if not provided
+        # This is critical for correct Sharpe annualization
+        if timeframe is None:
+            timeframe = getattr(strategy, 'timeframe', None)
+
         strategy_name = strategy.__class__.__name__
         logger.info(
             f"[{strategy_name}] Running portfolio backtest "
@@ -1433,9 +1438,18 @@ class BacktestEngine:
         # Read strategy class attributes (REQUIRED - no fallbacks)
         signal_column = getattr(strategy, 'signal_column', 'entry_signal')
         direction = getattr(strategy, 'direction', 'long')
-        sl_pct = getattr(strategy, 'sl_pct', None)
-        tp_pct = getattr(strategy, 'tp_pct', None)
-        leverage = getattr(strategy, 'leverage', 1)
+        # Read UPPERCASE first (template definitions + parametric runtime values)
+        # Templates define SL_PCT/TP_PCT/LEVERAGE, parametric sets these at runtime
+        # Base class StrategyCore has lowercase defaults - we must read uppercase first
+        sl_pct = getattr(strategy, 'SL_PCT', None)
+        if sl_pct is None:
+            sl_pct = getattr(strategy, 'sl_pct', 0.02)
+        tp_pct = getattr(strategy, 'TP_PCT', None)
+        if tp_pct is None:
+            tp_pct = getattr(strategy, 'tp_pct', 0.04)
+        leverage = getattr(strategy, 'LEVERAGE', None)
+        if leverage is None:
+            leverage = getattr(strategy, 'leverage', 1)
         exit_after_bars = getattr(strategy, 'exit_after_bars', 20)
 
         # Read trailing stop attributes
@@ -1565,7 +1579,8 @@ class BacktestEngine:
 
         # For BIDIRECTIONAL strategies, determine direction per bar
         # from long_signal/short_signal columns
-        if direction == 'both':
+        # Accept both 'both' and 'bidir' as BIDI indicators
+        if direction in ('both', 'bidi', 'bidir'):
             has_long_signal = 'long_signal' in df.columns
             has_short_signal = 'short_signal' in df.columns
             if has_long_signal and has_short_signal:
