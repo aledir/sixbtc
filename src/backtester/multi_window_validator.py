@@ -48,7 +48,6 @@ class MultiWindowValidator:
         # IS/OOS config for window sizing
         self.is_days = config['backtesting']['is_days']
         self.oos_days = config['backtesting']['oos_days']
-        self.max_coins = config['backtesting']['max_coins']
 
         # Components
         self.engine = BacktestEngine(config)

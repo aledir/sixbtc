@@ -155,9 +155,6 @@ class ContinuousBacktesterProcess:
         # Timeframes (top-level in config) - NO defaults
         self.timeframes = self.config.get_required('timeframes')
 
-        # Pairs count (from backtesting section)
-        self.max_coins = self.config.get_required('backtesting.max_coins')
-
         # In-sample/Out-of-sample configuration
         self.is_days = self.config.get_required('backtesting.is_days')
         self.oos_days = self.config.get_required('backtesting.oos_days')
@@ -201,8 +198,7 @@ class ContinuousBacktesterProcess:
         logger.info(
             f"ContinuousBacktesterProcess initialized: "
             f"{self.validated_threads} VALIDATED threads + {self.retest_threads} elastic thread, "
-            f"{len(self.timeframes)} TFs, {self.max_coins} coins, "
-            f"retest every {self.retest_interval_days}d, pool max {self.pool_max_size}"
+            f"{len(self.timeframes)} TFs, retest every {self.retest_interval_days}d, pool max {self.pool_max_size}"
         )
 
     def _sync_strategy_files(self):
@@ -230,13 +226,13 @@ class ContinuousBacktesterProcess:
         Args:
             coins: List of coins to check (already filtered for liquidity + cache)
             timeframe: Timeframe to validate
-            target_count: Target number of pairs (default: self.max_coins)
+            target_count: Target number of pairs (default: all coins)
 
         Returns:
             (validated_coins, status) - validated_coins is None if no coins pass
         """
         if target_count is None:
-            target_count = self.max_coins  # 30
+            target_count = len(coins)  # Use all coins by default
 
         # Get cache reader
         from src.backtester.cache_reader import BacktestCacheReader
@@ -260,61 +256,13 @@ class ContinuousBacktesterProcess:
 
         return final_coins, "validated"
 
-    def _get_backtest_pairs(self, timeframe: str) -> Tuple[Optional[List[str]], str]:
-        """
-        Load pairs for AI-based backtesting with UNIFIED scroll-down logic.
-
-        Gets extended list (2x target), filters for liquidity + cache,
-        then uses unified scroll-down to find 30 with sufficient coverage.
-
-        Returns:
-            (validated_pairs, status) - pairs is None if rejected
-        """
-        target_count = self.max_coins  # 30
-        extended_limit = target_count * 2  # 60 pairs buffer
-
-        # Get volume-sorted pairs from CoinRegistry
-        pairs = get_active_pairs(limit=extended_limit)
-
-        if not pairs:
-            logger.warning("No pairs in CoinRegistry, using default pairs")
-            pairs = ['BTC', 'ETH', 'SOL', 'ARB', 'AVAX']
-
-        # Filter for cache existence
-        from src.backtester.cache_reader import BacktestCacheReader, CacheNotFoundError
-        try:
-            cache_reader = BacktestCacheReader(self.data_loader.cache_dir)
-            cached_symbols = set(cache_reader.list_cached_symbols(timeframe))
-        except CacheNotFoundError:
-            return None, "cache_not_found"
-
-        cached_pairs = [p for p in pairs if p in cached_symbols]
-
-        if not cached_pairs:
-            return None, "no_cached_pairs"
-
-        # UNIFIED scroll-down logic (same as Pattern strategies)
-        validated_pairs, status = self._scroll_down_coverage(
-            coins=cached_pairs,
-            timeframe=timeframe,
-            target_count=target_count
-        )
-
-        if validated_pairs:
-            logger.info(
-                f"AI pair selection: {len(validated_pairs)} pairs validated "
-                f"(from {len(pairs)} volume-sorted, target: {target_count})"
-            )
-
-        return validated_pairs, status
-
-    def _validate_pattern_coins(
+    def _validate_trading_coins(
         self,
-        pattern_coins: List[str],
+        trading_coins: List[str],
         timeframe: str
     ) -> Tuple[Optional[List[str]], str]:
         """
-        Validate pattern coins for backtest/live consistency.
+        Validate trading coins for backtest/live consistency.
 
         Three-level validation (all required):
         1. Liquidity: coin must be in active trading pairs (volume >= threshold)
@@ -322,24 +270,24 @@ class ContinuousBacktesterProcess:
         3. Coverage: coin must have >= 90% data coverage for training+holdout period
 
         NO FALLBACK: If insufficient coins pass validation, returns None.
-        This ensures backtest coins = live coins = pattern edge preserved.
+        This ensures backtest coins = live coins = edge preserved.
 
         Args:
-            pattern_coins: List of coins from pattern's coin_performance (ordered by edge)
+            trading_coins: Strategy's assigned coins (from generator)
             timeframe: Timeframe to validate data coverage for
 
         Returns:
             (validated_coins, rejection_reason) - validated_coins is None if rejected
         """
-        if not pattern_coins:
-            return None, "no_pattern_coins"
+        if not trading_coins:
+            return None, "no_trading_coins"
 
         # Level 1: Liquidity filter (active trading pairs from CoinRegistry)
         active_coins = set(get_active_pairs())
-        liquid_coins = [c for c in pattern_coins if c in active_coins]
+        liquid_coins = [c for c in trading_coins if c in active_coins]
 
         if not liquid_coins:
-            logger.warning(f"Liquidity filter: 0/{len(pattern_coins)} coins liquid")
+            logger.warning(f"Liquidity filter: 0/{len(trading_coins)} coins liquid")
             return None, "no_liquid_coins"
 
         # Level 2: Cache filter (data must exist in cache)
@@ -357,7 +305,7 @@ class ContinuousBacktesterProcess:
             return None, "no_cached_coins"
 
         # Level 3: Coverage filter using UNIFIED scroll-down logic
-        # For pattern strategies: use ALL coins that pass (no artificial limit)
+        # Use ALL coins that pass (no artificial limit)
         validated_coins, status = self._scroll_down_coverage(
             coins=cached_coins,
             timeframe=timeframe,
@@ -369,8 +317,8 @@ class ContinuousBacktesterProcess:
             return None, status
 
         logger.info(
-            f"Validated {len(validated_coins)} pattern coins "
-            f"(from {len(pattern_coins)} edge-sorted, no limit)"
+            f"Validated {len(validated_coins)} trading coins "
+            f"(from {len(trading_coins)} assigned)"
         )
 
         return validated_coins, "validated"
@@ -407,7 +355,7 @@ class ContinuousBacktesterProcess:
             )
 
         try:
-            # Use all validated pairs (pattern strategies may have more than max_coins)
+            # Use all validated pairs from strategy's trading_coins
             is_data, oos_data = self.data_loader.load_multi_symbol_is_oos(
                 symbols=pairs,
                 timeframe=timeframe,
@@ -516,7 +464,7 @@ class ContinuousBacktesterProcess:
                         strategy_data['name'],
                         strategy_data['code'],
                         strategy_data['optimal_timeframe'],
-                        strategy_data['backtest_pairs']
+                        strategy_data['trading_coins']
                     )
                     retest_futures[future] = (str(strategy_data['id']), strategy_data['name'])
                     logger.info(f"[{strategy_data['name']}] RETEST started")
@@ -538,7 +486,7 @@ class ContinuousBacktesterProcess:
                         strategy.name,
                         strategy.code,
                         strategy.timeframe,
-                        strategy.pattern_coins,
+                        strategy.trading_coins,
                         strategy.base_code_hash  # Pass hash to detect pre-parametrized strategies
                     )
                     validated_futures[future] = (str(strategy.id), strategy.name)
@@ -556,7 +504,7 @@ class ContinuousBacktesterProcess:
         strategy_name: str,
         code: str,
         original_tf: str,
-        pattern_coins: Optional[List[str]] = None,
+        trading_coins: Optional[List[str]] = None,
         base_code_hash: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
@@ -624,24 +572,21 @@ class ContinuousBacktesterProcess:
                 )
 
             # Begin single-timeframe backtest (previously a loop over [original_tf])
-            # Validate pattern coins for this timeframe (3-level validation)
-            if pattern_coins:
-                validated_coins, validation_reason = self._validate_pattern_coins(
-                    pattern_coins, assigned_tf
-                )
-                if validated_coins is None:
-                    self._delete_strategy(strategy_id, validation_reason)
-                    return (False, f"Pattern coin validation failed: {validation_reason}")
-                pairs = validated_coins
-                logger.info(
-                    f"[{strategy_name}] {assigned_tf}: Using {len(pairs)} validated pattern coins"
-                )
-            else:
-                # Non-pattern strategy: use volume-based pairs with UNIFIED scroll-down
-                pairs, status = self._get_backtest_pairs(assigned_tf)
-                if not pairs:
-                    self._delete_strategy(strategy_id, status)
-                    return (False, f"No backtest pairs: {status}")
+            # Validate trading_coins (no fallback - generators must provide coins)
+            if not trading_coins:
+                self._delete_strategy(strategy_id, "no_trading_coins")
+                return (False, "Strategy has no trading_coins assigned")
+
+            validated_coins, validation_reason = self._validate_trading_coins(
+                trading_coins, assigned_tf
+            )
+            if validated_coins is None:
+                self._delete_strategy(strategy_id, validation_reason)
+                return (False, f"Trading coins validation failed: {validation_reason}")
+            pairs = validated_coins
+            logger.info(
+                f"[{strategy_name}] {assigned_tf}: Using {len(pairs)} validated trading coins"
+            )
 
             logger.info(f"[{strategy_name}] Testing {assigned_tf} on {len(pairs)} pairs (IS/OOS)...")
 
@@ -1971,8 +1916,7 @@ class ContinuousBacktesterProcess:
                 if not fresh_strategy:
                     return (False, "strategy_not_found", 0.0, 0.0)
                 strategy_code = fresh_strategy.code
-                strategy_backtest_pairs = fresh_strategy.backtest_pairs
-                strategy_pattern_coins = fresh_strategy.pattern_coins
+                strategy_trading_coins = fresh_strategy.trading_coins
 
             # Load strategy instance (has fixed params embedded)
             class_name = self._extract_class_name(strategy_code)
@@ -1982,8 +1926,8 @@ class ContinuousBacktesterProcess:
             if strategy_instance is None:
                 return (False, "failed_to_load_strategy", 0.0, 0.0)
 
-            # Get symbols from strategy's backtest_pairs (same pairs used for IS/OOS)
-            symbols = strategy_backtest_pairs or strategy_pattern_coins or []
+            # Get symbols from strategy's trading_coins (same coins used for backtest)
+            symbols = strategy_trading_coins or []
             if not symbols:
                 return (False, "no_symbols_for_wfa", 0.0, 0.0)
 
@@ -2255,7 +2199,6 @@ class ContinuousBacktesterProcess:
 
                 if strategy:
                     strategy.optimal_timeframe = assigned_tf
-                    strategy.backtest_pairs = pairs
                     strategy.backtest_date = datetime.now(UTC)
                     strategy.tested_at = datetime.now(UTC)
                     strategy.backtest_completed_at = datetime.now(UTC)
@@ -2494,7 +2437,7 @@ class ContinuousBacktesterProcess:
                     'name': strategy.name,
                     'code': strategy.code,
                     'optimal_timeframe': strategy.optimal_timeframe,
-                    'backtest_pairs': strategy.backtest_pairs,
+                    'trading_coins': strategy.trading_coins,
                     'last_backtested_at': strategy.last_backtested_at,
                     'score_backtest': strategy.score_backtest,
                 }
@@ -2575,7 +2518,6 @@ class ContinuousBacktesterProcess:
                     )
 
             # Validate pairs (same 3-level validation as initial backtest)
-            # Use all provided pairs (pattern strategies may have > max_coins)
             validated_pairs, status = self._scroll_down_coverage(
                 coins=pairs,
                 timeframe=assigned_tf,
@@ -2666,6 +2608,63 @@ class ContinuousBacktesterProcess:
         except Exception as e:
             logger.error(f"[{strategy_name}] RETEST error: {e}", exc_info=True)
             return (False, str(e))
+
+    def _calculate_robustness(
+        self,
+        strategy: Strategy,
+        is_sharpe: float,
+        oos_sharpe: float,
+        is_trades: int,
+        oos_trades: int,
+    ) -> float:
+        """
+        Calculate robustness score for strategy (0-1).
+
+        Components:
+        - OOS/IS ratio (50%): How well strategy generalizes to unseen data
+        - Trade significance (35%): Statistical reliability from trade count
+        - Simplicity (15%): Fewer indicators = less overfitting risk
+
+        Args:
+            strategy: Strategy object (for indicator count)
+            is_sharpe: In-sample Sharpe ratio
+            oos_sharpe: Out-of-sample Sharpe ratio
+            is_trades: In-sample trade count
+            oos_trades: Out-of-sample trade count
+
+        Returns:
+            Robustness score between 0 and 1
+        """
+        robustness_config = self.config['backtesting']['robustness']
+        weights = robustness_config['weights']
+        trade_target = robustness_config['trade_significance_target']
+
+        # 1. OOS/IS ratio (closer to 1 = less overfit)
+        if is_sharpe > 0:
+            oos_ratio = min(1.0, max(0, oos_sharpe / is_sharpe))
+        else:
+            oos_ratio = 0.0
+
+        # 2. Trade significance (more trades = more reliable)
+        total_trades = is_trades + oos_trades
+        trade_score = min(1.0, total_trades / trade_target)
+
+        # 3. Simplicity (fewer indicators = less overfit)
+        # Count indicators from strategy parameters
+        params = strategy.parameters or {}
+        entry_indicators = params.get('entry_indicators', [])
+        entry_conditions = params.get('entry_conditions', [])
+        num_indicators = len(entry_indicators) if entry_indicators else len(entry_conditions) if entry_conditions else 1
+        simplicity = 1.0 / num_indicators if num_indicators > 0 else 0.5
+
+        # Weighted robustness score
+        robustness = (
+            weights['oos_ratio'] * oos_ratio +
+            weights['trade_significance'] * trade_score +
+            weights['simplicity'] * simplicity
+        )
+
+        return robustness
 
     def _promote_to_active_pool(
         self,
@@ -2770,6 +2769,75 @@ class ContinuousBacktesterProcess:
                 duration_ms=wfa_duration_ms,
                 base_code_hash=base_hash
             )
+
+            # === ROBUSTNESS CHECK (final gate before pool entry) ===
+            # Query IS and OOS backtest results for robustness calculation
+            with get_session() as session:
+                is_bt = session.query(BacktestResult).filter(
+                    BacktestResult.strategy_id == strategy_id,
+                    BacktestResult.period_type == 'in_sample'
+                ).first()
+                oos_bt = session.query(BacktestResult).filter(
+                    BacktestResult.strategy_id == strategy_id,
+                    BacktestResult.period_type == 'out_of_sample'
+                ).first()
+
+                # Get metrics for robustness calculation
+                is_sharpe = is_bt.sharpe_ratio if is_bt else 0
+                oos_sharpe = oos_bt.sharpe_ratio if oos_bt else 0
+                is_trades = is_bt.total_trades if is_bt else 0
+                oos_trades = oos_bt.total_trades if oos_bt else 0
+
+            # Calculate robustness score
+            robustness = self._calculate_robustness(
+                strategy, is_sharpe, oos_sharpe, is_trades, oos_trades
+            )
+
+            # Store robustness in strategy
+            with get_session() as session:
+                strat = session.query(Strategy).filter(Strategy.id == strategy_id).first()
+                if strat:
+                    strat.robustness_score = robustness
+                    session.commit()
+
+            # Check robustness threshold
+            min_robustness = self.config['backtesting']['robustness']['min_threshold']
+
+            if robustness < min_robustness:
+                EventTracker.emit(
+                    strategy_id=strategy_id,
+                    strategy_name=strategy_name,
+                    stage='robustness_check',
+                    event_type='robustness_failed',
+                    status='failed',
+                    event_data={
+                        'robustness': round(robustness, 3),
+                        'threshold': min_robustness,
+                        'oos_is_ratio': round(oos_sharpe / is_sharpe, 3) if is_sharpe > 0 else 0,
+                        'is_sharpe': round(is_sharpe, 3),
+                        'oos_sharpe': round(oos_sharpe, 3),
+                        'total_trades': is_trades + oos_trades,
+                    },
+                    base_code_hash=base_hash
+                )
+                logger.info(
+                    f"[{strategy_name}] Robustness check failed: "
+                    f"{robustness:.2f} < {min_robustness} "
+                    f"(OOS/IS={oos_sharpe/is_sharpe:.2f if is_sharpe > 0 else 0})"
+                )
+                return (False, f"robustness_below_threshold:{robustness:.2f}")
+
+            # Robustness passed
+            EventTracker.emit(
+                strategy_id=strategy_id,
+                strategy_name=strategy_name,
+                stage='robustness_check',
+                event_type='robustness_passed',
+                status='passed',
+                event_data={'robustness': round(robustness, 3)},
+                base_code_hash=base_hash
+            )
+            logger.debug(f"[{strategy_name}] Robustness check passed: {robustness:.2f}")
 
             # Try to enter pool (handles leaderboard logic)
             EventTracker.pool_attempted(

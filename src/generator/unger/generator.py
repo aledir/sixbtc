@@ -27,6 +27,7 @@ from src.utils import get_logger
 
 from .composer import StrategyBlueprint, StrategyComposer
 from .catalogs import ALL_ENTRIES, get_entries_by_direction
+from .lookback import compute_lookback
 
 logger = get_logger(__name__)
 
@@ -39,7 +40,7 @@ class UngerGeneratedStrategy:
     strategy_id: str
     strategy_type: str  # 'BRK', 'CRS', 'THR', 'VOL', 'CDL', 'REV'
     timeframe: str
-    pattern_coins: list[str]
+    trading_coins: list[str]
     entry_name: str
     exit_mechanism_name: str
     base_code_hash: str
@@ -153,6 +154,82 @@ class UngerGenerator:
             logger.warning(f"Failed to query tradeable coins: {e}")
             return []
 
+    def get_direction_groups(self) -> dict[str, list[str]]:
+        """
+        Query MarketRegime and group symbols by direction.
+
+        Returns:
+            {"LONG": [...], "SHORT": [...], "BOTH": [...]}
+        """
+        regime_config = self.config.get('regime', {})
+        min_strength = regime_config.get('min_strength', 0.5)
+
+        groups: dict[str, list[str]] = {"LONG": [], "SHORT": [], "BOTH": []}
+        try:
+            with get_session() as session:
+                regimes = session.query(MarketRegime).filter(
+                    MarketRegime.strength >= min_strength
+                ).all()
+                for r in regimes:
+                    if r.direction in groups:
+                        groups[r.direction].append(r.symbol)
+            return groups
+        except Exception as e:
+            logger.warning(f"Failed to query direction groups: {e}")
+            return groups
+
+    def select_direction_and_coins(self) -> tuple[str, list[str]]:
+        """
+        Select direction and coins based on regime with 50/50 BIDI diversity.
+
+        Logic:
+        - Bearish regime (SHORT dominant): 50% SHORT + 50% BIDI
+        - Bullish regime (LONG dominant): 50% LONG + 50% BIDI
+        - BIDI is neutral, never goes against regime
+
+        Returns:
+            (direction, coins) - e.g., ("BIDI", ["BTC", "ETH", ...])
+        """
+        groups = self.get_direction_groups()
+
+        # Filter empty groups
+        non_empty = {d: coins for d, coins in groups.items() if coins}
+
+        if not non_empty:
+            # Fallback: no regime data available
+            from src.data.coin_registry import get_top_coins_by_volume
+            logger.info("No regime direction data, falling back to top coins by volume")
+            return "LONG", get_top_coins_by_volume(30)
+
+        # Separate directional (LONG/SHORT) from neutral (BOTH)
+        directional = {d: c for d, c in non_empty.items() if d in ('LONG', 'SHORT')}
+        has_bidi = 'BOTH' in non_empty and len(non_empty['BOTH']) > 0
+
+        # If only BOTH available, use BIDI
+        if not directional:
+            logger.debug(f"Only BOTH available ({len(groups['BOTH'])} coins) -> BIDI")
+            return "BIDI", groups['BOTH']
+
+        # Find dominant directional regime (LONG or SHORT)
+        max_size = max(len(c) for c in directional.values())
+        candidates = [d for d, c in directional.items() if len(c) == max_size]
+        dominant = random.choice(candidates)
+
+        # 50/50 split: dominant direction vs BIDI (if BOTH has coins)
+        if has_bidi and random.random() < 0.50:
+            direction = "BIDI"
+            coins = groups['BOTH']
+        else:
+            direction = dominant
+            coins = groups[dominant]
+
+        logger.debug(
+            f"Direction groups: LONG={len(groups['LONG'])}, SHORT={len(groups['SHORT'])}, "
+            f"BOTH={len(groups['BOTH'])} | dominant={dominant} -> selected {direction}"
+        )
+
+        return direction, coins
+
     def generate(
         self,
         timeframe: Optional[str] = None,
@@ -183,28 +260,25 @@ class UngerGenerator:
             # Select timeframe
             tf = timeframe or random.choice(self.timeframes)
 
-            # Select direction (bias toward LONG/SHORT over BIDI)
+            # Select direction and coins
+            # If direction not specified, use regime-driven selection
             if direction:
                 dir_ = direction
-            else:
-                dir_ = random.choice(['LONG', 'LONG', 'SHORT', 'SHORT', 'BIDI'])
-
-            # Get coins based on regime or all
-            if regime_type:
-                coins = self.get_regime_coins(regime_type)
+                # Get coins based on regime_type or all
+                if regime_type:
+                    coins = self.get_regime_coins(regime_type)
+                    if not coins:
+                        fallback = 'REVERSAL' if regime_type == 'TREND' else 'TREND'
+                        coins = self.get_regime_coins(fallback)
+                else:
+                    trend_coins = self.get_regime_coins('TREND')
+                    reversal_coins = self.get_regime_coins('REVERSAL')
+                    coins = list(set(trend_coins + reversal_coins))
                 if not coins:
-                    # Fallback to opposite regime
-                    fallback = 'REVERSAL' if regime_type == 'TREND' else 'TREND'
-                    coins = self.get_regime_coins(fallback)
+                    coins = self.get_all_tradeable_coins()
             else:
-                # Mix from both regimes
-                trend_coins = self.get_regime_coins('TREND')
-                reversal_coins = self.get_regime_coins('REVERSAL')
-                coins = list(set(trend_coins + reversal_coins))
-
-            # Fallback to all tradeable coins
-            if not coins:
-                coins = self.get_all_tradeable_coins()
+                # Regime-driven: select direction based on dominant group
+                dir_, coins = self.select_direction_and_coins()
 
             if not coins:
                 logger.warning("No coins available for strategy generation")
@@ -239,7 +313,7 @@ class UngerGenerator:
                 strategy_id=blueprint.strategy_id,
                 strategy_type=blueprint.get_strategy_type(),
                 timeframe=tf,
-                pattern_coins=blueprint.pattern_coins,
+                trading_coins=blueprint.trading_coins,
                 entry_name=blueprint.entry_condition.name,
                 exit_mechanism_name=blueprint.exit_mechanism.name,
                 base_code_hash=blueprint.compute_hash(),
@@ -355,9 +429,9 @@ class UngerGenerator:
         result = re.sub(func_iloc_pattern, r'\1', result)
 
         # Convert Python boolean operators to pandas bitwise operators
-        # Use word boundaries to avoid replacing within identifiers
-        result = re.sub(r'\)\s+and\s+\(', ') & (', result)
-        result = re.sub(r'\)\s+or\s+\(', ') | (', result)
+        # Use word boundaries to avoid replacing within identifiers like "random" or "pandas"
+        result = re.sub(r'\band\b', '&', result)
+        result = re.sub(r'\bor\b', '|', result)
 
         # Rename entry_condition to entry_signal for vectorized output
         result = result.replace('entry_condition', 'entry_signal')
@@ -400,8 +474,10 @@ class UngerGenerator:
                 flt.logic_template,
                 flt_params
             )
-            # Template expects (filter, filter_params, filter_logic) - 3 elements
-            processed_filters.append((flt, flt_params, processed_logic))
+            # Vectorize filter logic for calculate_indicators()
+            processed_logic_vectorized = self._vectorize_filter_logic(processed_logic)
+            # Template expects (filter, filter_params, filter_logic, filter_logic_vectorized) - 4 elements
+            processed_filters.append((flt, flt_params, processed_logic, processed_logic_vectorized))
 
         # Pre-process exit condition logic
         exit_logic = None
@@ -410,6 +486,21 @@ class UngerGenerator:
                 bp.exit_condition.logic_template,
                 bp.exit_params
             )
+
+        # Compute lookback automatically from indicators and params
+        # This ensures correct lookback even if catalog value is wrong
+        try:
+            computed_lookback = compute_lookback(
+                bp.entry_condition.indicators_used,
+                bp.entry_params
+            )
+        except ValueError as e:
+            # Unknown indicator - use declared lookback with safety margin
+            logger.warning(f"Lookback computation failed: {e}")
+            computed_lookback = bp.entry_condition.lookback_required + 20
+
+        # Use max of computed and declared lookback
+        final_lookback = max(computed_lookback, bp.entry_condition.lookback_required)
 
         return self.template.render(
             # Meta
@@ -424,6 +515,7 @@ class UngerGenerator:
             entry_params=bp.entry_params,
             entry_logic=entry_logic,
             entry_logic_vectorized=entry_logic_vectorized,
+            computed_lookback=final_lookback,  # Auto-computed from indicators
             filters=processed_filters,
             # Exit
             exit_mechanism=bp.exit_mechanism,
@@ -437,7 +529,7 @@ class UngerGenerator:
             trailing=bp.trailing_config,
             trailing_params=bp.trailing_params,
             # Coins
-            pattern_coins=bp.pattern_coins,
+            trading_coins=bp.trading_coins,
         )
 
     def generate_batch(
@@ -482,182 +574,3 @@ class UngerGenerator:
                         return results[:count]
 
         return results
-
-    def generate_regime_aware(
-        self,
-        strategies_per_group: int = 10,
-        max_coins_per_group: int = 30,
-    ) -> list[UngerGeneratedStrategy]:
-        """
-        Generate strategies based on regime for all coin groups.
-
-        Flow:
-        1. Calculate regime for every coin
-        2. Group coins by (type, direction)
-        3. For each group: select top N coins by volume
-        4. For each group: generate strategies with coherent entry categories
-
-        Args:
-            strategies_per_group: Strategies to generate per regime group
-            max_coins_per_group: Max coins to use per group (top by volume)
-
-        Returns:
-            List of generated strategies from all groups
-        """
-        from src.generator.regime.detector import RegimeDetector
-
-        # Get config
-        regime_config = self.config.get('regime', {})
-        window_days = regime_config.get('window_days', 90)
-
-        detector = RegimeDetector(window_days=window_days)
-
-        # 1. Calculate regime for all coins
-        all_regimes = detector.get_all_regimes()
-
-        if not all_regimes:
-            logger.warning("No coin regimes available, skipping regime-aware generation")
-            return []
-
-        # 2. Group by (type, direction)
-        groups = detector.group_by_regime(all_regimes)
-
-        results = []
-
-        # 3-4. For each group
-        for (regime_type, direction), coins in groups.items():
-            if not coins:
-                continue
-
-            # Select top N by volume
-            selected_coins = self._select_top_by_volume(coins, max_coins_per_group)
-
-            if not selected_coins:
-                logger.debug(f"No coins with volume data for regime ({regime_type}, {direction})")
-                continue
-
-            # Get allowed entry categories for this regime
-            allowed_categories = self.REGIME_ENTRY_CATEGORIES.get(regime_type)
-
-            # Determine allowed directions
-            if direction == 'BOTH':
-                allowed_directions = ['LONG', 'SHORT']
-            else:
-                allowed_directions = [direction]
-
-            # Log
-            logger.info(
-                f"Regime ({regime_type}, {direction}): {len(selected_coins)} coins, "
-                f"generating {strategies_per_group} strategies"
-            )
-
-            # Generate strategies - divide equally between directions
-            strategies_per_direction = strategies_per_group // len(allowed_directions)
-
-            for dir_ in allowed_directions:
-                for _ in range(strategies_per_direction):
-                    strategy = self._generate_for_regime(
-                        coins=selected_coins,
-                        direction=dir_,
-                        allowed_categories=allowed_categories,
-                        regime_type=regime_type,
-                    )
-                    if strategy:
-                        results.append(strategy)
-
-        logger.info(f"Regime-aware generation complete: {len(results)} strategies")
-        return results
-
-    def _select_top_by_volume(self, coins: list[str], limit: int) -> list[str]:
-        """
-        Select top N coins by 24h volume.
-
-        Args:
-            coins: List of coin symbols
-            limit: Maximum coins to return
-
-        Returns:
-            List of symbols sorted by volume descending
-        """
-        try:
-            with get_session() as session:
-                db_coins = session.query(Coin).filter(
-                    Coin.symbol.in_(coins),
-                    Coin.volume_24h.isnot(None),
-                    Coin.volume_24h > 0,
-                ).order_by(Coin.volume_24h.desc()).limit(limit).all()
-
-                return [c.symbol for c in db_coins]
-        except Exception as e:
-            logger.warning(f"Failed to query coins by volume: {e}")
-            # Fallback: return first N coins
-            return coins[:limit]
-
-    def _generate_for_regime(
-        self,
-        coins: list[str],
-        direction: str,
-        allowed_categories: list[str] | None,
-        regime_type: str,
-    ) -> UngerGeneratedStrategy | None:
-        """
-        Generate a single strategy for a specific regime.
-
-        Args:
-            coins: Coins to use for this strategy
-            direction: LONG or SHORT
-            allowed_categories: Entry categories allowed (None = all)
-            regime_type: TREND, REVERSAL, or MIXED
-
-        Returns:
-            Generated strategy or None if failed
-        """
-        # Filter entries by allowed categories and direction
-        if allowed_categories:
-            entries = [
-                e for e in ALL_ENTRIES
-                if e.category in allowed_categories
-                and (e.direction == direction or e.direction == 'BIDI')
-            ]
-        else:
-            entries = get_entries_by_direction(direction)
-
-        if not entries:
-            logger.debug(f"No entries for regime {regime_type}, direction {direction}")
-            return None
-
-        # Select random entry
-        entry = random.choice(entries)
-
-        # Select random timeframe
-        tf = random.choice(self.timeframes)
-
-        try:
-            # Compose blueprint with entry override
-            blueprint = self.composer.compose_random(
-                timeframe=tf,
-                direction=direction,
-                coins=coins,
-                entry_override=entry,
-            )
-
-            # Render to code
-            code = self._render_strategy(blueprint)
-
-            return UngerGeneratedStrategy(
-                code=code,
-                strategy_id=blueprint.strategy_id,
-                strategy_type=blueprint.get_strategy_type(),
-                timeframe=tf,
-                pattern_coins=coins,
-                entry_name=entry.name,
-                exit_mechanism_name=blueprint.exit_mechanism.name,
-                base_code_hash=blueprint.compute_hash(),
-                regime_type=regime_type,
-            )
-        except Exception as e:
-            logger.error(
-                f"Failed to generate strategy for regime {regime_type}: {e} | "
-                f"entry={entry.id if entry else 'None'}, direction={direction}"
-            )
-            return None

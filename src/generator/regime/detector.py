@@ -610,8 +610,8 @@ class RegimeDetector:
         regime_config = config._raw_config.get('regime', {})
         timeframe = regime_config.get('timeframe', '1d')
 
-        # Detect all
-        results = self.detect_all(pairs=None, timeframe=timeframe)
+        # Detect all active coins (no limit - analyze entire universe)
+        results = self.detect_all(pairs=None, timeframe=timeframe, limit=None)
 
         # Save to DB if requested
         if save_to_db:

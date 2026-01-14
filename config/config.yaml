@@ -37,7 +37,6 @@ regime:
   # Regime-aware generation settings
   generation:
     strategies_per_group: 10   # Strategies to generate per regime group
-    max_coins_per_group: 30    # Max coins to use per group (top by volume)
 
 # ==============================================================================
 # DIRECTORIES
@@ -83,7 +82,7 @@ hyperliquid:
   # Subaccounts are managed via scripts/setup_hyperliquid.py
   # Master wallet credentials are in .env: HL_MASTER_ADDRESS, HL_MASTER_PRIVATE_KEY
   subaccounts:
-    count: 3                       # Target number of subaccounts (max 10 per HL)
+    count: 5                       # Target number of subaccounts (max 10 per HL)
     naming_pattern: "Bot-{:03d}"   # Pattern for names: Bot-001, Bot-002, etc.
 
   # --------------------------------------------------------------------------
@@ -372,9 +371,6 @@ backtesting:
     interval_days: 3         # Re-test ACTIVE strategies every 3 days
     # Re-backtest uses: optimal TF only, 365+30 days, same parameters (no parametric)
 
-  # Max coins for AI strategies (pattern strategies use ALL coins meeting edge criteria)
-  max_coins: 30              # Top 30 by volume for AI strategies
-
   # In-sample/Out-of-sample split (unified approach)
   # Total period = is_days + oos_days = 180 days
   is_days: 120               # 4 months in-sample (rotation-based system, recent regimes)
@@ -404,6 +400,17 @@ backtesting:
     window_percentages: [0.25, 0.50, 0.75, 1.0]  # Expanding windows
     min_profitable_windows: 4                     # All 4 windows must be profitable
 
+  # Robustness filter (final gate before pool entry)
+  # Runs AFTER WFA validation, validates strategy is likely to perform in live
+  # Formula: robustness = oos_ratio*0.50 + trade_significance*0.35 + simplicity*0.15
+  robustness:
+    min_threshold: 0.80           # Minimum robustness score (0-1)
+    weights:
+      oos_ratio: 0.50             # OOS/IS Sharpe ratio weight (generalization)
+      trade_significance: 0.35    # Trade count weight (statistical reliability)
+      simplicity: 0.15            # Indicator count weight (overfitting resistance)
+    trade_significance_target: 150  # Trades for max score (IS + OOS combined)
+
   # Minimum thresholds (gate check - classifier does the real ranking)
   thresholds:
     min_sharpe: 0.3          # Minimum Sharpe ratio
@@ -420,7 +427,7 @@ backtesting:
 # ==============================================================================
 trading:
   # NOTE: n_subaccounts REMOVED - use hyperliquid.subaccounts.total instead
-  total_capital: 300           # Total capital across all subaccounts ($) - 3 x $100
+  total_capital: 500           # Total capital across all subaccounts ($) - 5 x $100
   min_volume_24h: 1000000      # $1M min volume for live trading (liquidity filter)
   pairs_mode: strict           # strict, adaptive, intersection
   require_backtest: true       # Only trade pairs that were backtested
@@ -598,10 +605,6 @@ logging:
 # Timeline: restart(60s) → renew(30s) → funds(30s) → tmp(5s) → events(10s) → stale(10s)
 scheduler:
   tasks:
-    cleanup_zombie_processes:
-      enabled: true
-      interval_hours: 3           # Every 3 hours (from scheduler start)
-
     # Daily maintenance tasks run between 01:00-01:45 UTC, spaced 5 minutes apart
     # This window is chosen because it's low-activity period for crypto markets
 
