@@ -94,42 +94,63 @@ class {{ class_name }}(StrategyCore):
         {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
             df['high'], df['low'], df['close'],
             {% for param, value in ec.indicator_params.items() %}
-            {{ param }}={{ value }},
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
             {% endfor %}
         )
         {% elif ec.indicator.input_type == 'hl' %}
         {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
             df['high'], df['low'],
             {% for param, value in ec.indicator_params.items() %}
-            {{ param }}={{ value }},
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
             {% endfor %}
         )
         {% elif ec.indicator.input_type == 'ohlcv' %}
         {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
             df['open'], df['high'], df['low'], df['close'], df['volume'],
             {% for param, value in ec.indicator_params.items() %}
-            {{ param }}={{ value }},
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
             {% endfor %}
         )
         {% elif ec.indicator.input_type == 'hlcv' %}
         {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
             df['high'], df['low'], df['close'], df['volume'],
             {% for param, value in ec.indicator_params.items() %}
-            {{ param }}={{ value }},
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
             {% endfor %}
         )
         {% elif ec.indicator.input_type == 'cv' %}
         {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
             df['close'], df['volume'],
             {% for param, value in ec.indicator_params.items() %}
-            {{ param }}={{ value }},
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'ohlc' %}
+        {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['open'], df['high'], df['low'], df['close'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'oc' %}
+        {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['open'], df['close'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'volume' %}
+        {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['volume'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
             {% endfor %}
         )
         {% else %}
         {{ ec.indicator.id | lower }}_result = ta.{{ ec.indicator.pandas_ta_func }}(
             df['close'],
             {% for param, value in ec.indicator_params.items() %}
-            {{ param }}={{ value }},
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
             {% endfor %}
         )
         {% endif %}

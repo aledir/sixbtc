@@ -53,7 +53,6 @@ class ContinuousSchedulerProcess:
         # Core tasks (always enabled)
         self.tasks = {
             'cleanup_stale_processing': 0.5,  # Every 30 min
-            'cleanup_old_failed': 24,  # Daily
             'generate_daily_report': 24,  # Daily
             'refresh_data_cache': 4,  # Every 4 hours
         }
@@ -69,24 +68,28 @@ class ContinuousSchedulerProcess:
         if restart_config.get('enabled', False):
             self.tasks['daily_restart_services'] = restart_config['interval_hours']
             self.restart_hour = restart_config['restart_hour']
+            self.restart_minute = restart_config.get('restart_minute', 0)
 
         # Agent wallet renewal (renew expiring credentials)
         renew_config = scheduler_config.get('renew_agent_wallets', {})
         if renew_config.get('enabled', False):
             self.tasks['renew_agent_wallets'] = renew_config['interval_hours']
             self.renew_agent_hour = renew_config.get('run_hour', 3)
+            self.renew_agent_minute = renew_config.get('run_minute', 0)
 
         # Subaccount fund check (topup from master if low)
         funds_config = scheduler_config.get('check_subaccount_funds', {})
         if funds_config.get('enabled', False):
             self.tasks['check_subaccount_funds'] = funds_config['interval_hours']
             self.check_funds_hour = funds_config.get('run_hour', 4)
+            self.check_funds_minute = funds_config.get('run_minute', 0)
 
         # Cleanup /tmp directory
         tmp_config = scheduler_config.get('cleanup_tmp_dir', {})
         if tmp_config.get('enabled', False):
             self.tasks['cleanup_tmp_dir'] = tmp_config['interval_hours']
             self.cleanup_tmp_hour = tmp_config.get('run_hour', 5)
+            self.cleanup_tmp_minute = tmp_config.get('run_minute', 0)
             self.cleanup_tmp_max_age = tmp_config.get('max_age_hours', 24)
 
         # Cleanup old StrategyEvent records
@@ -94,6 +97,7 @@ class ContinuousSchedulerProcess:
         if events_config.get('enabled', False):
             self.tasks['cleanup_old_events'] = events_config['interval_hours']
             self.cleanup_events_hour = events_config.get('run_hour', 6)
+            self.cleanup_events_minute = events_config.get('run_minute', 0)
             self.cleanup_events_max_age_days = events_config.get('max_age_days', 7)
 
         # Cleanup stale strategies (stuck in GENERATED/VALIDATED)
@@ -101,20 +105,68 @@ class ContinuousSchedulerProcess:
         if stale_config.get('enabled', False):
             self.tasks['cleanup_stale_strategies'] = stale_config['interval_hours']
             self.cleanup_stale_hour = stale_config.get('run_hour', 6)
+            self.cleanup_stale_minute = stale_config.get('run_minute', 0)
             self.cleanup_stale_max_age_days = stale_config.get('max_age_days', 1)
+
+        # Cleanup old FAILED strategies
+        failed_config = scheduler_config.get('cleanup_old_failed', {})
+        if failed_config.get('enabled', False):
+            self.tasks['cleanup_old_failed'] = failed_config['interval_hours']
+            self.cleanup_failed_hour = failed_config.get('run_hour', 2)
+            self.cleanup_failed_minute = failed_config.get('run_minute', 0)
+            self.cleanup_failed_max_age_days = failed_config.get('max_age_days', 7)
+
+        # Cleanup old RETIRED strategies
+        retired_config = scheduler_config.get('cleanup_old_retired', {})
+        if retired_config.get('enabled', False):
+            self.tasks['cleanup_old_retired'] = retired_config['interval_hours']
+            self.cleanup_retired_hour = retired_config.get('run_hour', 2)
+            self.cleanup_retired_minute = retired_config.get('run_minute', 10)
+            self.cleanup_retired_max_age_days = retired_config.get('max_age_days', 7)
 
         # Market regime detection (Unger method)
         regime_config = self.config._raw_config.get('regime', {})
         if regime_config.get('enabled', False):
             self.tasks['refresh_market_regimes'] = 24  # Daily
-            self.regime_run_hour = 1  # Run at 01:00 UTC
+            self.regime_run_hour = 1  # Run at 01:05 UTC
+            self.regime_run_minute = 5
+
+        # Data scheduler (pairs update + OHLCV download)
+        data_sched_config = self.config._raw_config.get('data_scheduler', {})
+        if data_sched_config.get('enabled', False):
+            # update_pairs: runs at update_pairs_hours:update_pairs_minute (e.g., 01:45 and 13:45)
+            self.update_pairs_hours = data_sched_config.get('update_pairs_hours', [1, 13])
+            self.update_pairs_minute = data_sched_config.get('update_pairs_minute', 45)
+            # download_data: runs at download_data_hours:download_data_minute (e.g., 02:00 and 14:00)
+            self.download_data_hours = data_sched_config.get('download_data_hours', [2, 14])
+            self.download_data_minute = data_sched_config.get('download_data_minute', 0)
+            # Check every hour to see if it's time to run
+            self.tasks['update_pairs'] = 1  # Check every hour
+            self.tasks['download_data'] = 1  # Check every hour
 
         # Initialize last run times (use timezone-aware datetime)
         for task in self.tasks:
             self.last_run[task] = datetime.min.replace(tzinfo=UTC)
 
+        # Tasks with fixed schedules (hour:minute)
+        # These only run at specific times, not on interval
+        self.fixed_schedule_tasks = {
+            'daily_restart_services': (self.restart_hour, getattr(self, 'restart_minute', 0)) if hasattr(self, 'restart_hour') else None,
+            'renew_agent_wallets': (getattr(self, 'renew_agent_hour', 3), getattr(self, 'renew_agent_minute', 0)) if 'renew_agent_wallets' in self.tasks else None,
+            'check_subaccount_funds': (getattr(self, 'check_funds_hour', 4), getattr(self, 'check_funds_minute', 0)) if 'check_subaccount_funds' in self.tasks else None,
+            'cleanup_tmp_dir': (getattr(self, 'cleanup_tmp_hour', 5), getattr(self, 'cleanup_tmp_minute', 0)) if 'cleanup_tmp_dir' in self.tasks else None,
+            'cleanup_old_events': (getattr(self, 'cleanup_events_hour', 6), getattr(self, 'cleanup_events_minute', 0)) if 'cleanup_old_events' in self.tasks else None,
+            'cleanup_stale_strategies': (getattr(self, 'cleanup_stale_hour', 6), getattr(self, 'cleanup_stale_minute', 0)) if 'cleanup_stale_strategies' in self.tasks else None,
+            'cleanup_old_failed': (getattr(self, 'cleanup_failed_hour', 2), getattr(self, 'cleanup_failed_minute', 0)) if 'cleanup_old_failed' in self.tasks else None,
+            'cleanup_old_retired': (getattr(self, 'cleanup_retired_hour', 2), getattr(self, 'cleanup_retired_minute', 10)) if 'cleanup_old_retired' in self.tasks else None,
+            'refresh_market_regimes': (getattr(self, 'regime_run_hour', 1), getattr(self, 'regime_run_minute', 5)) if 'refresh_market_regimes' in self.tasks else None,
+        }
+        # Remove None entries
+        self.fixed_schedule_tasks = {k: v for k, v in self.fixed_schedule_tasks.items() if v is not None}
+
         logger.info(
-            f"ContinuousSchedulerProcess initialized: {len(self.tasks)} tasks"
+            f"ContinuousSchedulerProcess initialized: {len(self.tasks)} tasks, "
+            f"{len(self.fixed_schedule_tasks)} with fixed schedules"
         )
 
     async def run_continuous(self):
@@ -127,9 +179,11 @@ class ContinuousSchedulerProcess:
 
                 # Check each task
                 for task_name, interval_hours in self.tasks.items():
-                    last = self.last_run[task_name]
-                    if (now - last).total_seconds() >= interval_hours * 3600:
-                        await self._run_task(task_name)
+                    should_run, reason = self._should_run_task(task_name, now)
+
+                    if should_run:
+                        result = await self._run_task(task_name)
+                        # Always update last_run after actual execution
                         self.last_run[task_name] = now
 
             except Exception as e:
@@ -140,8 +194,88 @@ class ContinuousSchedulerProcess:
 
         logger.info("Scheduler loop ended")
 
-    async def _run_task(self, task_name: str):
-        """Run a scheduled task with tracking"""
+    def _should_run_task(self, task_name: str, now: datetime) -> tuple[bool, str]:
+        """
+        Determine if a task should run now.
+
+        For fixed-schedule tasks: check if it's the right hour:minute AND not already run today
+        For interval tasks: check if enough time has passed since last run
+
+        Returns:
+            (should_run, reason) tuple
+        """
+        last = self.last_run[task_name]
+
+        # Check if this is a fixed-schedule task
+        if task_name in self.fixed_schedule_tasks:
+            target_hour, target_minute = self.fixed_schedule_tasks[task_name]
+
+            # Check if we're in the right time window (5-minute window)
+            in_window = (
+                now.hour == target_hour and
+                target_minute <= now.minute < target_minute + 5
+            )
+
+            if not in_window:
+                return False, 'wrong_time'
+
+            # Check if already run today (compare dates)
+            if last.date() == now.date():
+                return False, 'already_run_today'
+
+            return True, 'scheduled_time'
+
+        # Special handling for data scheduler tasks (update_pairs, download_data)
+        # Each has its own hours and minute configuration
+        if task_name == 'update_pairs':
+            target_hours = getattr(self, 'update_pairs_hours', [1, 13])
+            target_minute = getattr(self, 'update_pairs_minute', 45)
+
+            # Check if current hour is in target hours
+            if now.hour not in target_hours:
+                return False, 'wrong_hour'
+
+            # Check if we're in the right minute window (5-minute window)
+            if not (target_minute <= now.minute < target_minute + 5):
+                return False, 'wrong_minute'
+
+            # Check if already run in this hour today
+            if last.hour == now.hour and last.date() == now.date():
+                return False, 'already_run_this_hour'
+
+            return True, 'data_update_time'
+
+        if task_name == 'download_data':
+            target_hours = getattr(self, 'download_data_hours', [2, 14])
+            target_minute = getattr(self, 'download_data_minute', 0)
+
+            # Check if current hour is in target hours
+            if now.hour not in target_hours:
+                return False, 'wrong_hour'
+
+            # Check if we're in the right minute window (5-minute window)
+            if not (target_minute <= now.minute < target_minute + 5):
+                return False, 'wrong_minute'
+
+            # Check if already run in this hour today
+            if last.hour == now.hour and last.date() == now.date():
+                return False, 'already_run_this_hour'
+
+            return True, 'data_update_time'
+
+        # Regular interval-based task
+        interval_hours = self.tasks.get(task_name, 24)
+        elapsed_seconds = (now - last).total_seconds()
+
+        if elapsed_seconds >= interval_hours * 3600:
+            return True, 'interval_elapsed'
+
+        return False, 'interval_not_elapsed'
+
+    async def _run_task(self, task_name: str) -> dict:
+        """Run a scheduled task with tracking. Returns task result dict."""
+        result = {}
+
         with track_task_execution(task_name, task_type='scheduler') as tracker:
             if task_name == 'cleanup_stale_processing':
                 result = await self._cleanup_stale_processing()
@@ -149,6 +283,10 @@ class ContinuousSchedulerProcess:
 
             elif task_name == 'cleanup_old_failed':
                 result = await self._cleanup_old_failed()
+                tracker.add_metadata('deleted_count', result.get('deleted', 0))
+
+            elif task_name == 'cleanup_old_retired':
+                result = await self._cleanup_old_retired()
                 tracker.add_metadata('deleted_count', result.get('deleted', 0))
 
             elif task_name == 'generate_daily_report':
@@ -197,8 +335,21 @@ class ContinuousSchedulerProcess:
                 result = await self._cleanup_stale_strategies()
                 tracker.add_metadata('deleted_count', result.get('deleted', 0))
 
+            elif task_name == 'update_pairs':
+                result = await self._update_pairs()
+                tracker.add_metadata('updated', result.get('updated', 0))
+                tracker.add_metadata('new_pairs', result.get('new_pairs', 0))
+
+            elif task_name == 'download_data':
+                result = await self._download_data()
+                tracker.add_metadata('downloaded', result.get('downloaded', 0))
+                tracker.add_metadata('symbols', result.get('symbols', 0))
+
             else:
                 logger.warning(f"Unknown task: {task_name}")
+                result = {'reason': 'unknown_task'}
+
+        return result
 
     async def _cleanup_stale_processing(self) -> dict:
         """Release strategies stuck in processing"""
@@ -227,10 +378,16 @@ class ContinuousSchedulerProcess:
             return {'released': len(stale)}
 
     async def _cleanup_old_failed(self) -> dict:
-        """Clean up old FAILED strategies"""
-        with get_session() as session:
-            cutoff = datetime.now(UTC) - timedelta(days=7)
+        """
+        Clean up old FAILED strategies.
 
+        Deletes FAILED strategies older than max_age_days (configurable, default 7).
+        Runs at the configured run_hour:run_minute (checked by _should_run_task).
+        """
+        max_age_days = getattr(self, 'cleanup_failed_max_age_days', 7)
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+
+        with get_session() as session:
             old_failed = (
                 session.query(Strategy)
                 .filter(
@@ -244,9 +401,48 @@ class ContinuousSchedulerProcess:
                 session.delete(s)
 
             if old_failed:
-                logger.info(f"Cleaned up {len(old_failed)} old failed strategies")
+                logger.info(
+                    f"Cleaned up {len(old_failed)} old FAILED strategies "
+                    f"(older than {max_age_days} days)"
+                )
+            else:
+                logger.debug("No old FAILED strategies to clean")
 
             return {'deleted': len(old_failed)}
+
+    async def _cleanup_old_retired(self) -> dict:
+        """
+        Clean up old RETIRED strategies.
+
+        Deletes RETIRED strategies older than max_age_days (configurable, default 7).
+        RETIRED strategies are those evicted from the pool - safe to delete after retention.
+        Runs at the configured run_hour:run_minute (checked by _should_run_task).
+        """
+        max_age_days = getattr(self, 'cleanup_retired_max_age_days', 7)
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+
+        with get_session() as session:
+            old_retired = (
+                session.query(Strategy)
+                .filter(
+                    Strategy.status == "RETIRED",
+                    Strategy.retired_at < cutoff
+                )
+                .all()
+            )
+
+            for s in old_retired:
+                session.delete(s)
+
+            if old_retired:
+                logger.info(
+                    f"Cleaned up {len(old_retired)} old RETIRED strategies "
+                    f"(older than {max_age_days} days)"
+                )
+            else:
+                logger.debug("No old RETIRED strategies to clean")
+
+            return {'deleted': len(old_retired)}
 
     async def _generate_daily_report(self) -> dict:
         """Generate daily performance report"""
@@ -387,19 +583,9 @@ class ContinuousSchedulerProcess:
         """
         Restart all sixbtc services once per day.
 
-        Only runs at the configured restart_hour. No default - config required.
+        Runs at the configured restart_hour:restart_minute (checked by _should_run_task).
         Skips restarting the scheduler itself (would interrupt this task).
         """
-        # Check if it's the right hour (exact match only)
-        current_hour = datetime.now(UTC).hour
-        target_hour = self.restart_hour  # No default - must be in config
-
-        if current_hour != target_hour:
-            logger.debug(
-                f"Skipping daily restart: current hour {current_hour}, target {target_hour}"
-            )
-            return {'restarted': False, 'reason': 'wrong_hour'}
-
         try:
             logger.info("Starting daily services restart...")
 
@@ -458,18 +644,8 @@ class ContinuousSchedulerProcess:
         Checks for credentials expiring within the renewal window (default 30 days)
         and creates new agent wallets to replace them.
 
-        Only runs at the configured run_hour. No default - config required.
+        Runs at the configured run_hour:run_minute (checked by _should_run_task).
         """
-        # Check if it's the right hour
-        current_hour = datetime.now(UTC).hour
-        target_hour = getattr(self, 'renew_agent_hour', 3)
-
-        if current_hour != target_hour:
-            logger.debug(
-                f"Skipping agent renewal: current hour {current_hour}, target {target_hour}"
-            )
-            return {'renewed': 0, 'failed': 0, 'reason': 'wrong_hour'}
-
         try:
             from src.credentials.agent_manager import AgentManager
 
@@ -505,18 +681,8 @@ class ContinuousSchedulerProcess:
         - Respect master reserve (never drain below threshold)
         - Alert on low/insufficient funds
 
-        Only runs at the configured run_hour. No default - config required.
+        Runs at the configured run_hour:run_minute (checked by _should_run_task).
         """
-        # Check if it's the right hour
-        current_hour = datetime.now(UTC).hour
-        target_hour = getattr(self, 'check_funds_hour', 4)
-
-        if current_hour != target_hour:
-            logger.debug(
-                f"Skipping fund check: current hour {current_hour}, target {target_hour}"
-            )
-            return {'checked': 0, 'topped_up': 0, 'reason': 'wrong_hour'}
-
         try:
             from src.funds.manager import FundManager
 
@@ -553,19 +719,9 @@ class ContinuousSchedulerProcess:
         """
         Clean up old files from /tmp directory.
 
-        Only runs at the configured run_hour.
+        Runs at the configured run_hour:run_minute (checked by _should_run_task).
         Deletes files older than max_age_hours.
         """
-        # Check if it's the right hour
-        current_hour = datetime.now(UTC).hour
-        target_hour = getattr(self, 'cleanup_tmp_hour', 5)
-
-        if current_hour != target_hour:
-            logger.debug(
-                f"Skipping tmp cleanup: current hour {current_hour}, target {target_hour}"
-            )
-            return {'deleted_files': 0, 'deleted_bytes': 0, 'reason': 'wrong_hour'}
-
         deleted_files = 0
         deleted_bytes = 0
         max_age_hours = getattr(self, 'cleanup_tmp_max_age', 24)
@@ -627,18 +783,8 @@ class ContinuousSchedulerProcess:
 
         Results are saved to market_regimes table for use by Unger Generator.
 
-        Only runs at the configured regime_run_hour (default 01:00 UTC).
+        Runs at the configured regime_run_hour (checked by _should_run_task).
         """
-        # Check if it's the right hour
-        current_hour = datetime.now(UTC).hour
-        target_hour = getattr(self, 'regime_run_hour', 1)
-
-        if current_hour != target_hour:
-            logger.debug(
-                f"Skipping regime refresh: current hour {current_hour}, target {target_hour}"
-            )
-            return {'trend': 0, 'reversal': 0, 'mixed': 0, 'reason': 'wrong_hour'}
-
         try:
             from src.generator.regime.detector import refresh_market_regimes
 
@@ -670,17 +816,8 @@ class ContinuousSchedulerProcess:
         Events are useful for debugging and pattern recycling but grow fast.
         Deletes events older than max_age_days (configurable, default 7 days).
 
-        Only runs at the configured run_hour.
+        Runs at the configured run_hour:run_minute (checked by _should_run_task).
         """
-        current_hour = datetime.now(UTC).hour
-        target_hour = getattr(self, 'cleanup_events_hour', 6)
-
-        if current_hour != target_hour:
-            logger.debug(
-                f"Skipping events cleanup: current hour {current_hour}, target {target_hour}"
-            )
-            return {'deleted': 0, 'reason': 'wrong_hour'}
-
         max_age_days = getattr(self, 'cleanup_events_max_age_days', 7)
         cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
 
@@ -732,17 +869,8 @@ class ContinuousSchedulerProcess:
         for max_age_days are likely orphaned (validator/backtester crash, etc.).
         Safe to delete as they will never be processed.
 
-        Only runs at the configured run_hour.
+        Runs at the configured run_hour:run_minute (checked by _should_run_task).
         """
-        current_hour = datetime.now(UTC).hour
-        target_hour = getattr(self, 'cleanup_stale_hour', 6)
-
-        if current_hour != target_hour:
-            logger.debug(
-                f"Skipping stale cleanup: current hour {current_hour}, target {target_hour}"
-            )
-            return {'deleted': 0, 'reason': 'wrong_hour'}
-
         max_age_days = getattr(self, 'cleanup_stale_max_age_days', 1)
         cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
 
@@ -774,6 +902,75 @@ class ContinuousSchedulerProcess:
         except Exception as e:
             logger.error(f"Stale strategies cleanup failed: {e}")
             return {'deleted': 0, 'reason': str(e)}
+
+    async def _update_pairs(self) -> dict:
+        """
+        Update trading pairs from Hyperliquid/Binance.
+
+        Runs at configured update_hours (checked by _should_run_task).
+        """
+        try:
+            from src.data.pairs_updater import PairsUpdater
+
+            logger.info("Starting scheduled pairs update...")
+            updater = PairsUpdater()
+            result = updater.update()
+
+            updated = result.get('updated', 0)
+            new_pairs = result.get('new', 0)
+            total = len(result.get('pair_whitelist', []))
+
+            logger.info(
+                f"Pairs update complete: {total} pairs "
+                f"({new_pairs} new, {updated} updated)"
+            )
+
+            return {
+                'updated': updated,
+                'new_pairs': new_pairs,
+                'total': total,
+            }
+
+        except Exception as e:
+            logger.error(f"Pairs update failed: {e}", exc_info=True)
+            return {'updated': 0, 'reason': str(e)}
+
+    async def _download_data(self) -> dict:
+        """
+        Download OHLCV data for all active pairs.
+
+        Runs at configured update_hours + 5 minutes (checked by _should_run_task).
+        Runs after pairs update to ensure we have the latest pair list.
+        """
+        try:
+            from src.data.binance_downloader import BinanceDataDownloader
+
+            logger.info("Starting scheduled OHLCV data download...")
+            downloader = BinanceDataDownloader()
+
+            # Cleanup obsolete pairs first
+            deleted = downloader.cleanup_obsolete_pairs()
+            if deleted > 0:
+                logger.info(f"Cleaned up {deleted} obsolete pair files")
+
+            # Download all pairs/timeframes
+            downloader.download_for_pairs()
+
+            # Get stats
+            from src.data.coin_registry import get_active_pairs
+            symbols = get_active_pairs()
+
+            logger.info(f"Data download complete: {len(symbols)} symbols")
+
+            return {
+                'downloaded': 1,
+                'symbols': len(symbols),
+                'cleaned': deleted,
+            }
+
+        except Exception as e:
+            logger.error(f"Data download failed: {e}", exc_info=True)
+            return {'downloaded': 0, 'reason': str(e)}
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""

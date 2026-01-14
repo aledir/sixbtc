@@ -51,6 +51,7 @@ def _simulate_portfolio_numba(
     initial_capital: float,
     fee_rate: float,
     slippage: float,
+    min_notional: float,
     funding_cumsum: np.ndarray,     # (n_bars, n_symbols) cumulative funding rates
     breakeven_buffer: float
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
@@ -306,6 +307,10 @@ def _simulate_portfolio_numba(
                 if margin > margin_available:
                     continue  # Skip - insufficient margin
 
+                # Check minimum notional (Hyperliquid requirement)
+                if notional < min_notional:
+                    continue  # Skip - trade too small
+
                 # Calculate SL/TP prices
                 sl_pct = sl_pcts_2d[i, j]
                 tp_pct = tp_pcts_2d[i, j]
@@ -468,6 +473,7 @@ class BacktestEngine:
             # Config object - use dot notation
             self.fee_rate = self.config.get('hyperliquid.fee_rate')
             self.slippage = self.config.get('hyperliquid.slippage')
+            self.min_notional = self.config.get('hyperliquid.min_notional')
             self.initial_capital = self.config.get('backtesting.initial_capital')
             self.breakeven_buffer = self.config.get('risk.trailing.breakeven_buffer_pct')
             risk_config = self.config._raw_config
@@ -475,6 +481,7 @@ class BacktestEngine:
             # Raw dict - navigate manually
             self.fee_rate = self.config.get('hyperliquid', {}).get('fee_rate', 0.0004)
             self.slippage = self.config.get('hyperliquid', {}).get('slippage', 0.0002)
+            self.min_notional = self.config['hyperliquid']['min_notional']  # No default - Fast Fail
             self.initial_capital = self.config.get('backtesting', {}).get('initial_capital', 10000)
             self.breakeven_buffer = self.config.get('risk', {}).get('trailing', {}).get('breakeven_buffer_pct', 0.002)
             risk_config = self.config
@@ -667,6 +674,7 @@ class BacktestEngine:
             self.initial_capital,
             self.fee_rate,
             self.slippage,
+            self.min_notional,
             funding_cumsum,
             self.breakeven_buffer
         )
@@ -1151,6 +1159,10 @@ class BacktestEngine:
                     margin_available = equity - margin_used
                     if margin > margin_available:
                         continue  # Skip - insufficient margin
+
+                    # Check minimum notional (Hyperliquid requirement)
+                    if notional < self.min_notional:
+                        continue  # Skip - trade too small
 
                     # Calculate SL/TP prices (direction-aware, from slipped entry)
                     if direction == 'long':

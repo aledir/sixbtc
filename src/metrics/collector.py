@@ -27,7 +27,7 @@ from sqlalchemy import select, func, and_, or_, desc, cast, Integer, text
 
 from src.config import load_config
 from src.database import get_session, PipelineMetricsSnapshot, Strategy
-from src.database.models import StrategyEvent, BacktestResult
+from src.database.models import StrategyEvent, BacktestResult, ScheduledTaskExecution, Subaccount
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +125,8 @@ class MetricsCollector:
                 retest_stats = self._get_retest_stats_24h(session, window_24h)
                 live_stats = self._get_live_rotation_stats(session, window_24h)
                 combo_stats = self._get_combo_stats_24h(session, window_24h)
+                scheduler_stats = self._get_scheduler_stats(session)
+                subaccount_stats = self._get_subaccount_stats(session)
 
                 # Determine overall status
                 status, issue = self._get_status_and_issue(
@@ -160,6 +162,8 @@ class MetricsCollector:
                     retest_stats=retest_stats,
                     live_stats=live_stats,
                     combo_stats=combo_stats,
+                    scheduler_stats=scheduler_stats,
+                    subaccount_stats=subaccount_stats,
                 )
 
         except Exception as e:
@@ -1725,12 +1729,31 @@ class MetricsCollector:
         }
 
     def _get_live_rotation_stats(self, session, since: datetime) -> Dict[str, Any]:
-        """Get LIVE rotation statistics."""
+        """Get LIVE rotation statistics including diversity."""
+        from collections import defaultdict
+
+        # Get rotator config for diversity limits
+        rotator_config = self.config.get('rotator', {})
+        selection_config = rotator_config.get('selection', {})
+        max_per_type = selection_config.get('max_per_type', 3)
+        max_per_timeframe = selection_config.get('max_per_timeframe', 3)
+        max_per_direction = selection_config.get('max_per_direction', 5)
+        min_pool_size = rotator_config.get('min_pool_size', 0)
+
         # Current LIVE count
         live_count = session.execute(
             select(func.count(Strategy.id))
             .where(Strategy.status == 'LIVE')
         ).scalar() or 0
+
+        # ACTIVE count (for pool_ready check)
+        active_count = session.execute(
+            select(func.count(Strategy.id))
+            .where(Strategy.status == 'ACTIVE')
+        ).scalar() or 0
+
+        # Pool ready check
+        pool_ready = active_count >= min_pool_size if min_pool_size > 0 else True
 
         # Deployed in last 24h
         deployed_24h = session.execute(
@@ -1752,26 +1775,366 @@ class MetricsCollector:
             ))
         ).scalar() or 0
 
-        # Average age of LIVE strategies (days)
-        avg_age_result = session.execute(
-            select(func.avg(
-                func.extract('epoch', func.now() - Strategy.live_since) / 86400
-            ))
-            .where(and_(
-                Strategy.status == 'LIVE',
-                Strategy.live_since.isnot(None)
-            ))
-        ).scalar()
+        # Get LIVE strategies for diversity and avg calculations
+        live_strategies = session.execute(
+            select(Strategy)
+            .where(Strategy.status == 'LIVE')
+        ).scalars().all()
 
-        avg_age = float(avg_age_result) if avg_age_result else None
+        # Average age of LIVE strategies (days)
+        avg_age = None
+        if live_strategies:
+            ages = []
+            for s in live_strategies:
+                if s.live_since:
+                    age_seconds = (datetime.now(UTC) - s.live_since.replace(tzinfo=UTC)).total_seconds()
+                    ages.append(age_seconds / 86400)
+            if ages:
+                avg_age = sum(ages) / len(ages)
+
+        # Average score of LIVE strategies
+        avg_score = None
+        if live_strategies:
+            scores = [s.score_backtest for s in live_strategies if s.score_backtest is not None]
+            if scores:
+                avg_score = sum(scores) / len(scores)
+
+        # Diversity stats for LIVE strategies
+        type_counts = defaultdict(int)
+        tf_counts = defaultdict(int)
+        dir_counts = defaultdict(int)
+
+        for s in live_strategies:
+            if s.strategy_type:
+                type_counts[s.strategy_type] += 1
+            if s.optimal_timeframe:
+                tf_counts[s.optimal_timeframe] += 1
+            # Detect direction from code
+            direction = self._detect_direction(s.code) if s.code else 'LONG'
+            dir_counts[direction] += 1
 
         return {
+            # Rotation stats
             'live': live_count,
             'limit': self.limit_live,
+            'slots_free': max(0, self.limit_live - live_count),
+            'active_count': active_count,
+            'min_pool_size': min_pool_size,
+            'pool_ready': pool_ready,
             'deployed_24h': deployed_24h,
             'retired_24h': retired_24h,
+            # LIVE stats
             'avg_age_days': avg_age,
+            'avg_score': avg_score,
+            # Diversity stats
+            'diversity': {
+                'types': {'unique': len(type_counts), 'max': max_per_type},
+                'timeframes': {'unique': len(tf_counts), 'max': max_per_timeframe},
+                'directions': {'unique': len(dir_counts), 'max': max_per_direction},
+            },
+            'type_distribution': dict(type_counts),
+            'timeframe_distribution': dict(tf_counts),
+            'direction_distribution': dict(dir_counts),
         }
+
+    def _detect_direction(self, code: str) -> str:
+        """Detect trading direction from strategy code."""
+        if not code:
+            return "LONG"
+
+        code_lower = code.lower()
+
+        # Check for explicit BIDI/BIDIR
+        if "direction='bidi'" in code_lower or 'direction="bidi"' in code_lower:
+            return "BIDIR"
+
+        has_long = "direction='long'" in code_lower or 'direction="long"' in code_lower
+        has_short = "direction='short'" in code_lower or 'direction="short"' in code_lower
+
+        if has_long and has_short:
+            return "BIDIR"
+        elif has_short:
+            return "SHORT"
+        return "LONG"
+
+    def _get_subaccount_stats(self, session) -> List[Dict[str, Any]]:
+        """
+        Get statistics for each active subaccount.
+
+        Returns list of dicts with subaccount metrics for logging.
+        """
+        # Query subaccounts with their assigned strategies
+        subaccounts = (
+            session.query(Subaccount, Strategy)
+            .outerjoin(Strategy, Subaccount.strategy_id == Strategy.id)
+            .filter(Subaccount.status == 'ACTIVE')
+            .order_by(Subaccount.id)
+            .all()
+        )
+
+        result = []
+        now = datetime.now(UTC)
+        for sub, strategy in subaccounts:
+            # Calculate rpnl percentage
+            allocated = sub.allocated_capital or 0
+            total_pnl = sub.total_pnl or 0
+            rpnl_pct = (total_pnl / allocated * 100) if allocated > 0 else 0
+
+            # Calculate strategy uptime from live_since
+            uptime_days = None
+            if strategy and strategy.live_since:
+                live_since = strategy.live_since
+                if live_since.tzinfo is None:
+                    live_since = live_since.replace(tzinfo=UTC)
+                uptime_days = (now - live_since).total_seconds() / 86400
+
+            result.append({
+                'id': sub.id,
+                'balance': sub.current_balance or 0,
+                'strategy_name': strategy.name if strategy else None,
+                'uptime_days': uptime_days,
+                'rpnl': total_pnl,
+                'rpnl_pct': rpnl_pct,
+                'upnl': sub.unrealized_pnl or 0,
+                'positions': sub.open_positions_count or 0,
+                'dd_pct': (sub.current_drawdown or 0) * 100,
+                'wr_pct': (sub.win_rate or 0) * 100,
+            })
+
+        return result
+
+    def _get_scheduler_stats(self, session) -> Dict[str, Any]:
+        """
+        Get scheduler task execution statistics.
+
+        Returns dict with task stats including last run, status, and next scheduled run.
+        Tasks are ordered according to PIPELINE_AUX.md schedule.
+        """
+        # Get configs
+        scheduler_config = self.config.get('scheduler', {})
+        tasks_config = scheduler_config.get('tasks', {})
+        data_scheduler_config = self.config.get('data_scheduler', {})
+        regime_config = self.config.get('regime', {})
+
+        # Build ordered list of ALL scheduler tasks (per PIPELINE_AUX.md)
+        # Order: fixed-schedule (01:xx), data-scheduler (02:xx), interval-based
+        task_list = []
+
+        # 1. Fixed-schedule tasks (01:00-01:50 UTC)
+        restart_cfg = tasks_config.get('daily_restart_services', {})
+        if restart_cfg.get('enabled', False):
+            task_list.append({
+                'name': 'daily_restart_services',
+                'interval_hours': 24,
+                'run_hour': restart_cfg.get('restart_hour', 1),
+                'run_minute': restart_cfg.get('restart_minute', 0),
+            })
+
+        if regime_config.get('enabled', False):
+            task_list.append({
+                'name': 'refresh_market_regimes',
+                'interval_hours': 24,
+                'run_hour': 1,
+                'run_minute': 0,
+            })
+
+        renew_cfg = tasks_config.get('renew_agent_wallets', {})
+        if renew_cfg.get('enabled', False):
+            task_list.append({
+                'name': 'renew_agent_wallets',
+                'interval_hours': 24,
+                'run_hour': renew_cfg.get('run_hour', 1),
+                'run_minute': renew_cfg.get('run_minute', 10),
+            })
+
+        funds_cfg = tasks_config.get('check_subaccount_funds', {})
+        if funds_cfg.get('enabled', False):
+            task_list.append({
+                'name': 'check_subaccount_funds',
+                'interval_hours': 24,
+                'run_hour': funds_cfg.get('run_hour', 1),
+                'run_minute': funds_cfg.get('run_minute', 20),
+            })
+
+        tmp_cfg = tasks_config.get('cleanup_tmp_dir', {})
+        if tmp_cfg.get('enabled', False):
+            task_list.append({
+                'name': 'cleanup_tmp_dir',
+                'interval_hours': 24,
+                'run_hour': tmp_cfg.get('run_hour', 1),
+                'run_minute': tmp_cfg.get('run_minute', 30),
+            })
+
+        events_cfg = tasks_config.get('cleanup_old_events', {})
+        if events_cfg.get('enabled', False):
+            task_list.append({
+                'name': 'cleanup_old_events',
+                'interval_hours': 24,
+                'run_hour': events_cfg.get('run_hour', 1),
+                'run_minute': events_cfg.get('run_minute', 40),
+            })
+
+        stale_cfg = tasks_config.get('cleanup_stale_strategies', {})
+        if stale_cfg.get('enabled', False):
+            task_list.append({
+                'name': 'cleanup_stale_strategies',
+                'interval_hours': 24,
+                'run_hour': stale_cfg.get('run_hour', 1),
+                'run_minute': stale_cfg.get('run_minute', 50),
+            })
+
+        failed_cfg = tasks_config.get('cleanup_old_failed', {})
+        if failed_cfg.get('enabled', False):
+            task_list.append({
+                'name': 'cleanup_old_failed',
+                'interval_hours': 24,
+                'run_hour': failed_cfg.get('run_hour', 2),
+                'run_minute': failed_cfg.get('run_minute', 0),
+            })
+
+        retired_cfg = tasks_config.get('cleanup_old_retired', {})
+        if retired_cfg.get('enabled', False):
+            task_list.append({
+                'name': 'cleanup_old_retired',
+                'interval_hours': 24,
+                'run_hour': retired_cfg.get('run_hour', 2),
+                'run_minute': retired_cfg.get('run_minute', 10),
+            })
+
+        # 2. Data scheduler tasks (separate schedules)
+        if data_scheduler_config.get('enabled', False):
+            task_list.append({
+                'name': 'update_pairs',
+                'interval_hours': 12,
+                'run_hours': data_scheduler_config.get('update_pairs_hours', [1, 13]),
+                'run_minute': data_scheduler_config.get('update_pairs_minute', 45),
+            })
+            task_list.append({
+                'name': 'download_data',
+                'interval_hours': 12,
+                'run_hours': data_scheduler_config.get('download_data_hours', [2, 14]),
+                'run_minute': data_scheduler_config.get('download_data_minute', 0),
+            })
+
+        # 3. Interval-based tasks (always enabled - core tasks)
+        zombie_cfg = tasks_config.get('cleanup_zombie_processes', {})
+        if zombie_cfg.get('enabled', False):
+            task_list.append({
+                'name': 'cleanup_zombie_processes',
+                'interval_hours': zombie_cfg.get('interval_hours', 3),
+            })
+
+        # Core tasks (always enabled, not in config)
+        task_list.append({
+            'name': 'cleanup_stale_processing',
+            'interval_hours': 0.5,
+        })
+        task_list.append({
+            'name': 'refresh_data_cache',
+            'interval_hours': 4,
+        })
+
+        # Query last execution for each task
+        task_stats = {}
+        total_ok = 0
+        total_tasks = len(task_list)
+        now = datetime.now(UTC)
+
+        for task_info in task_list:
+            task_name = task_info['name']
+
+            # Get most recent execution
+            last_exec = session.execute(
+                select(ScheduledTaskExecution)
+                .where(ScheduledTaskExecution.task_name == task_name)
+                .order_by(ScheduledTaskExecution.started_at.desc())
+                .limit(1)
+            ).scalar()
+
+            if last_exec:
+                last_run = last_exec.started_at
+                status = last_exec.status
+                duration = last_exec.duration_seconds
+                metadata = last_exec.task_metadata or {}
+
+                # Calculate next run based on task type
+                next_run = self._calculate_next_run(task_info, last_run, now)
+
+                # Count OK statuses
+                if status == 'SUCCESS':
+                    total_ok += 1
+
+                task_stats[task_name] = {
+                    'last_run': last_run,
+                    'status': status,
+                    'duration_seconds': duration,
+                    'metadata': metadata,
+                    'next_run': next_run,
+                    'interval_hours': task_info.get('interval_hours', 24),
+                }
+            else:
+                # No execution found - calculate first scheduled run
+                next_run = self._calculate_next_run(task_info, None, now)
+                task_stats[task_name] = {
+                    'last_run': None,
+                    'status': 'NEVER_RUN',
+                    'duration_seconds': None,
+                    'metadata': {},
+                    'next_run': next_run,
+                    'interval_hours': task_info.get('interval_hours', 24),
+                }
+
+        return {
+            'total_ok': total_ok,
+            'total_tasks': total_tasks,
+            'tasks': task_stats,
+        }
+
+    def _calculate_next_run(
+        self,
+        task_info: Dict[str, Any],
+        last_run: Optional[datetime],
+        now: datetime
+    ) -> Optional[datetime]:
+        """
+        Calculate next scheduled run for a task.
+
+        For fixed-schedule tasks: next occurrence of run_hour:run_minute
+        For interval tasks: last_run + interval_hours
+        For data scheduler tasks: next occurrence in update_hours
+        """
+        task_name = task_info['name']
+
+        # Check for fixed schedule (run_hour or restart_hour)
+        run_hour = task_info.get('run_hour') or task_info.get('restart_hour')
+        run_minute = task_info.get('run_minute') or task_info.get('restart_minute', 0)
+
+        if run_hour is not None:
+            # Fixed schedule task - find next occurrence
+            next_run = now.replace(hour=run_hour, minute=run_minute, second=0, microsecond=0)
+            if next_run <= now:
+                # Already passed today, schedule for tomorrow
+                next_run += timedelta(days=1)
+            return next_run
+
+        # Check for multi-hour schedule tasks (data scheduler)
+        run_hours = task_info.get('run_hours')
+        if run_hours:
+            run_minute_multi = task_info.get('run_minute', 0)
+            # Find next hour in run_hours
+            for hour in sorted(run_hours):
+                candidate = now.replace(hour=hour, minute=run_minute_multi, second=0, microsecond=0)
+                if candidate > now:
+                    return candidate
+            # All hours passed today, use first hour tomorrow
+            return now.replace(hour=run_hours[0], minute=run_minute_multi, second=0, microsecond=0) + timedelta(days=1)
+
+        # Interval-based task
+        interval_hours = task_info.get('interval_hours', 24)
+        if last_run:
+            return last_run + timedelta(hours=interval_hours)
+
+        return None
 
     def _get_status_and_issue(
         self,
@@ -1886,6 +2249,8 @@ class MetricsCollector:
         retest_stats: Dict[str, Any],
         live_stats: Dict[str, Any],
         combo_stats: Dict[str, Any],
+        scheduler_stats: Dict[str, Any],
+        subaccount_stats: List[Dict[str, Any]],
     ) -> None:
         """
         Log metrics following the 10-step pipeline structure.
@@ -2282,14 +2647,137 @@ class MetricsCollector:
         logger.info(f'[9/10 POOL] rotation: evicted={retest_stats["evicted"]}, score_below_min={retest_stats["score_below_min"]}')
 
         # =====================================================================
-        # [10/10 LIVE]
+        # [10/10 ROTATION]
         # =====================================================================
         live_count = live_stats["live"]
         live_limit = live_stats["limit"]
-        avg_age_str = f'{live_stats["avg_age_days"]:.1f}d' if live_stats["avg_age_days"] else "--"
+        slots_free = live_stats["slots_free"]
+        active_count = live_stats["active_count"]
+        min_pool_size = live_stats["min_pool_size"]
+        pool_ready = live_stats["pool_ready"]
+        pool_ready_str = "YES" if pool_ready else "NO"
 
-        logger.info(f'[10/10 LIVE] active: {live_count}/{live_limit} (avg_age: {avg_age_str})')
-        logger.info(f'[10/10 LIVE] 24h: deployed={live_stats["deployed_24h"]}, retired={live_stats["retired_24h"]}')
+        logger.info(
+            f'[10/10 ROTATION] slots: {slots_free}/{live_limit} free | '
+            f'pool_ready: {pool_ready_str} ({active_count} >= {min_pool_size})'
+        )
+        logger.info(
+            f'[10/10 ROTATION] 24h: deployed={live_stats["deployed_24h"]}, '
+            f'retired={live_stats["retired_24h"]}'
+        )
+
+        # =====================================================================
+        # [LIVE]
+        # =====================================================================
+        # Trading mode from config
+        dry_run = self.config.get('hyperliquid', {}).get('dry_run', True)
+        mode_str = 'DRY_RUN' if dry_run else 'LIVE'
+
+        avg_age_str = f'{live_stats["avg_age_days"]:.1f}d' if live_stats["avg_age_days"] else "--"
+        avg_score_str = f'{live_stats["avg_score"]:.1f}' if live_stats["avg_score"] else "--"
+
+        logger.info(
+            f'[LIVE] mode={mode_str} | strategies: {live_count} | '
+            f'avg_age={avg_age_str}, avg_score={avg_score_str}'
+        )
+
+        # Diversity stats - clearer format
+        type_dist = live_stats.get("type_distribution", {})
+        tf_dist = live_stats.get("timeframe_distribution", {})
+        dir_dist = live_stats.get("direction_distribution", {})
+
+        n_types = len(type_dist)
+        n_tfs = len(tf_dist)
+        n_dirs = len(dir_dist)
+
+        # Build descriptive strings
+        if n_tfs == 1 and tf_dist:
+            tf_str = f"1 tf (all {list(tf_dist.keys())[0]})"
+        else:
+            tf_str = f"{n_tfs} tfs"
+
+        if n_dirs == 1 and dir_dist:
+            dir_str = f"1 dir (all {list(dir_dist.keys())[0]})"
+        else:
+            dir_str = f"{n_dirs} dirs"
+
+        logger.info(
+            f'[LIVE] diversity: {n_types} types, {tf_str}, {dir_str}'
+        )
+
+        # =====================================================================
+        # [SUB x] - Per-subaccount stats
+        # =====================================================================
+        for sub in subaccount_stats:
+            sub_id = sub['id']
+            balance = sub['balance']
+            strategy = sub['strategy_name'] or '--'
+            uptime_days = sub.get('uptime_days')
+            rpnl = sub['rpnl']
+            rpnl_pct = sub['rpnl_pct']
+            upnl = sub['upnl']
+            positions = sub['positions']
+            dd_pct = sub['dd_pct']
+            wr_pct = sub['wr_pct']
+
+            # Format uptime
+            uptime_str = f'{uptime_days:.1f}d' if uptime_days is not None else '--'
+
+            # Format with signs
+            rpnl_sign = '+' if rpnl >= 0 else ''
+            rpnl_pct_sign = '+' if rpnl_pct >= 0 else ''
+            upnl_sign = '+' if upnl >= 0 else ''
+
+            logger.info(
+                f'[SUB {sub_id}] ${balance:.2f} | {strategy} | up={uptime_str} | '
+                f'rpnl={rpnl_sign}${rpnl:.2f} ({rpnl_pct_sign}{rpnl_pct:.0f}%) | '
+                f'upnl={upnl_sign}${upnl:.2f} | pos={positions} | '
+                f'dd={dd_pct:.0f}% | wr={wr_pct:.0f}%'
+            )
+
+        # =====================================================================
+        # [SCHEDULER]
+        # =====================================================================
+        total_ok = scheduler_stats.get("total_ok", 0)
+        total_tasks = scheduler_stats.get("total_tasks", 0)
+        tasks = scheduler_stats.get("tasks", {})
+
+        logger.info(f'[SCHEDULER] status: {total_ok}/{total_tasks} tasks OK')
+
+        # Format task status lines
+        def fmt_task_time(dt: Optional[datetime]) -> str:
+            if dt is None:
+                return "never"
+            return dt.strftime("%H:%M UTC")
+
+        def fmt_task_status(status: str) -> str:
+            if status == "SUCCESS":
+                return "OK"
+            elif status == "FAILED":
+                return "FAIL"
+            elif status == "NEVER_RUN":
+                return "NEVER"
+            elif status == "RUNNING":
+                return "RUN"
+            return status[:4]
+
+        # Log each task on its own line (order preserved from _get_scheduler_stats per PIPELINE_AUX.md)
+        for task_name, task_info in tasks.items():
+            last_run = fmt_task_time(task_info.get("last_run"))
+            next_run = fmt_task_time(task_info.get("next_run"))
+            status = fmt_task_status(task_info.get("status", "UNKNOWN"))
+            metadata = task_info.get("metadata", {})
+
+            # Build result string from metadata
+            result_parts = []
+            for key, val in metadata.items():
+                if isinstance(val, (int, float)) and key not in ('duration_seconds',):
+                    result_parts.append(f"{key}={val}")
+            result_str = f" ({', '.join(result_parts)})" if result_parts else ""
+
+            logger.info(
+                f'[SCHEDULER] {task_name}: last={last_run}, next={next_run}, status={status}{result_str}'
+            )
 
     # =========================================================================
     # PUBLIC API METHODS (for external use)

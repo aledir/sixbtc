@@ -2,7 +2,7 @@
 Data Scheduler
 
 Scheduled updates for trading pairs and historical OHLCV data.
-Runs at configurable hours (default: 04:00 and 16:00 UTC).
+Runs at configurable hours (default: 02:00 and 14:00 UTC).
 
 Design Principles:
 - KISS: Simple cron-like scheduling
@@ -36,7 +36,7 @@ class DataScheduler:
     2. Download OHLCV data for all pairs/timeframes
     3. Cleanup obsolete pair data
 
-    Schedule: Configurable hours (default 04:00, 16:00 UTC)
+    Schedule: Configurable hours (default 02:00, 14:00 UTC)
     """
 
     def __init__(self, config: Optional[dict] = None):
@@ -52,7 +52,7 @@ class DataScheduler:
 
         # Configuration
         sched_config = self.config.get('data_scheduler', {})
-        self.update_hours = sched_config.get('update_hours', [4, 16])
+        self.update_hours = sched_config.get('update_hours', [2, 14])
         self.enabled = sched_config.get('enabled', True)
 
         # Components (lazy init)
@@ -94,7 +94,7 @@ class DataScheduler:
         """
         Update trading_pairs.json with top pairs by volume.
 
-        Called at scheduled times (e.g., 04:00 UTC).
+        Called at scheduled times (e.g., 02:00 UTC).
         """
         logger.info("Starting scheduled pairs update...")
 

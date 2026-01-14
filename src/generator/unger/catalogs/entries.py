@@ -1044,7 +1044,7 @@ st = ta.supertrend(df["high"], df["low"], df["close"], length={length}, multipli
 st_dir = st[f"SUPERTd_{length}_{mult}"]
 entry_condition = (st_dir.iloc[-1] == 1) and (st_dir.iloc[-2] == -1)''',
         params={"length": [7, 10, 14], "mult": [2.0, 3.0]},
-        lookback_required=20,
+        lookback_required=40,
         indicators_used=["SUPERTREND"],
     ),
     # TRD_02: Supertrend Bearish (SHORT)
@@ -1058,7 +1058,7 @@ st = ta.supertrend(df["high"], df["low"], df["close"], length={length}, multipli
 st_dir = st[f"SUPERTd_{length}_{mult}"]
 entry_condition = (st_dir.iloc[-1] == -1) and (st_dir.iloc[-2] == 1)''',
         params={"length": [7, 10, 14], "mult": [2.0, 3.0]},
-        lookback_required=20,
+        lookback_required=40,
         indicators_used=["SUPERTREND"],
     ),
     # TRD_03: PSAR Bullish Flip (LONG)
@@ -1068,12 +1068,12 @@ entry_condition = (st_dir.iloc[-1] == -1) and (st_dir.iloc[-2] == 1)''',
         category="trend_advanced",
         direction="LONG",
         logic_template='''import pandas_ta as ta
-psar = ta.psar(df["high"], df["low"], df["close"])
+psar = ta.psar(df["high"], df["low"])
 psar_long = psar["PSARl_0.02_0.2"]
 psar_short = psar["PSARs_0.02_0.2"]
 entry_condition = pd.notna(psar_long.iloc[-1]) and pd.notna(psar_short.iloc[-2])''',
         params={},
-        lookback_required=20,
+        lookback_required=40,
         indicators_used=["PSAR"],
     ),
     # TRD_04: PSAR Bearish Flip (SHORT)
@@ -1083,12 +1083,12 @@ entry_condition = pd.notna(psar_long.iloc[-1]) and pd.notna(psar_short.iloc[-2])
         category="trend_advanced",
         direction="SHORT",
         logic_template='''import pandas_ta as ta
-psar = ta.psar(df["high"], df["low"], df["close"])
+psar = ta.psar(df["high"], df["low"])
 psar_long = psar["PSARl_0.02_0.2"]
 psar_short = psar["PSARs_0.02_0.2"]
 entry_condition = pd.notna(psar_short.iloc[-1]) and pd.notna(psar_long.iloc[-2])''',
         params={},
-        lookback_required=20,
+        lookback_required=40,
         indicators_used=["PSAR"],
     ),
     # TRD_05: Ichimoku TK Cross Up (LONG)
@@ -1103,7 +1103,7 @@ tenkan = ichi["ITS_9"]
 kijun = ichi["IKS_26"]
 entry_condition = (tenkan.iloc[-1] > kijun.iloc[-1]) and (tenkan.iloc[-2] <= kijun.iloc[-2])''',
         params={},
-        lookback_required=60,
+        lookback_required=65,
         indicators_used=["ICHIMOKU"],
     ),
     # TRD_06: Ichimoku TK Cross Down (SHORT)
@@ -1118,7 +1118,7 @@ tenkan = ichi["ITS_9"]
 kijun = ichi["IKS_26"]
 entry_condition = (tenkan.iloc[-1] < kijun.iloc[-1]) and (tenkan.iloc[-2] >= kijun.iloc[-2])''',
         params={},
-        lookback_required=60,
+        lookback_required=65,
         indicators_used=["ICHIMOKU"],
     ),
     # TRD_07: Ichimoku Price Above Cloud (LONG)
@@ -1134,7 +1134,7 @@ span_b = ichi["ISB_26"]
 cloud_top = span_a.combine(span_b, max)
 entry_condition = (df["close"].iloc[-1] > cloud_top.iloc[-1]) and (df["close"].iloc[-2] <= cloud_top.iloc[-2])''',
         params={},
-        lookback_required=60,
+        lookback_required=65,
         indicators_used=["ICHIMOKU"],
     ),
     # TRD_08: Ichimoku Price Below Cloud (SHORT)
@@ -1150,7 +1150,7 @@ span_b = ichi["ISB_26"]
 cloud_bottom = span_a.combine(span_b, min)
 entry_condition = (df["close"].iloc[-1] < cloud_bottom.iloc[-1]) and (df["close"].iloc[-2] >= cloud_bottom.iloc[-2])''',
         params={},
-        lookback_required=60,
+        lookback_required=65,
         indicators_used=["ICHIMOKU"],
     ),
     # TRD_09: Aroon Bullish Cross (LONG)
@@ -1165,7 +1165,7 @@ aroon_up = aroon[f"AROONU_{length}"]
 aroon_down = aroon[f"AROOND_{length}"]
 entry_condition = (aroon_up.iloc[-1] > aroon_down.iloc[-1]) and (aroon_up.iloc[-2] <= aroon_down.iloc[-2])''',
         params={"length": [14, 25]},
-        lookback_required=30,
+        lookback_required=40,
         indicators_used=["AROON"],
     ),
     # TRD_10: Aroon Bearish Cross (SHORT)
@@ -1180,7 +1180,7 @@ aroon_up = aroon[f"AROONU_{length}"]
 aroon_down = aroon[f"AROOND_{length}"]
 entry_condition = (aroon_down.iloc[-1] > aroon_up.iloc[-1]) and (aroon_down.iloc[-2] <= aroon_up.iloc[-2])''',
         params={"length": [14, 25]},
-        lookback_required=30,
+        lookback_required=40,
         indicators_used=["AROON"],
     ),
     # TRD_11: Aroon Extreme Up (LONG)
@@ -1194,7 +1194,7 @@ aroon = ta.aroon(df["high"], df["low"], length={length})
 aroon_up = aroon[f"AROONU_{length}"]
 entry_condition = aroon_up.iloc[-1] >= {threshold}''',
         params={"length": [14, 25], "threshold": [90, 100]},
-        lookback_required=30,
+        lookback_required=40,
         indicators_used=["AROON"],
     ),
     # TRD_12: Aroon Extreme Down (SHORT)
@@ -1208,7 +1208,7 @@ aroon = ta.aroon(df["high"], df["low"], length={length})
 aroon_down = aroon[f"AROOND_{length}"]
 entry_condition = aroon_down.iloc[-1] >= {threshold}''',
         params={"length": [14, 25], "threshold": [90, 100]},
-        lookback_required=30,
+        lookback_required=40,
         indicators_used=["AROON"],
     ),
     # TRD_13: Vortex Bullish Cross (LONG)
@@ -1223,7 +1223,7 @@ vip = vortex[f"VTXP_{length}"]
 vim = vortex[f"VTXM_{length}"]
 entry_condition = (vip.iloc[-1] > vim.iloc[-1]) and (vip.iloc[-2] <= vim.iloc[-2])''',
         params={"length": [14, 21]},
-        lookback_required=25,
+        lookback_required=40,
         indicators_used=["VORTEX"],
     ),
     # TRD_14: Vortex Bearish Cross (SHORT)
@@ -1238,7 +1238,7 @@ vip = vortex[f"VTXP_{length}"]
 vim = vortex[f"VTXM_{length}"]
 entry_condition = (vim.iloc[-1] > vip.iloc[-1]) and (vim.iloc[-2] <= vip.iloc[-2])''',
         params={"length": [14, 21]},
-        lookback_required=25,
+        lookback_required=40,
         indicators_used=["VORTEX"],
     ),
     # TRD_15: Choppiness Low (Trending) (BIDI)
@@ -1251,7 +1251,7 @@ entry_condition = (vim.iloc[-1] > vip.iloc[-1]) and (vim.iloc[-2] <= vip.iloc[-2
 chop = ta.chop(df["high"], df["low"], df["close"], length={length})
 entry_condition = chop.iloc[-1] < {threshold}''',
         params={"length": [14], "threshold": [38.2, 40]},
-        lookback_required=20,
+        lookback_required=40,
         indicators_used=["CHOP"],
     ),
     # TRD_16: Chandelier Exit Long (LONG)
@@ -1265,7 +1265,7 @@ ce = ta.chandelier_exit(df["high"], df["low"], df["close"], length={length}, mul
 ce_long = ce.iloc[:, 0]  # CHDLREXTl column (long)
 entry_condition = (df["close"].iloc[-1] > ce_long.iloc[-1]) and (df["close"].iloc[-2] <= ce_long.iloc[-2])''',
         params={"length": [22], "mult": [3.0]},
-        lookback_required=30,
+        lookback_required=40,
         indicators_used=["CHANDELIER"],
     ),
     # TRD_17: Chandelier Exit Short (SHORT)
@@ -1279,7 +1279,7 @@ ce = ta.chandelier_exit(df["high"], df["low"], df["close"], length={length}, mul
 ce_short = ce.iloc[:, 1]  # CHDLREXTs column (short)
 entry_condition = (df["close"].iloc[-1] < ce_short.iloc[-1]) and (df["close"].iloc[-2] >= ce_short.iloc[-2])''',
         params={"length": [22], "mult": [3.0]},
-        lookback_required=30,
+        lookback_required=40,
         indicators_used=["CHANDELIER"],
     ),
     # TRD_18: HMA Trend Up (LONG)
@@ -1292,7 +1292,7 @@ entry_condition = (df["close"].iloc[-1] < ce_short.iloc[-1]) and (df["close"].il
 hma = ta.hma(df["close"], length={length})
 entry_condition = (hma.iloc[-1] > hma.iloc[-2]) and (hma.iloc[-2] <= hma.iloc[-3])''',
         params={"length": [9, 14, 21]},
-        lookback_required=30,
+        lookback_required=40,
         indicators_used=["HMA"],
     ),
     # TRD_19: HMA Trend Down (SHORT)
@@ -1305,7 +1305,7 @@ entry_condition = (hma.iloc[-1] > hma.iloc[-2]) and (hma.iloc[-2] <= hma.iloc[-3
 hma = ta.hma(df["close"], length={length})
 entry_condition = (hma.iloc[-1] < hma.iloc[-2]) and (hma.iloc[-2] >= hma.iloc[-3])''',
         params={"length": [9, 14, 21]},
-        lookback_required=30,
+        lookback_required=40,
         indicators_used=["HMA"],
     ),
     # TRD_20: ALMA Cross Up (LONG)
@@ -1318,7 +1318,7 @@ entry_condition = (hma.iloc[-1] < hma.iloc[-2]) and (hma.iloc[-2] >= hma.iloc[-3
 alma = ta.alma(df["close"], length={length})
 entry_condition = (df["close"].iloc[-1] > alma.iloc[-1]) and (df["close"].iloc[-2] <= alma.iloc[-2])''',
         params={"length": [9, 14, 21]},
-        lookback_required=30,
+        lookback_required=40,
         indicators_used=["ALMA"],
     ),
 ]
@@ -1340,7 +1340,7 @@ tsi = ta.tsi(df["close"], fast={fast}, slow={slow})
 tsi_val = tsi.iloc[:, 0]  # TSI value column
 entry_condition = (tsi_val.iloc[-1] > 0) and (tsi_val.iloc[-2] <= 0)''',
         params={"fast": [13], "slow": [25]},
-        lookback_required=35,
+        lookback_required=50,
         indicators_used=["TSI"],
     ),
     # MOM_02: TSI Cross Zero Down (SHORT)
@@ -1354,7 +1354,7 @@ tsi = ta.tsi(df["close"], fast={fast}, slow={slow})
 tsi_val = tsi.iloc[:, 0]  # TSI value column
 entry_condition = (tsi_val.iloc[-1] < 0) and (tsi_val.iloc[-2] >= 0)''',
         params={"fast": [13], "slow": [25]},
-        lookback_required=35,
+        lookback_required=50,
         indicators_used=["TSI"],
     ),
     # MOM_03: TSI Cross Signal Up (LONG)
@@ -1369,7 +1369,7 @@ tsi_val = tsi.iloc[:, 0]  # TSI value column
 tsi_sig = tsi.iloc[:, 1]  # TSI signal column
 entry_condition = (tsi_val.iloc[-1] > tsi_sig.iloc[-1]) and (tsi_val.iloc[-2] <= tsi_sig.iloc[-2])''',
         params={"fast": [13], "slow": [25]},
-        lookback_required=35,
+        lookback_required=50,
         indicators_used=["TSI"],
     ),
     # MOM_04: TSI Cross Signal Down (SHORT)
@@ -1384,7 +1384,7 @@ tsi_val = tsi.iloc[:, 0]  # TSI value column
 tsi_sig = tsi.iloc[:, 1]  # TSI signal column
 entry_condition = (tsi_val.iloc[-1] < tsi_sig.iloc[-1]) and (tsi_val.iloc[-2] >= tsi_sig.iloc[-2])''',
         params={"fast": [13], "slow": [25]},
-        lookback_required=35,
+        lookback_required=50,
         indicators_used=["TSI"],
     ),
     # MOM_05: Fisher Transform Cross Up (LONG)
@@ -1399,7 +1399,7 @@ fish = fisher[f"FISHERT_{length}_1"]
 fish_sig = fisher[f"FISHERTs_{length}_1"]
 entry_condition = (fish.iloc[-1] > fish_sig.iloc[-1]) and (fish.iloc[-2] <= fish_sig.iloc[-2])''',
         params={"length": [9, 14]},
-        lookback_required=20,
+        lookback_required=40,
         indicators_used=["FISHER"],
     ),
     # MOM_06: Fisher Transform Cross Down (SHORT)
@@ -1414,7 +1414,7 @@ fish = fisher[f"FISHERT_{length}_1"]
 fish_sig = fisher[f"FISHERTs_{length}_1"]
 entry_condition = (fish.iloc[-1] < fish_sig.iloc[-1]) and (fish.iloc[-2] >= fish_sig.iloc[-2])''',
         params={"length": [9, 14]},
-        lookback_required=20,
+        lookback_required=40,
         indicators_used=["FISHER"],
     ),
     # MOM_07: CMO Oversold (LONG)
@@ -1427,7 +1427,7 @@ entry_condition = (fish.iloc[-1] < fish_sig.iloc[-1]) and (fish.iloc[-2] >= fish
 cmo = ta.cmo(df["close"], length={length})
 entry_condition = cmo.iloc[-1] < -{threshold}''',
         params={"length": [14, 20], "threshold": [40, 50]},
-        lookback_required=25,
+        lookback_required=40,
         indicators_used=["CMO"],
     ),
     # MOM_08: CMO Overbought (SHORT)
@@ -1440,7 +1440,7 @@ entry_condition = cmo.iloc[-1] < -{threshold}''',
 cmo = ta.cmo(df["close"], length={length})
 entry_condition = cmo.iloc[-1] > {threshold}''',
         params={"length": [14, 20], "threshold": [40, 50]},
-        lookback_required=25,
+        lookback_required=40,
         indicators_used=["CMO"],
     ),
     # MOM_09: Ultimate Oscillator Oversold (LONG)
@@ -1453,7 +1453,7 @@ entry_condition = cmo.iloc[-1] > {threshold}''',
 uo = ta.uo(df["high"], df["low"], df["close"])
 entry_condition = uo.iloc[-1] < {threshold}''',
         params={"threshold": [30, 35]},
-        lookback_required=35,
+        lookback_required=40,
         indicators_used=["UO"],
     ),
     # MOM_10: Ultimate Oscillator Overbought (SHORT)
@@ -1466,7 +1466,7 @@ entry_condition = uo.iloc[-1] < {threshold}''',
 uo = ta.uo(df["high"], df["low"], df["close"])
 entry_condition = uo.iloc[-1] > {threshold}''',
         params={"threshold": [65, 70]},
-        lookback_required=35,
+        lookback_required=40,
         indicators_used=["UO"],
     ),
     # MOM_11: Squeeze Pro Fire Long (LONG)
@@ -1482,7 +1482,7 @@ in_squeeze = sqz_val.iloc[-2] != 0
 firing_long = sqz_val.iloc[-1] > 0
 entry_condition = in_squeeze and firing_long''',
         params={},
-        lookback_required=30,
+        lookback_required=35,
         indicators_used=["SQUEEZE"],
     ),
     # MOM_12: Squeeze Pro Fire Short (SHORT)
@@ -1498,7 +1498,7 @@ in_squeeze = sqz_val.iloc[-2] != 0
 firing_short = sqz_val.iloc[-1] < 0
 entry_condition = in_squeeze and firing_short''',
         params={},
-        lookback_required=30,
+        lookback_required=35,
         indicators_used=["SQUEEZE"],
     ),
     # MOM_13: Stochastic RSI Oversold (LONG)
@@ -1512,7 +1512,7 @@ stochrsi = ta.stochrsi(df["close"], length={length}, rsi_length={length})
 stochrsi_k = stochrsi[f"STOCHRSIk_{length}_{length}_3_3"]
 entry_condition = stochrsi_k.iloc[-1] < {threshold}''',
         params={"length": [14], "threshold": [10, 20]},
-        lookback_required=25,
+        lookback_required=40,
         indicators_used=["STOCHRSI"],
     ),
     # MOM_14: Stochastic RSI Overbought (SHORT)
@@ -1526,7 +1526,7 @@ stochrsi = ta.stochrsi(df["close"], length={length}, rsi_length={length})
 stochrsi_k = stochrsi[f"STOCHRSIk_{length}_{length}_3_3"]
 entry_condition = stochrsi_k.iloc[-1] > {threshold}''',
         params={"length": [14], "threshold": [80, 90]},
-        lookback_required=25,
+        lookback_required=40,
         indicators_used=["STOCHRSI"],
     ),
     # MOM_15: Stochastic RSI Cross Up (LONG)
@@ -1541,7 +1541,7 @@ stochrsi_k = stochrsi[f"STOCHRSIk_{length}_{length}_3_3"]
 stochrsi_d = stochrsi[f"STOCHRSId_{length}_{length}_3_3"]
 entry_condition = (stochrsi_k.iloc[-1] > stochrsi_d.iloc[-1]) and (stochrsi_k.iloc[-2] <= stochrsi_d.iloc[-2]) and (stochrsi_k.iloc[-1] < 50)''',
         params={"length": [14]},
-        lookback_required=25,
+        lookback_required=40,
         indicators_used=["STOCHRSI"],
     ),
     # MOM_16: Stochastic RSI Cross Down (SHORT)
@@ -1556,7 +1556,7 @@ stochrsi_k = stochrsi[f"STOCHRSIk_{length}_{length}_3_3"]
 stochrsi_d = stochrsi[f"STOCHRSId_{length}_{length}_3_3"]
 entry_condition = (stochrsi_k.iloc[-1] < stochrsi_d.iloc[-1]) and (stochrsi_k.iloc[-2] >= stochrsi_d.iloc[-2]) and (stochrsi_k.iloc[-1] > 50)''',
         params={"length": [14]},
-        lookback_required=25,
+        lookback_required=40,
         indicators_used=["STOCHRSI"],
     ),
     # MOM_17: RVGI Cross Up (LONG)
@@ -1571,7 +1571,7 @@ rvgi_val = rvgi[f"RVGI_{length}_4"]
 rvgi_sig = rvgi[f"RVGIs_{length}_4"]
 entry_condition = (rvgi_val.iloc[-1] > rvgi_sig.iloc[-1]) and (rvgi_val.iloc[-2] <= rvgi_sig.iloc[-2])''',
         params={"length": [10, 14]},
-        lookback_required=20,
+        lookback_required=50,
         indicators_used=["RVGI"],
     ),
     # MOM_18: RVGI Cross Down (SHORT)
@@ -1586,7 +1586,7 @@ rvgi_val = rvgi[f"RVGI_{length}_4"]
 rvgi_sig = rvgi[f"RVGIs_{length}_4"]
 entry_condition = (rvgi_val.iloc[-1] < rvgi_sig.iloc[-1]) and (rvgi_val.iloc[-2] >= rvgi_sig.iloc[-2])''',
         params={"length": [10, 14]},
-        lookback_required=20,
+        lookback_required=50,
         indicators_used=["RVGI"],
     ),
     # MOM_19: QQE Long Signal (LONG)
@@ -1600,7 +1600,7 @@ qqe = ta.qqe(df["close"], length={length})
 qqe_long = qqe.iloc[:, 2]  # QQEl column (long signal)
 entry_condition = qqe_long.iloc[-1] == 1''',
         params={"length": [14]},
-        lookback_required=30,
+        lookback_required=85,
         indicators_used=["QQE"],
     ),
     # MOM_20: QQE Short Signal (SHORT)
@@ -1614,7 +1614,7 @@ qqe = ta.qqe(df["close"], length={length})
 qqe_short = qqe.iloc[:, 3]  # QQEs column (short signal)
 entry_condition = qqe_short.iloc[-1] == 1''',
         params={"length": [14]},
-        lookback_required=30,
+        lookback_required=85,
         indicators_used=["QQE"],
     ),
     # MOM_21: Inertia Rising (LONG)
@@ -1627,7 +1627,7 @@ entry_condition = qqe_short.iloc[-1] == 1''',
 inertia = ta.inertia(df["close"], df["high"], df["low"], length={length})
 entry_condition = (inertia.iloc[-1] > inertia.iloc[-2]) and (inertia.iloc[-2] <= inertia.iloc[-3]) and (inertia.iloc[-1] > 50)''',
         params={"length": [14, 20]},
-        lookback_required=30,
+        lookback_required=60,
         indicators_used=["INERTIA"],
     ),
     # MOM_22: Inertia Falling (SHORT)
@@ -1640,7 +1640,7 @@ entry_condition = (inertia.iloc[-1] > inertia.iloc[-2]) and (inertia.iloc[-2] <=
 inertia = ta.inertia(df["close"], df["high"], df["low"], length={length})
 entry_condition = (inertia.iloc[-1] < inertia.iloc[-2]) and (inertia.iloc[-2] >= inertia.iloc[-3]) and (inertia.iloc[-1] < 50)''',
         params={"length": [14, 20]},
-        lookback_required=30,
+        lookback_required=60,
         indicators_used=["INERTIA"],
     ),
     # MOM_23: RSX Oversold (LONG)
@@ -1653,7 +1653,7 @@ entry_condition = (inertia.iloc[-1] < inertia.iloc[-2]) and (inertia.iloc[-2] >=
 rsx = ta.rsx(df["close"], length={length})
 entry_condition = rsx.iloc[-1] < {threshold}''',
         params={"length": [14], "threshold": [20, 30]},
-        lookback_required=20,
+        lookback_required=40,
         indicators_used=["RSX"],
     ),
     # MOM_24: RSX Overbought (SHORT)
@@ -1666,7 +1666,7 @@ entry_condition = rsx.iloc[-1] < {threshold}''',
 rsx = ta.rsx(df["close"], length={length})
 entry_condition = rsx.iloc[-1] > {threshold}''',
         params={"length": [14], "threshold": [70, 80]},
-        lookback_required=20,
+        lookback_required=40,
         indicators_used=["RSX"],
     ),
 ]
@@ -1687,7 +1687,7 @@ VOLUME_FLOW_ENTRIES = [
 cmf = ta.cmf(df["high"], df["low"], df["close"], df["volume"], length={length})
 entry_condition = (cmf.iloc[-1] > {threshold}) and (cmf.iloc[-2] <= {threshold})''',
         params={"length": [20, 21], "threshold": [0, 0.05]},
-        lookback_required=25,
+        lookback_required=40,
         indicators_used=["CMF"],
     ),
     # VFL_02: CMF Negative Flow (SHORT)
@@ -1700,7 +1700,7 @@ entry_condition = (cmf.iloc[-1] > {threshold}) and (cmf.iloc[-2] <= {threshold})
 cmf = ta.cmf(df["high"], df["low"], df["close"], df["volume"], length={length})
 entry_condition = (cmf.iloc[-1] < -{threshold}) and (cmf.iloc[-2] >= -{threshold})''',
         params={"length": [20, 21], "threshold": [0, 0.05]},
-        lookback_required=25,
+        lookback_required=40,
         indicators_used=["CMF"],
     ),
     # VFL_03: EFI Bullish (LONG)
@@ -1713,7 +1713,7 @@ entry_condition = (cmf.iloc[-1] < -{threshold}) and (cmf.iloc[-2] >= -{threshold
 efi = ta.efi(df["close"], df["volume"], length={length})
 entry_condition = (efi.iloc[-1] > 0) and (efi.iloc[-2] <= 0)''',
         params={"length": [13]},
-        lookback_required=20,
+        lookback_required=40,
         indicators_used=["EFI"],
     ),
     # VFL_04: EFI Bearish (SHORT)
@@ -1726,7 +1726,7 @@ entry_condition = (efi.iloc[-1] > 0) and (efi.iloc[-2] <= 0)''',
 efi = ta.efi(df["close"], df["volume"], length={length})
 entry_condition = (efi.iloc[-1] < 0) and (efi.iloc[-2] >= 0)''',
         params={"length": [13]},
-        lookback_required=20,
+        lookback_required=40,
         indicators_used=["EFI"],
     ),
     # VFL_05: KVO Bullish Cross (LONG)
@@ -1741,7 +1741,7 @@ kvo_val = kvo["KVO_34_55_13"]
 kvo_sig = kvo["KVOs_34_55_13"]
 entry_condition = (kvo_val.iloc[-1] > kvo_sig.iloc[-1]) and (kvo_val.iloc[-2] <= kvo_sig.iloc[-2])''',
         params={},
-        lookback_required=60,
+        lookback_required=80,
         indicators_used=["KVO"],
     ),
     # VFL_06: KVO Bearish Cross (SHORT)
@@ -1756,7 +1756,7 @@ kvo_val = kvo["KVO_34_55_13"]
 kvo_sig = kvo["KVOs_34_55_13"]
 entry_condition = (kvo_val.iloc[-1] < kvo_sig.iloc[-1]) and (kvo_val.iloc[-2] >= kvo_sig.iloc[-2])''',
         params={},
-        lookback_required=60,
+        lookback_required=80,
         indicators_used=["KVO"],
     ),
     # VFL_07: PVO Bullish (LONG)
@@ -1771,7 +1771,7 @@ pvo_val = pvo["PVO_12_26_9"]
 pvo_sig = pvo["PVOs_12_26_9"]
 entry_condition = (pvo_val.iloc[-1] > pvo_sig.iloc[-1]) and (pvo_val.iloc[-2] <= pvo_sig.iloc[-2])''',
         params={},
-        lookback_required=35,
+        lookback_required=40,
         indicators_used=["PVO"],
     ),
     # VFL_08: PVO Bearish (SHORT)
@@ -1786,7 +1786,7 @@ pvo_val = pvo["PVO_12_26_9"]
 pvo_sig = pvo["PVOs_12_26_9"]
 entry_condition = (pvo_val.iloc[-1] < pvo_sig.iloc[-1]) and (pvo_val.iloc[-2] >= pvo_sig.iloc[-2])''',
         params={},
-        lookback_required=35,
+        lookback_required=40,
         indicators_used=["PVO"],
     ),
     # VFL_09: NVI Rising (LONG)
@@ -1831,7 +1831,7 @@ obv_min = aobv["OBV_min_2"]
 obv_max = aobv["OBV_max_2"]
 entry_condition = (obv.iloc[-1] > obv_max.iloc[-1]) and (obv.iloc[-2] <= obv_max.iloc[-2])''',
         params={},
-        lookback_required=10,
+        lookback_required=40,
         indicators_used=["AOBV"],
     ),
     # VFL_12: AOBV Cross Down (SHORT)
@@ -1846,7 +1846,7 @@ obv = aobv["OBV"]
 obv_min = aobv["OBV_min_2"]
 entry_condition = (obv.iloc[-1] < obv_min.iloc[-1]) and (obv.iloc[-2] >= obv_min.iloc[-2])''',
         params={},
-        lookback_required=10,
+        lookback_required=40,
         indicators_used=["AOBV"],
     ),
     # VFL_13: AD Line Rising (LONG)
@@ -1860,7 +1860,7 @@ ad = ta.ad(df["high"], df["low"], df["close"], df["volume"])
 ad_ma = ad.rolling({length}).mean()
 entry_condition = (ad.iloc[-1] > ad_ma.iloc[-1]) and (ad.iloc[-2] <= ad_ma.iloc[-2])''',
         params={"length": [10, 20]},
-        lookback_required=25,
+        lookback_required=40,
         indicators_used=["AD"],
     ),
     # VFL_14: AD Line Falling (SHORT)
@@ -1874,7 +1874,7 @@ ad = ta.ad(df["high"], df["low"], df["close"], df["volume"])
 ad_ma = ad.rolling({length}).mean()
 entry_condition = (ad.iloc[-1] < ad_ma.iloc[-1]) and (ad.iloc[-2] >= ad_ma.iloc[-2])''',
         params={"length": [10, 20]},
-        lookback_required=25,
+        lookback_required=40,
         indicators_used=["AD"],
     ),
     # VFL_15: ADOSC Bullish (LONG)
@@ -1887,7 +1887,7 @@ entry_condition = (ad.iloc[-1] < ad_ma.iloc[-1]) and (ad.iloc[-2] >= ad_ma.iloc[
 adosc = ta.adosc(df["high"], df["low"], df["close"], df["volume"])
 entry_condition = (adosc.iloc[-1] > 0) and (adosc.iloc[-2] <= 0)''',
         params={},
-        lookback_required=15,
+        lookback_required=40,
         indicators_used=["ADOSC"],
     ),
     # VFL_16: ADOSC Bearish (SHORT)
@@ -1900,7 +1900,7 @@ entry_condition = (adosc.iloc[-1] > 0) and (adosc.iloc[-2] <= 0)''',
 adosc = ta.adosc(df["high"], df["low"], df["close"], df["volume"])
 entry_condition = (adosc.iloc[-1] < 0) and (adosc.iloc[-2] >= 0)''',
         params={},
-        lookback_required=15,
+        lookback_required=40,
         indicators_used=["ADOSC"],
     ),
 ]

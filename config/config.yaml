@@ -127,6 +127,17 @@ hyperliquid:
     fills_lookback_days: 7  # How far back to look for fills
 
 # ==============================================================================
+# FUNDING RATES (Hyperliquid Perpetuals)
+# ==============================================================================
+# Funding rates are applied hourly on Hyperliquid.
+# This data is used in backtesting for more realistic PnL calculations.
+funding:
+  enabled: true                    # Enable funding rate modeling in backtest
+  backfill_days: 180               # Days of historical funding to download
+  # Fallback rate when data is missing (not used if data available)
+  fallback_hourly_rate: 0.0001     # 0.01% per hour = ~0.24%/day
+
+# ==============================================================================
 # RISK MANAGEMENT
 # ==============================================================================
 risk:
@@ -139,10 +150,22 @@ risk:
     max_open_positions_per_subaccount: 10  # Increased from 6
 
   emergency:
-    max_portfolio_drawdown: 0.30
-    max_daily_loss: 0.10
-    max_subaccount_drawdown: 0.25
-    max_consecutive_losses: 5
+    # Thresholds
+    max_portfolio_drawdown: 0.20      # 20% portfolio DD → force_close
+    max_daily_loss: 0.10              # 10% daily loss → halt_entries
+    max_subaccount_drawdown: 0.25     # 25% subaccount DD → halt_entries
+    max_consecutive_losses: 10        # 10 consecutive losses → halt_entries
+    data_stale_seconds: 120           # 2 min stale data → halt_entries
+
+    # Recovery conditions
+    rotation_loss_threshold: 0.00     # Rotate strategies with loss >= 0% (all losing)
+
+  emergency_cooldowns:
+    portfolio_dd_hours: 48            # 48h cooldown for portfolio DD (+ rotation)
+    strategy_hours: 24                # 24h cooldown for consecutive losses
+    # daily_loss: auto-reset at midnight UTC (no cooldown config needed)
+    # subaccount_dd: reset on rotation (no cooldown config needed)
+    # data_stale: reset when data valid (no cooldown config needed)
 
   # Trailing stop configuration
   trailing:
@@ -211,6 +234,17 @@ generation:
     unger:
       enabled: true            # UngStrat_* - Regime-coherent strategies (Unger method)
       min_regime_strength: 0.5 # Minimum regime strength to generate (uses regime.min_strength)
+
+      # Genetic evolution settings (UggStrat_*)
+      genetic:
+        enabled: true            # Enable genetic evolution for unger
+        min_pool_score: 40       # Min score to enter genetic pool
+        min_pool_size: 50        # Min ACTIVE unger strategies before genetic starts
+        smart_ratio: 0.70        # 70% smart when both available
+        genetic_ratio: 0.30      # 30% genetic when both available
+        tournament_size: 3       # Tournament selection size
+        mutation_rate: 0.20      # 20% mutation probability
+        crossover_rate: 0.80     # 80% crossover probability
     pandas_ta:
       enabled: true            # PtaStrat_* - Pandas-TA indicator combinations
       min_regime_strength: 0.5 # Minimum regime strength to generate
@@ -354,9 +388,10 @@ backtesting:
     out_of_sample: [60,  45,  30, 15]  # For 60d OOS period
 
   # Out-of-sample validation thresholds
+  # Note: OOS uses same thresholds as IS (min_sharpe, min_win_rate, etc.)
+  # Only degradation and recency_weight are OOS-specific
   out_of_sample:
     max_degradation: 0.50    # Max 50% degradation from IS to OOS
-    min_sharpe: 0.0          # OOS Sharpe must be positive
     recency_weight: 0.60     # Weight for OOS score in final ranking
 
   # Walk-Forward Validation with FIXED parameters
@@ -428,9 +463,11 @@ monitor:
   # Retirement criteria (any triggers retirement)
   retirement:
     min_score: 35                # Score < 35 = retire (closer to entry threshold)
-    max_degradation: 0.40        # 40% worse than backtest = retire
+    max_score_degradation: 0.40  # 40% worse than backtest = retire
     max_drawdown: 0.25           # 25% live drawdown = retire ($25 max loss on $100)
     min_trades: 10               # Min trades before evaluating
+    max_consecutive_losses: 10   # 10+ consecutive losses = regime change signal
+    max_trades_degradation: 0.50 # 50%+ fewer trades than backtest = problem
 
   # Live scoring (for calculating score_live)
   live_scoring:
@@ -557,42 +594,90 @@ logging:
 # ==============================================================================
 # SCHEDULER (Maintenance Tasks)
 # ==============================================================================
+# All daily tasks run at 01:00 UTC sequentially (~2-3 min total)
+# Timeline: restart(60s) → renew(30s) → funds(30s) → tmp(5s) → events(10s) → stale(10s)
 scheduler:
   tasks:
     cleanup_zombie_processes:
       enabled: true
-      interval_hours: 3           # Every 3 hours
+      interval_hours: 3           # Every 3 hours (from scheduler start)
+
+    # Daily maintenance tasks run between 01:00-01:45 UTC, spaced 5 minutes apart
+    # This window is chosen because it's low-activity period for crypto markets
+
     daily_restart_services:
       enabled: true
       interval_hours: 24          # Once per day
-      restart_hour: 2             # Run at 2 AM (low activity)
+      restart_hour: 1             # Run at 01:00 UTC
+      restart_minute: 0
 
     # Agent wallet credential renewal (checks daily, renews if expiring within 30 days)
     renew_agent_wallets:
       enabled: true
       interval_hours: 24          # Check once per day
-      run_hour: 3                 # Run at 3 AM
+      run_hour: 1                 # Run at 01:10 UTC
+      run_minute: 10
 
     # Subaccount fund management (topup from master if balance low)
     check_subaccount_funds:
       enabled: true
       interval_hours: 24          # Check once per day
-      run_hour: 4                 # Run at 4 AM (after agent renewal)
+      run_hour: 1                 # Run at 01:15 UTC
+      run_minute: 15
 
     # Clean /tmp directory (remove old temporary files)
     cleanup_tmp_dir:
       enabled: true
       interval_hours: 24          # Once per day
-      run_hour: 5                 # Run at 5 AM
+      run_hour: 1                 # Run at 01:20 UTC
+      run_minute: 20
       max_age_hours: 24           # Delete files older than 24 hours
+
+    # Clean old StrategyEvent records (audit trail, grows fast)
+    cleanup_old_events:
+      enabled: true
+      interval_hours: 24          # Once per day
+      run_hour: 1                 # Run at 01:25 UTC
+      run_minute: 25
+      max_age_days: 7             # Delete events older than 7 days
+
+    # Clean stale strategies stuck in intermediate states (GENERATED/VALIDATED)
+    cleanup_stale_strategies:
+      enabled: true
+      interval_hours: 24          # Once per day
+      run_hour: 1                 # Run at 01:30 UTC
+      run_minute: 30
+      max_age_days: 1             # Delete if stuck > 1 day
+
+    # Clean old FAILED strategies (validation failures)
+    cleanup_old_failed:
+      enabled: true
+      interval_hours: 24          # Once per day
+      run_hour: 1                 # Run at 01:35 UTC
+      run_minute: 35
+      max_age_days: 7             # Delete FAILED older than 7 days
+
+    # Clean old RETIRED strategies (evicted from pool)
+    cleanup_old_retired:
+      enabled: true
+      interval_hours: 24          # Once per day
+      run_hour: 1                 # Run at 01:40 UTC
+      run_minute: 40
+      max_age_days: 7             # Delete RETIRED older than 7 days
 
 # ==============================================================================
 # DATA SCHEDULER
 # ==============================================================================
+# update_pairs runs first to refresh coin list, then download_data fetches OHLCV
 data_scheduler:
   enabled: true
-  update_hours: [4, 16]
   top_pairs_count: 200
   min_volume_usd: 0
   download_days: null
+  # update_pairs: refresh coin list from Hyperliquid x Binance
+  update_pairs_hours: [1, 13]     # Run at 01:45 and 13:45 UTC
+  update_pairs_minute: 45
+  # download_data: fetch OHLCV data for all active coins (15 min after update_pairs)
+  download_data_hours: [2, 14]    # Run at 02:00 and 14:00 UTC
+  download_data_minute: 0
 

@@ -34,6 +34,7 @@ TEST_CONFIG = {
     'hyperliquid': {
         'fee_rate': 0.0004,      # 0.04% per trade (entry + exit = 0.08%)
         'slippage': 0.0002,      # 0.02% slippage each way
+        'min_notional': 10.0,    # Minimum trade size in USDC
     },
     'backtesting': {
         'initial_capital': 10000.0,

@@ -49,6 +49,7 @@ TEST_CONFIG = {
     'hyperliquid': {
         'fee_rate': FEE_RATE,
         'slippage': SLIPPAGE,
+        'min_notional': 10.0,  # Minimum trade size in USDC
     },
     'backtesting': {
         'initial_capital': INITIAL_CAPITAL,
@@ -853,7 +854,7 @@ def run_vectorbt_extended(engine: BacktestEngine, report: ValidationReport):
 
     # Our backtester (no fees)
     no_fee_config = {
-        'hyperliquid': {'fee_rate': 0.0, 'slippage': 0.0},
+        'hyperliquid': {'fee_rate': 0.0, 'slippage': 0.0, 'min_notional': 10.0},
         'backtesting': {'initial_capital': INITIAL_CAPITAL},
         'risk': {
             'fixed_fractional': {'risk_per_trade_pct': 0.02, 'max_position_size_pct': 1.0},

@@ -33,6 +33,9 @@ class {{ class_name }}(StrategyCore):
     # Signal column for vectorized backtest
     signal_column = 'entry_signal'
 
+    # Indicator columns for lookahead test
+    indicator_columns = [{% for ind in indicators %}'{{ ind | lower }}', {% endfor %}'entry_signal']
+
     # Lookback required
     LOOKBACK = {{ lookback }}
 

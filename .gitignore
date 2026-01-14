@@ -241,3 +241,6 @@ $RECYCLE.BIN/
 *~
 .directory
 .Trash-*
+
+# Generated strategies (stored in DB, files are ephemeral)
+strategies/

@@ -223,7 +223,10 @@ class ExecutionValidator:
         signal_count = 0
 
         # Test at various points in the data
-        test_points = [50, 100, 200, 300, len(data) - 1]
+        # Respect strategy's LOOKBACK requirement (some indicators need 60+ bars)
+        lookback = getattr(strategy, 'LOOKBACK', 50)
+        min_test_point = max(lookback + 10, 50)  # At least LOOKBACK + buffer
+        test_points = [min_test_point, 100, 200, 300, len(data) - 1]
 
         for i in test_points:
             if i >= len(data):

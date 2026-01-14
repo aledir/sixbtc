@@ -407,7 +407,7 @@ MOMENTUM_INDICATORS = [
         regime_type="REVERSAL",
         direction="BIDI",
         lookback=40,
-        input_type="hlc",
+        input_type="close",
     ),
     PtaIndicator(
         id="SQUEEZE",
@@ -462,12 +462,12 @@ MOMENTUM_INDICATORS = [
         name="True Momentum Oscillator",
         category="momentum",
         pandas_ta_func="tmo",
-        params={"length": [14, 21], "smooth": [5, 7]},
-        output_columns=["TMO_{length}_{smooth}", "TMOs_{length}_{smooth}"],
+        params={"tmo_length": [14, 21], "smooth_length": [5, 7]},
+        output_columns=["TMO_{tmo_length}_{smooth_length}", "TMOs_{tmo_length}_{smooth_length}"],
         regime_type="REVERSAL",
         direction="BIDI",
         lookback=40,
-        input_type="ohlc",
+        input_type="oc",
     ),
 ]
 
@@ -523,7 +523,7 @@ TREND_INDICATORS = [
         regime_type="TREND",
         direction="BIDI",
         lookback=30,
-        input_type="hlc",
+        input_type="hl",
     ),
     PtaIndicator(
         id="HMA",
@@ -947,30 +947,8 @@ CROSSOVER_INDICATORS = [
         lookback=20,
         input_type="close",
     ),
-    PtaIndicator(
-        id="LONG_RUN",
-        name="Long Run",
-        category="crossover",
-        pandas_ta_func="long_run",
-        params={"length": [14, 21]},
-        output_columns=["LR_{length}"],
-        regime_type="TREND",
-        direction="LONG",
-        lookback=30,
-        input_type="close",
-    ),
-    PtaIndicator(
-        id="SHORT_RUN",
-        name="Short Run",
-        category="crossover",
-        pandas_ta_func="short_run",
-        params={"length": [14, 21]},
-        output_columns=["SR_{length}"],
-        regime_type="TREND",
-        direction="SHORT",
-        lookback=30,
-        input_type="close",
-    ),
+    # NOTE: LONG_RUN and SHORT_RUN removed - they require dual-series input (fast, slow)
+    # which is not supported by the current generator template
     PtaIndicator(
         id="QSTICK",
         name="Q Stick",
@@ -981,7 +959,7 @@ CROSSOVER_INDICATORS = [
         regime_type="TREND",
         direction="BIDI",
         lookback=30,
-        input_type="ohlc",
+        input_type="oc",
     ),
     PtaIndicator(
         id="VORTEX",
@@ -1172,7 +1150,7 @@ VOLATILITY_INDICATORS = [
         regime_type="BOTH",
         direction="BIDI",
         lookback=35,
-        input_type="hlc",
+        input_type="close",
     ),
     PtaIndicator(
         id="THERMO",
@@ -1184,7 +1162,7 @@ VOLATILITY_INDICATORS = [
         regime_type="BOTH",
         direction="BIDI",
         lookback=35,
-        input_type="hlc",
+        input_type="hl",
     ),
     PtaIndicator(
         id="TRUE_RANGE",

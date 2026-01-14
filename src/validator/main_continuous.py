@@ -39,7 +39,11 @@ class ContinuousValidatorProcess:
     """
     Continuous strategy validation process.
 
-    Claims GENERATED strategies and runs 4-phase validation.
+    Claims GENERATED strategies and runs 3-phase validation:
+    1. Syntax validation
+    2. Lookahead AST detection
+    3. Execution validation
+
     Strategies that pass all phases are promoted to VALIDATED.
     Strategies that fail are deleted.
     """

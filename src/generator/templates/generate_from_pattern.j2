@@ -50,7 +50,10 @@ Use RR_RATIO with ratio 2.0
 
 4. METHOD: MUST implement generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None
 
-5. NO LOOKAHEAD BIAS:
+5. INDICATOR_COLUMNS: MUST define indicator_columns class attribute listing all indicator column names used
+   Example: indicator_columns = ['rsi', 'atr', 'sma_fast', 'entry_signal']
+
+6. NO LOOKAHEAD BIAS:
    - ALLOWED: df['close'].rolling(10).max()
    - FORBIDDEN: df['close'].rolling(10, center=True).max()
    - ALLOWED: df['close'].iloc[-1]
@@ -85,6 +88,9 @@ class Strategy_{{ pattern.strategy_type or "GEN" }}_{{ strategy_id }}(StrategyCo
     """
 
     leverage = {{ leverage }}
+
+    # Indicator columns for lookahead test (ADD YOUR INDICATOR NAMES HERE)
+    indicator_columns = ['atr', 'entry_signal']  # Update with actual indicators used
 
     def __init__(self, params: dict = None):
         """Initialize strategy with parameters"""

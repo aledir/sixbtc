@@ -621,6 +621,12 @@ class Subaccount(Base):
     current_drawdown = Column(Float)
     open_positions_count = Column(Integer, default=0)
 
+    # Emergency stop tracking
+    peak_balance = Column(Float)  # High water mark for DD calculation (realized balance)
+    peak_balance_updated_at = Column(DateTime(timezone=True))
+    daily_pnl_usd = Column(Float, default=0.0)  # Today's PnL (resets at midnight UTC)
+    daily_pnl_reset_date = Column(DateTime)  # Date of last daily PnL reset
+
     # Status
     status = Column(
         Enum(
@@ -955,6 +961,61 @@ class MarketRegime(Base):
             f"<MarketRegime({self.symbol}: {self.regime_type}, "
             f"strength={self.strength:.2f}, score={self.regime_score:+.2f})>"
         )
+
+
+# ==============================================================================
+# EMERGENCY STOP STATE
+# ==============================================================================
+
+class EmergencyStopState(Base):
+    """
+    Emergency stop state tracking across scopes.
+
+    Persists stop state across process restarts.
+    Enables auto-reset logic based on conditions.
+
+    Scopes:
+        - portfolio: All subaccounts combined (scope_id='global')
+        - subaccount: Single subaccount (scope_id='1'-'10')
+        - strategy: Single strategy (scope_id=UUID)
+        - system: System-level issues (scope_id='data_feed')
+
+    Actions:
+        - halt_entries: Block new trades, let existing run to SL/TP
+        - force_close: Close ALL positions immediately (panic button)
+    """
+    __tablename__ = "emergency_stop_states"
+
+    # Composite primary key
+    scope = Column(String(20), primary_key=True)
+    # 'portfolio', 'subaccount', 'strategy', 'system'
+
+    scope_id = Column(String(50), primary_key=True)
+    # 'global', '1'-'10', UUID string, 'data_feed'
+
+    # Stop state
+    is_stopped = Column(Boolean, nullable=False, default=False)
+    stop_reason = Column(String(200))
+    stop_action = Column(String(20))  # 'halt_entries', 'force_close'
+    stopped_at = Column(DateTime(timezone=True))
+
+    # Auto-reset tracking
+    cooldown_until = Column(DateTime(timezone=True))
+    reset_trigger = Column(String(50))
+    # 'midnight_utc', 'cooldown_48h_rotation', 'rotation', '24h', 'data_valid'
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime(timezone=True), onupdate=lambda: datetime.now(UTC))
+
+    __table_args__ = (
+        Index('idx_emergency_stop_is_stopped', 'is_stopped'),
+        Index('idx_emergency_stop_scope', 'scope'),
+    )
+
+    def __repr__(self):
+        status = "STOPPED" if self.is_stopped else "CLEAR"
+        return f"<EmergencyStopState({self.scope}:{self.scope_id} {status})>"
 
 
 # ==============================================================================

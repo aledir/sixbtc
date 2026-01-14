@@ -19,6 +19,7 @@ from typing import Optional
 from src.config import load_config
 from src.rotator.selector import StrategySelector
 from src.rotator.deployer import StrategyDeployer
+from src.executor.emergency_stop_manager import EmergencyStopManager
 from src.utils import get_logger, setup_logging
 
 # Initialize logging at module load
@@ -61,6 +62,7 @@ class ContinuousRotatorProcess:
         # Components (dependency injection)
         self.selector = selector or StrategySelector(self.config._raw_config)
         self.deployer = deployer or StrategyDeployer(self.config._raw_config)
+        self.emergency_manager = EmergencyStopManager(self.config._raw_config)
 
         logger.info(
             f"ContinuousRotatorProcess initialized: "
@@ -117,7 +119,7 @@ class ContinuousRotatorProcess:
         free_subaccounts = self.deployer.get_free_subaccounts()
 
         if not free_subaccounts:
-            logger.warning("No free subaccounts available")
+            logger.debug("No free subaccounts available")
             return
 
         # Deploy candidates to subaccounts
@@ -130,9 +132,13 @@ class ContinuousRotatorProcess:
                     f"Deployed {candidate['name']} (score={candidate['score']:.1f}) "
                     f"to subaccount {subaccount['id']}"
                 )
+                # Reset emergency stop for this subaccount after rotation
+                self.emergency_manager.reset_on_rotation(subaccount['id'])
 
         if deployed_count > 0:
             logger.info(f"Rotation complete: {deployed_count} strategies deployed")
+            # Check if portfolio DD stop can be reset (48h + rotation)
+            self.emergency_manager.reset_portfolio_dd_after_rotation()
 
     async def _wait_interval(self):
         """Wait for next rotation check."""

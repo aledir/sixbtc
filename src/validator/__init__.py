@@ -1,22 +1,21 @@
 """
 Validator Module for SixBTC
 
-4-phase validation pipeline:
+Pre-backtest validation (3 phases):
 1. SyntaxValidator - Python syntax check
 2. LookaheadDetector - AST analysis for lookahead bias
-3. ShuffleTester - Empirical shuffle test
-4. ExecutionValidator - Runtime execution test
+3. ExecutionValidator - Runtime execution test
+
+Post-backtest validation (run by backtester for high-scoring strategies):
+4. ShuffleTester - Empirical shuffle test for lookahead detection
 
 Usage:
-    from src.validator import FullValidator
+    from src.validator import SyntaxValidator, LookaheadDetector, ExecutionValidator
 
-    validator = FullValidator()
-    result = validator.validate(strategy_code, test_data)
-
-    if result.passed:
-        # Strategy is valid
-    else:
-        # Strategy failed validation
+    # Pre-backtest validation
+    syntax_result = SyntaxValidator().validate(code)
+    lookahead_result = LookaheadDetector().detect(code)
+    exec_result = ExecutionValidator().validate(strategy_instance, test_data)
 """
 
 from .syntax_validator import SyntaxValidator

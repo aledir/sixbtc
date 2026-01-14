@@ -359,6 +359,7 @@ class PatternGenGenerator:
                 'lookback': formula.lookback,
                 'indicator_code': formula.indicator_code,
                 'entry_signal_code': formula.entry_signal_code,
+                'indicators': formula.indicators,  # For indicator_columns
                 'sl_pct': sl_pct,
                 'tp_pct': tp_pct,
                 'leverage': leverage,

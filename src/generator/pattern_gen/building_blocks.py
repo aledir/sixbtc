@@ -3859,7 +3859,7 @@ EMV_BLOCKS = [
         category="emv",
         formula_template="""df['dm'] = ((df['high'] + df['low']) / 2) - ((df['high'].shift(1) + df['low'].shift(1)) / 2)
 df['br'] = df['volume'] / (df['high'] - df['low'] + 1e-10)
-df['emv'] = df['dm'] / (br + 1e-10)
+df['emv'] = df['dm'] / (df['br'] + 1e-10)
 df['emv_ma'] = df['emv'].rolling({period}).mean()
 df['entry_signal'] = df['emv_ma'] > {threshold}""",
         params={"period": [14], "threshold": [0]},
@@ -3876,7 +3876,7 @@ df['entry_signal'] = df['emv_ma'] > {threshold}""",
         category="emv",
         formula_template="""df['dm'] = ((df['high'] + df['low']) / 2) - ((df['high'].shift(1) + df['low'].shift(1)) / 2)
 df['br'] = df['volume'] / (df['high'] - df['low'] + 1e-10)
-df['emv'] = df['dm'] / (br + 1e-10)
+df['emv'] = df['dm'] / (df['br'] + 1e-10)
 df['emv_ma'] = df['emv'].rolling({period}).mean()
 df['entry_signal'] = df['emv_ma'] < -{threshold}""",
         params={"period": [14], "threshold": [0]},
@@ -3893,7 +3893,7 @@ df['entry_signal'] = df['emv_ma'] < -{threshold}""",
         category="emv",
         formula_template="""df['dm'] = ((df['high'] + df['low']) / 2) - ((df['high'].shift(1) + df['low'].shift(1)) / 2)
 df['br'] = df['volume'] / (df['high'] - df['low'] + 1e-10)
-df['emv'] = df['dm'] / (br + 1e-10)
+df['emv'] = df['dm'] / (df['br'] + 1e-10)
 df['emv_ma'] = df['emv'].rolling({period}).mean()
 df['emv_positive'] = df['emv_ma'] > 0
 df['was_negative'] = df['emv_ma'].shift(1) <= 0
@@ -3912,7 +3912,7 @@ df['entry_signal'] = df['emv_positive'] & df['was_negative']""",
         category="emv",
         formula_template="""df['dm'] = ((df['high'] + df['low']) / 2) - ((df['high'].shift(1) + df['low'].shift(1)) / 2)
 df['br'] = df['volume'] / (df['high'] - df['low'] + 1e-10)
-df['emv'] = df['dm'] / (br + 1e-10)
+df['emv'] = df['dm'] / (df['br'] + 1e-10)
 df['emv_ma'] = df['emv'].rolling({period}).mean()
 df['emv_negative'] = df['emv_ma'] < 0
 df['was_positive'] = df['emv_ma'].shift(1) >= 0
@@ -8920,7 +8920,7 @@ df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod={period})
 df['kc_upper'] = ta.EMA(df['close'], timeperiod={period}) + df['atr'] * 1.5
 df['kc_lower'] = ta.EMA(df['close'], timeperiod={period}) - df['atr'] * 1.5
 df['squeeze_on'] = (df['bb_lower'] > df['kc_lower']) & (df['bb_upper'] < df['kc_upper'])
-df['entry_signal'] = df['squeeze_on'] & ~df['squeeze_on'].shift(1)""",
+df['entry_signal'] = df['squeeze_on'] & ~df['squeeze_on'].shift(1).fillna(False)""",
         params={"period": [20]},
         direction="bidi",
         lookback=30,
@@ -8938,7 +8938,7 @@ df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod={period})
 df['kc_upper'] = ta.EMA(df['close'], timeperiod={period}) + df['atr'] * 1.5
 df['kc_lower'] = ta.EMA(df['close'], timeperiod={period}) - df['atr'] * 1.5
 df['squeeze_on'] = (df['bb_lower'] > df['kc_lower']) & (df['bb_upper'] < df['kc_upper'])
-df['squeeze_off'] = ~df['squeeze_on'] & df['squeeze_on'].shift(1)
+df['squeeze_off'] = ~df['squeeze_on'] & df['squeeze_on'].shift(1).fillna(False)
 df['mom'] = df['close'] - ta.SMA(df['close'], timeperiod={period})
 df['mom_up'] = df['mom'] > 0
 df['entry_signal'] = df['squeeze_off'] & df['mom_up']""",
@@ -8959,7 +8959,7 @@ df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod={period})
 df['kc_upper'] = ta.EMA(df['close'], timeperiod={period}) + df['atr'] * 1.5
 df['kc_lower'] = ta.EMA(df['close'], timeperiod={period}) - df['atr'] * 1.5
 df['squeeze_on'] = (df['bb_lower'] > df['kc_lower']) & (df['bb_upper'] < df['kc_upper'])
-df['squeeze_off'] = ~df['squeeze_on'] & df['squeeze_on'].shift(1)
+df['squeeze_off'] = ~df['squeeze_on'] & df['squeeze_on'].shift(1).fillna(False)
 df['mom'] = df['close'] - ta.SMA(df['close'], timeperiod={period})
 df['mom_down'] = df['mom'] < 0
 df['entry_signal'] = df['squeeze_off'] & df['mom_down']""",
@@ -10611,7 +10611,7 @@ CHANDELIER_EXIT_BLOCKS = [
 df['highest'] = df['high'].rolling({period}).max()
 df['chandelier_long'] = df['highest'] - df['atr'] * {mult}
 df['above'] = df['close'] > df['chandelier_long']
-df['cross_above'] = df['above'] & ~df['above'].shift(1)
+df['cross_above'] = df['above'] & ~df['above'].shift(1).fillna(False)
 df['entry_signal'] = df['cross_above']""",
         params={"period": [22], "mult": [3.0]},
         direction="long",
@@ -10693,7 +10693,7 @@ df['macd'], df['signal'], df['hist'] = ta.MACD(df['close'], fastperiod=12, slowp
 df['ema_rising'] = df['ema'] > df['ema'].shift(1)
 df['hist_rising'] = df['hist'] > df['hist'].shift(1)
 df['green'] = df['ema_rising'] & df['hist_rising']
-df['green_start'] = df['green'] & ~df['green'].shift(1)
+df['green_start'] = df['green'] & ~df['green'].shift(1).fillna(False)
 df['entry_signal'] = df['green_start']""",
         params={"period": [13]},
         direction="long",
@@ -10713,7 +10713,7 @@ df['ema_rising'] = df['ema'] > df['ema'].shift(1)
 df['hist_rising'] = df['hist'] > df['hist'].shift(1)
 df['green'] = df['ema_rising'] & df['hist_rising']
 df['blue'] = ~df['ema_rising'] & ~df['hist_rising'].shift(1).fillna(False) | ~df['hist_rising'] & df['ema_rising'].shift(1).fillna(False)
-df['was_blue'] = ~df['green'].shift(1)
+df['was_blue'] = ~df['green'].shift(1).fillna(False)
 df['now_green'] = df['green']
 df['entry_signal'] = df['was_blue'] & df['now_green']""",
         params={"period": [13]},
@@ -11025,7 +11025,7 @@ df['entry_signal'] = df['cross_up']""",
         lookback=40,
         indicators=["EMA"],
         combinable_with=["volume", "momentum"],
-        strategy_type="T3M",
+        strategy_type="TMA",
     ),
     # T3 Trend
     PatternBlock(
@@ -11052,7 +11052,7 @@ df['entry_signal'] = df['above'] & df['rising']""",
         lookback=40,
         indicators=["EMA"],
         combinable_with=["confirmation", "threshold"],
-        strategy_type="T3M",
+        strategy_type="TMA",
     ),
     # T3 Slope Strong
     PatternBlock(
@@ -11079,7 +11079,7 @@ df['entry_signal'] = df['strong_up']""",
         lookback=40,
         indicators=["EMA"],
         combinable_with=["volume", "confirmation"],
-        strategy_type="T3M",
+        strategy_type="TMA",
     ),
 ]
 
@@ -12852,7 +12852,7 @@ DYNAMIC_MOMENTUM_BLOCKS = [
         category="dynamic_momentum",
         formula_template="""df['vol'] = df['close'].rolling(5).std()
 df['vol_avg'] = df['vol'].rolling(10).mean()
-df['dyn_period'] = np.clip(14 * df['vol_avg'] / (df['vol'] + 1e-10), 5, 30).astype(int)
+df['dyn_period'] = np.clip(14 * df['vol_avg'] / (df['vol'] + 1e-10), 5, 30).fillna(14).astype(int)
 df['dymi'] = ta.RSI(df['close'], timeperiod=14)
 df['oversold'] = df['dymi'] < {level}
 df['entry_signal'] = df['oversold']""",

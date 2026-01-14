@@ -146,8 +146,17 @@ class StrategyDeployer:
 
                 subaccount.strategy_id = strategy_id
                 subaccount.status = 'ACTIVE'
-                subaccount.allocated_capital = capital_per
                 subaccount.deployed_at = datetime.now(UTC)
+
+                # Only set allocated_capital if not already funded
+                # This respects manually funded subaccounts (e.g., test phase)
+                if subaccount.allocated_capital is None or subaccount.allocated_capital == 0:
+                    subaccount.allocated_capital = capital_per
+                    logger.info(f"Subaccount {subaccount_id}: set allocated_capital=${capital_per:.2f}")
+                else:
+                    logger.info(
+                        f"Subaccount {subaccount_id}: keeping existing capital=${subaccount.allocated_capital:.2f}"
+                    )
 
                 # Update strategy
                 db_strategy = session.query(Strategy).filter(

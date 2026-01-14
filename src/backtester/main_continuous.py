@@ -164,8 +164,9 @@ class ContinuousBacktesterProcess:
         self.min_coverage_pct = self.config.get_required('backtesting.min_coverage_pct')
 
         # Out-of-sample validation thresholds
+        # Note: OOS uses same thresholds as IS (min_sharpe, min_win_rate, etc.)
+        # Only degradation and recency_weight are OOS-specific
         self.oos_max_degradation = self.config.get_required('backtesting.out_of_sample.max_degradation')
-        self.oos_min_sharpe = self.config.get_required('backtesting.out_of_sample.min_sharpe')
         self.oos_recency_weight = self.config.get_required('backtesting.out_of_sample.recency_weight')
 
         # Min trades per timeframe (parallel arrays)
@@ -677,7 +678,19 @@ class ContinuousBacktesterProcess:
 
                     # Best combo from initial parametric
                     initial_best = parametric_results[0]
-                    initial_params = initial_best.get('params', {})
+                    # BUG FIX: Standard parametric has params as direct keys (sl_pct, tp_pct, etc.)
+                    # Typed parametric has nested 'params' dict. Handle both cases.
+                    if 'params' in initial_best and initial_best['params']:
+                        # Typed parametric: use nested params dict
+                        initial_params = initial_best['params']
+                    else:
+                        # Standard parametric: params are direct keys in result dict
+                        initial_params = {
+                            'sl_pct': initial_best.get('sl_pct', 0.02),
+                            'tp_pct': initial_best.get('tp_pct', 0.0),
+                            'leverage': initial_best.get('leverage', 1),
+                            'exit_bars': initial_best.get('exit_bars', 0),
+                        }
                     logger.info(
                         f"[{strategy_name}] {assigned_tf}: Parametric found best combo: "
                         f"SL={initial_params.get('sl_pct', 0):.1%}, "
@@ -737,12 +750,12 @@ class ContinuousBacktesterProcess:
                     is_signals = is_result.get('total_signals', 0)
                     # Get parametric signals from the initial run
                     parametric_signals = initial_best.get('total_signals', 0)
-                    logger.info(
-                        f"[{strategy_name}] DEBUG: Parametric signals={parametric_signals}, "
+                    logger.debug(
+                        f"[{strategy_name}] Parametric signals={parametric_signals}, "
                         f"IS signals={is_signals}, Parametric trades={parametric_trades}, IS trades={is_trades}"
                     )
                     if abs(parametric_trades - is_trades) > 50 or is_sharpe < 0:
-                        logger.warning(
+                        logger.debug(
                             f"[{strategy_name}] DISCREPANCY: Parametric={parametric_trades} trades, "
                             f"IS={is_trades} trades, IS_Sharpe={is_sharpe:.2f}"
                         )
@@ -1013,9 +1026,19 @@ class ContinuousBacktesterProcess:
                                 f"TF={assigned_tf}, Score={backtest_result.get('final_score', 0):.1f}"
                             )
                         else:
-                            # Strategy didn't make it into pool (score too low, shuffle failed, or WFA failed)
-                            # Mark as FAILED (not delete) to preserve BacktestResults for metrics
-                            self.processor.mark_failed(strategy_id, pool_reason, delete=False)
+                            # Strategy didn't make it into pool
+                            # Distinguish between RETIRED (valid but not good enough) vs FAILED (buggy)
+                            if pool_reason.startswith("shuffle_test_failed"):
+                                # Shuffle test failure = lookahead bias = bug in strategy
+                                self.processor.mark_failed(strategy_id, pool_reason, delete=False)
+                            else:
+                                # score_below_threshold, wfa_validation_failed, pool rejection
+                                # These are valid strategies that just don't meet criteria → RETIRED
+                                self.pool_manager._retire_strategy(
+                                    strategy_id,
+                                    pool_reason,
+                                    "score_below_min" if "score_below" in pool_reason else "pool_rejected"
+                                )
                             return (
                                 False,
                                 f"Rejected from ACTIVE pool: {pool_reason}"

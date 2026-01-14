@@ -11,6 +11,7 @@ import signal
 import threading
 from datetime import datetime, UTC
 from typing import Dict, Optional, List
+from uuid import UUID
 import importlib.util
 import tempfile
 import sys
@@ -21,6 +22,8 @@ from src.database import get_session, Strategy, Subaccount, Trade
 from src.executor.hyperliquid_client import HyperliquidClient
 from src.executor.risk_manager import RiskManager
 from src.executor.trailing_service import TrailingService
+from src.executor.emergency_stop_manager import EmergencyStopManager
+from src.executor.balance_sync import BalanceSyncService
 from src.data.coin_registry import get_registry, get_active_pairs, CoinNotFoundError
 from src.strategies.base import StrategyCore, Signal, StopLossType, ExitType
 from src.utils import get_logger, setup_logging
@@ -67,6 +70,7 @@ class ContinuousExecutorProcess:
         self.client = client or HyperliquidClient(self.config._raw_config, dry_run=self.dry_run)
         self.risk_manager = risk_manager or RiskManager(self.config._raw_config)
         self.trailing_service = trailing_service or TrailingService(self.client, self.config._raw_config)
+        self.emergency_manager = EmergencyStopManager(self.config._raw_config, self.client)
 
         # Load trading pairs (multi-coin support)
         self.trading_pairs = self._load_trading_pairs()
@@ -82,6 +86,9 @@ class ContinuousExecutorProcess:
 
         # Check interval - from config (NO hardcoding)
         self.check_interval_seconds = self.config.get_required('executor.check_interval_seconds')
+
+        # Minimum notional for Hyperliquid orders
+        self.min_notional = self.config.get_required('hyperliquid.min_notional')
 
         logger.info(
             f"ContinuousExecutorProcess initialized: dry_run={self.dry_run}, "
@@ -103,11 +110,34 @@ class ContinuousExecutorProcess:
         """Main continuous execution loop"""
         logger.info("Starting continuous execution loop")
 
+        # Sync subaccount balances from Hyperliquid at startup
+        # This initializes allocated_capital for manually funded subaccounts
+        balance_sync = BalanceSyncService(self.config._raw_config, self.client)
+        logger.info("Syncing subaccount balances from Hyperliquid...")
+        synced = balance_sync.sync_all_subaccounts()
+        if synced:
+            logger.info(f"Balance sync complete: {len(synced)} subaccounts synced")
+            for sub_id, balance in synced.items():
+                logger.info(f"  Subaccount {sub_id}: ${balance:.2f}")
+        else:
+            logger.info("Balance sync: no subaccounts with funds found")
+
         # Start trailing service
         await self.trailing_service.start()
 
         while not self.shutdown_event.is_set() and not self.force_exit:
             try:
+                # Check emergency conditions (throttled internally to every 60s)
+                triggered_stops = self.emergency_manager.check_all_conditions()
+                for stop in triggered_stops:
+                    self.emergency_manager.trigger_stop(
+                        stop['scope'], stop['scope_id'], stop['reason'],
+                        stop['action'], stop['reset_trigger']
+                    )
+
+                # Check auto-resets for expired cooldowns
+                self.emergency_manager.check_auto_resets()
+
                 # Get active subaccounts with LIVE strategies
                 active_subaccounts = self._get_active_subaccounts()
 
@@ -179,6 +209,18 @@ class ContinuousExecutorProcess:
             strategy_id = subaccount['strategy_id']
             strategy_name = subaccount['strategy_name']
             timeframe = subaccount['timeframe']
+
+            # Check if trading is allowed (emergency stop check)
+            trade_status = self.emergency_manager.can_trade(
+                subaccount['id'],
+                UUID(strategy_id) if isinstance(strategy_id, str) else strategy_id
+            )
+            if not trade_status['allowed']:
+                logger.warning(
+                    f"Trading blocked for subaccount {subaccount['id']}: "
+                    f"{trade_status['blocked_by']} - {trade_status['reasons']}"
+                )
+                return
 
             # Get or load strategy instance
             strategy = self._get_strategy(
@@ -526,6 +568,17 @@ class ContinuousExecutorProcess:
                     f"(margin {margin_needed:.2f} > max {max_margin:.2f})"
                 )
 
+            # Recalculate notional after any size adjustments
+            notional = size * current_price
+
+            # Check minimum notional (Hyperliquid requirement)
+            if notional < self.min_notional:
+                logger.debug(
+                    f"Order too small for {symbol}: notional ${notional:.2f} < "
+                    f"min ${self.min_notional:.2f}, skipping"
+                )
+                return
+
             logger.info(
                 f"Executing {signal.direction} {symbol} for subaccount {subaccount['id']}: "
                 f"size={size:.6f}, SL={stop_loss:.2f}, TP={take_profit:.2f}, "
@@ -713,6 +766,20 @@ class ContinuousExecutorProcess:
                     f"Trade closed: {trade.symbol} PnL={trade.pnl_usd:.2f} USD "
                     f"({pnl_pct:.2%})"
                 )
+
+                # Update emergency stop balance tracking
+                subaccount_id = open_trade.get('subaccount_id')
+                if subaccount_id:
+                    try:
+                        # Get current balance from exchange
+                        current_balance = self.client.get_account_balance(subaccount_id)
+                        self.emergency_manager.update_balances(
+                            subaccount_id=subaccount_id,
+                            current_balance=current_balance,
+                            pnl_delta=trade.pnl_usd
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to update emergency balance tracking: {e}")
 
         # Clean up time exit tracking
         key = f"{open_trade['symbol']}:{open_trade.get('subaccount_id', 0)}"

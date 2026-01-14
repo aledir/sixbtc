@@ -1,16 +1,16 @@
 # SixBTC - AI-Powered Trading System Development Guide
 
-**Last Updated**: 2026-01-10 | **Python**: 3.11+ | **Core**: Numba-JIT Backtester + Hyperliquid SDK
+**Last Updated**: 2026-01-14 | **Python**: 3.11+ | **Core**: Numba-JIT Backtester + Hyperliquid SDK
 
 ---
 
 ## 🚀 STARTUP - READ FIRST
 
-**At the start of EVERY new chat session**, read `PIPELINE.md` to understand the current pipeline architecture. This file contains the detailed flow of strategy generation, validation, backtesting, and deployment.
+**At the start of EVERY new chat session**, read `docs/PIPELINE_OVERVIEW.md` to understand the current pipeline architecture. This file contains the detailed flow of strategy generation, validation, backtesting, and deployment.
 
 ```bash
 # First action in every new session:
-Read /home/bitwolf/sixbtc/PIPELINE.md
+Read /home/bitwolf/sixbtc/docs/PIPELINE_OVERVIEW.md
 ```
 
 ---
@@ -530,7 +530,6 @@ The `generation_mode` field in the database tracks where each strategy came from
 | `pandas_ta` | `pandas_ta` | pta | `PtaStrat_*` | Pandas-TA indicator combinations |
 | `ai_free` | `ai_free` | aif | `AIFStrat_*` | AI freely chooses indicators |
 | `ai_assigned` | `ai_assigned` | aia | `AIAStrat_*` | AI uses IndicatorCombinator-assigned indicators |
-| — | `optimized` | — | `Strategy_*` | Backtester parametric optimization output |
 
 **Config example:**
 ```yaml
@@ -539,9 +538,9 @@ generation:
     pattern:
       enabled: true            # PatStrat_* from pattern-discovery API
     ai_free:
-      enabled: true            # Strategy_* - AI chooses indicators freely
+      enabled: true            # AIFStrat_* - AI chooses indicators freely
     ai_assigned:
-      enabled: true            # Strategy_* - AI uses IndicatorCombinator
+      enabled: true            # AIAStrat_* - AI uses IndicatorCombinator
 
   # When both AI sources enabled, ratio controls the mix
   ai_free_ratio: 0.7           # 70% ai_free, 30% ai_assigned
@@ -549,13 +548,10 @@ generation:
 
 **Flow by source:**
 
-1. **pattern**: Generator fetches from pattern-discovery API → Validator → Backtester (parametric optimization) → creates `optimized` strategies → Pool
+All sources follow the same pipeline:
+`Generator → Validator → Backtester (parametric optimization) → Pool`
 
-2. **ai_free**: Generator calls AI with template (AI chooses indicators) → Validator → Backtester (parametric optimization) → creates `optimized` strategies → Pool
-
-3. **ai_assigned**: Generator gets indicator combo from IndicatorCombinator → calls AI with assigned indicators → Validator → Backtester (parametric optimization) → creates `optimized` strategies → Pool
-
-4. **optimized**: Created by Backtester during parametric optimization. Already has optimized params, goes to Pool after validation tests.
+The backtester applies optimized parameters (SL, TP, leverage, exit_bars) to the strategy, but the `generation_mode` remains unchanged throughout the pipeline.
 
 **Validation caching:**
 - **Shuffle test**: Cached by `base_code_hash` (lookahead = property of base code)
@@ -939,7 +935,7 @@ Before pushing ANY code:
 - [ ] Strategies inherit from StrategyCore
 - [ ] Database operations use SQLAlchemy models
 - [ ] Logging uses ASCII only (no emojis)
-- [ ] **PIPELINE.md updated** if code/config changes affect pipeline behavior
+- [ ] **docs/PIPELINE_*.md updated** if code/config changes affect pipeline behavior
 
 ---
 

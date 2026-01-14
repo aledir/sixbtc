@@ -3,7 +3,7 @@
 Data Scheduler Process Entry Point
 
 Scheduled updates for trading pairs and historical data.
-Runs at 04:00 and 16:00 UTC.
+Runs at 02:00 and 14:00 UTC.
 
 Uses APScheduler for cron-like scheduling.
 """
