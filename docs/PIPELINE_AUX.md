@@ -12,17 +12,16 @@ Tutti i task di manutenzione giornaliera eseguono tra 01:00 e 02:00 UTC (low-act
 | # | Task | Orario UTC | Descrizione |
 |---|------|------------|-------------|
 | 1 | **daily_restart_services** | 01:00 | Riavvia tutti i servizi sixbtc via supervisorctl (tranne lo scheduler). Previene memory leak. |
-| 2 | **refresh_market_regimes** | 01:05 | Ricalcola regime di mercato (TREND/REVERSAL/MIXED) per tutti i coin attivi. |
-| 3 | **renew_agent_wallets** | 01:10 | Verifica credenziali agent wallet Hyperliquid in scadenza (entro 30gg) e le rinnova. |
-| 4 | **check_subaccount_funds** | 01:15 | Controlla balance subaccount. Se sotto soglia, esegue topup dal master wallet. |
-| 5 | **cleanup_tmp_dir** | 01:20 | Elimina file temporanei in `/tmp` più vecchi di 24h. |
-| 6 | **cleanup_old_events** | 01:25 | Elimina record `StrategyEvent` più vecchi di 7gg dal DB. |
-| 7 | **cleanup_stale_strategies** | 01:30 | Elimina strategie bloccate in GENERATED/VALIDATED da più di 1 giorno. |
-| 8 | **cleanup_old_failed** | 01:35 | Elimina strategie FAILED più vecchie di 7gg dal DB. |
-| 9 | **cleanup_old_retired** | 01:40 | Elimina strategie RETIRED (evicted dal pool) più vecchie di 7gg dal DB. |
-| 10 | **update_pairs** | 01:45, 13:45 | Aggiorna lista coin tradabili da Hyperliquid × Binance. |
-| 11 | **download_data** | 02:00, 14:00 | Scarica dati OHLCV da Binance per tutti i coin attivi. |
-| - | **cleanup_zombie_processes** | ogni 3h | Trova e uccide processi Python zombie/orfani di sixbtc. |
+| 2 | **renew_agent_wallets** | 01:10 | Verifica credenziali agent wallet Hyperliquid in scadenza (entro 30gg) e le rinnova. |
+| 3 | **check_subaccount_funds** | 01:15 | Controlla balance subaccount. Se sotto soglia, esegue topup dal master wallet. |
+| 4 | **cleanup_tmp_dir** | 01:20 | Elimina file temporanei in `/tmp` più vecchi di 24h. |
+| 5 | **cleanup_old_events** | 01:25 | Elimina record `StrategyEvent` più vecchi di 7gg dal DB. |
+| 6 | **cleanup_stale_strategies** | 01:30 | Elimina strategie bloccate in GENERATED/VALIDATED da più di 1 giorno. |
+| 7 | **cleanup_old_failed** | 01:35 | Elimina strategie FAILED più vecchie di 7gg dal DB. |
+| 8 | **cleanup_old_retired** | 01:40 | Elimina strategie RETIRED (evicted dal pool) più vecchie di 7gg dal DB. |
+| 9 | **update_pairs** | 01:45, 13:45 | Aggiorna lista coin tradabili da Hyperliquid × Binance. |
+| 10 | **download_data** | 02:00, 14:00 | Scarica dati OHLCV da Binance per tutti i coin attivi. |
+| 11 | **refresh_market_regimes** | 02:30, 14:30 | Ricalcola regime di mercato (TREND/REVERSAL/MIXED) per tutti i coin attivi. Gira DOPO download_data. |
 | - | **cleanup_stale_processing** | ogni 30min | Rilascia strategie bloccate in processing > 30 min. |
 | - | **refresh_data_cache** | ogni 4h | Preload BTC data per tutti i TF configurati (mantiene cache calda). |
 
@@ -406,28 +405,23 @@ Questa finestra è scelta perché è un periodo di bassa attività per i mercati
 | # | Task | Orario | Descrizione |
 |---|------|--------|-------------|
 | 1 | **daily_restart_services** | 01:00 | Riavvia servizi sixbtc via supervisorctl (tranne scheduler) |
-| 2 | **refresh_market_regimes** | 01:05 | Ricalcola regime (TREND/REVERSAL/MIXED) per coin attivi |
-| 3 | **renew_agent_wallets** | 01:10 | Rinnova agent wallet in scadenza (entro 30gg) |
-| 4 | **check_subaccount_funds** | 01:15 | Topup subaccount da master se balance basso |
-| 5 | **cleanup_tmp_dir** | 01:20 | Elimina file /tmp > 24h |
-| 6 | **cleanup_old_events** | 01:25 | Elimina StrategyEvent > 7 giorni |
-| 7 | **cleanup_stale_strategies** | 01:30 | Elimina strategie stuck in GENERATED/VALIDATED > 1 giorno |
-| 8 | **cleanup_old_failed** | 01:35 | Elimina strategie FAILED > 7 giorni |
-| 9 | **cleanup_old_retired** | 01:40 | Elimina strategie RETIRED (evicted) > 7 giorni |
+| 2 | **renew_agent_wallets** | 01:10 | Rinnova agent wallet in scadenza (entro 30gg) |
+| 3 | **check_subaccount_funds** | 01:15 | Topup subaccount da master se balance basso |
+| 4 | **cleanup_tmp_dir** | 01:20 | Elimina file /tmp > 24h |
+| 5 | **cleanup_old_events** | 01:25 | Elimina StrategyEvent > 7 giorni |
+| 6 | **cleanup_stale_strategies** | 01:30 | Elimina strategie stuck in GENERATED/VALIDATED > 1 giorno |
+| 7 | **cleanup_old_failed** | 01:35 | Elimina strategie FAILED > 7 giorni |
+| 8 | **cleanup_old_retired** | 01:40 | Elimina strategie RETIRED (evicted) > 7 giorni |
 
-### Task Data Scheduler
+### Task Data Scheduler (2x al giorno)
 
 | # | Task | Orario | Descrizione |
 |---|------|--------|-------------|
-| 10 | **update_pairs** | 01:45, 13:45 | Aggiorna lista coin tradabili (vedi A1) |
-| 11 | **download_data** | 02:00, 14:00 | Scarica OHLCV da Binance (vedi A2) |
+| 9 | **update_pairs** | 01:45, 13:45 | Aggiorna lista coin tradabili (vedi A1) |
+| 10 | **download_data** | 02:00, 14:00 | Scarica OHLCV da Binance (vedi A2) |
+| 11 | **refresh_market_regimes** | 02:30, 14:30 | Ricalcola regime (TREND/REVERSAL/MIXED) dopo download dati |
 
 ### Task Periodici
-
-**cleanup_zombie_processes** (ogni 3h)
-- Trova processi Python zombie/orfani
-- Kill processi bloccati o duplicati
-- Protegge processi gestiti da supervisor
 
 **cleanup_stale_processing** (ogni 30 min)
 - Rilascia strategy bloccate in processing > 30 min
@@ -500,10 +494,6 @@ Questa finestra è scelta perché è un periodo di bassa attività per i mercati
 ```yaml
 scheduler:
   tasks:
-    cleanup_zombie_processes:
-      enabled: true
-      interval_hours: 3
-
     daily_restart_services:
       enabled: true
       interval_hours: 24
@@ -560,7 +550,7 @@ scheduler:
 # Market regime detection (Unger method)
 regime:
   enabled: true
-  # refresh_market_regimes runs at 01:05 UTC
+  # refresh_market_regimes runs at 02:30 and 14:30 UTC (after download_data)
 
 # Data scheduler (update_pairs + download_data)
 data_scheduler:

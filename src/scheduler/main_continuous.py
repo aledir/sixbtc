@@ -16,7 +16,7 @@ import subprocess
 import threading
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List
 
 from src.config import load_config
 from src.database import get_session, Strategy, StrategyEvent, StrategyProcessor
@@ -59,10 +59,6 @@ class ContinuousSchedulerProcess:
 
         # Configurable tasks (check enabled flag)
         scheduler_config = self.config._raw_config.get('scheduler', {}).get('tasks', {})
-
-        zombie_config = scheduler_config.get('cleanup_zombie_processes', {})
-        if zombie_config.get('enabled', False):
-            self.tasks['cleanup_zombie_processes'] = zombie_config['interval_hours']
 
         restart_config = scheduler_config.get('daily_restart_services', {})
         if restart_config.get('enabled', False):
@@ -125,11 +121,12 @@ class ContinuousSchedulerProcess:
             self.cleanup_retired_max_age_days = retired_config.get('max_age_days', 7)
 
         # Market regime detection (Unger method)
+        # Runs 2x daily AFTER download_data (02:30 and 14:30 UTC)
         regime_config = self.config._raw_config.get('regime', {})
         if regime_config.get('enabled', False):
-            self.tasks['refresh_market_regimes'] = 24  # Daily
-            self.regime_run_hour = 1  # Run at 01:05 UTC
-            self.regime_run_minute = 5
+            self.tasks['refresh_market_regimes'] = 12  # Every 12 hours
+            self.regime_run_hours = [2, 14]  # Run at 02:30 and 14:30 UTC
+            self.regime_run_minute = 30
 
         # Data scheduler (pairs update + OHLCV download)
         data_sched_config = self.config._raw_config.get('data_scheduler', {})
@@ -159,7 +156,7 @@ class ContinuousSchedulerProcess:
             'cleanup_stale_strategies': (getattr(self, 'cleanup_stale_hour', 6), getattr(self, 'cleanup_stale_minute', 0)) if 'cleanup_stale_strategies' in self.tasks else None,
             'cleanup_old_failed': (getattr(self, 'cleanup_failed_hour', 2), getattr(self, 'cleanup_failed_minute', 0)) if 'cleanup_old_failed' in self.tasks else None,
             'cleanup_old_retired': (getattr(self, 'cleanup_retired_hour', 2), getattr(self, 'cleanup_retired_minute', 10)) if 'cleanup_old_retired' in self.tasks else None,
-            'refresh_market_regimes': (getattr(self, 'regime_run_hour', 1), getattr(self, 'regime_run_minute', 5)) if 'refresh_market_regimes' in self.tasks else None,
+            # Note: refresh_market_regimes uses multi-hour scheduling like download_data
         }
         # Remove None entries
         self.fixed_schedule_tasks = {k: v for k, v in self.fixed_schedule_tasks.items() if v is not None}
@@ -263,6 +260,25 @@ class ContinuousSchedulerProcess:
 
             return True, 'data_update_time'
 
+        # Regime detection runs 2x daily AFTER download_data (02:30 and 14:30 UTC)
+        if task_name == 'refresh_market_regimes':
+            target_hours = getattr(self, 'regime_run_hours', [2, 14])
+            target_minute = getattr(self, 'regime_run_minute', 30)
+
+            # Check if current hour is in target hours
+            if now.hour not in target_hours:
+                return False, 'wrong_hour'
+
+            # Check if we're in the right minute window (5-minute window)
+            if not (target_minute <= now.minute < target_minute + 5):
+                return False, 'wrong_minute'
+
+            # Check if already run in this hour today
+            if last.hour == now.hour and last.date() == now.date():
+                return False, 'already_run_this_hour'
+
+            return True, 'regime_update_time'
+
         # Regular interval-based task
         interval_hours = self.tasks.get(task_name, 24)
         elapsed_seconds = (now - last).total_seconds()
@@ -297,10 +313,6 @@ class ContinuousSchedulerProcess:
             elif task_name == 'refresh_data_cache':
                 result = await self._refresh_data_cache()
                 tracker.add_metadata('refreshed_timeframes', result.get('timeframes', []))
-
-            elif task_name == 'cleanup_zombie_processes':
-                result = await self._cleanup_zombie_processes()
-                tracker.add_metadata('killed_count', result.get('killed', 0))
 
             elif task_name == 'daily_restart_services':
                 result = await self._daily_restart_services()
@@ -495,89 +507,6 @@ class ContinuousSchedulerProcess:
             logger.error(f"Data refresh failed: {e}")
 
         return {'timeframes': refreshed_timeframes}
-
-    async def _cleanup_zombie_processes(self) -> dict:
-        """
-        Kill zombie processes that accumulate over time.
-
-        Targets:
-        - Vite dev server instances (multiple can spawn from restarts)
-        - Only kills processes NOT in the supervisor process tree
-        """
-        killed = 0
-
-        try:
-            # Get current supervisor-managed frontend PID and all its descendants
-            result = subprocess.run(
-                ['supervisorctl', 'pid', 'sixbtc:frontend'],
-                capture_output=True,
-                text=True
-            )
-            supervisor_pid = result.stdout.strip() if result.returncode == 0 else None
-
-            # Get all descendants of supervisor frontend process
-            protected_pids: Set[str] = set()
-            if supervisor_pid:
-                protected_pids.add(supervisor_pid)
-                # Get all child PIDs recursively using pgrep -P
-                result = subprocess.run(
-                    ['pgrep', '-P', supervisor_pid],
-                    capture_output=True,
-                    text=True
-                )
-                if result.returncode == 0:
-                    for child in result.stdout.strip().split('\n'):
-                        if child.strip():
-                            protected_pids.add(child.strip())
-                            # Also get grandchildren
-                            result2 = subprocess.run(
-                                ['pgrep', '-P', child.strip()],
-                                capture_output=True,
-                                text=True
-                            )
-                            if result2.returncode == 0:
-                                for grandchild in result2.stdout.strip().split('\n'):
-                                    if grandchild.strip():
-                                        protected_pids.add(grandchild.strip())
-
-            # Find all vite processes
-            result = subprocess.run(
-                ['pgrep', '-f', 'vite.*5173'],
-                capture_output=True,
-                text=True
-            )
-
-            if result.returncode != 0:
-                return {'killed': 0}
-
-            vite_pids = result.stdout.strip().split('\n')
-
-            for pid in vite_pids:
-                pid = pid.strip()
-                if not pid or not pid.isdigit():
-                    continue
-
-                # Skip protected processes (supervisor tree)
-                if pid in protected_pids:
-                    continue
-
-                # Kill the zombie process
-                try:
-                    os.kill(int(pid), signal.SIGTERM)
-                    killed += 1
-                    logger.info(f"Killed zombie vite process: PID {pid}")
-                except (ProcessLookupError, PermissionError):
-                    pass
-
-            if killed > 0:
-                logger.info(f"Cleanup complete: killed {killed} zombie processes")
-            else:
-                logger.debug("No zombie processes found")
-
-        except Exception as e:
-            logger.error(f"Zombie cleanup failed: {e}")
-
-        return {'killed': killed}
 
     async def _daily_restart_services(self) -> dict:
         """
