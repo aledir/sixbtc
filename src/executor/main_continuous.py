@@ -136,22 +136,24 @@ class ContinuousExecutorProcess:
         logger.info("Starting continuous execution loop")
 
         # Collect symbols and timeframes from LIVE strategies for WebSocket subscriptions
-        symbols_set = set()
-        timeframes_set = set()
+        # Track these as instance attributes for incremental bootstrap
+        self._bootstrapped_symbols: set = set()
+        self._bootstrapped_timeframes: set = set()
+
         with get_session() as session:
             live_strategies = session.query(Strategy).filter(Strategy.status == 'LIVE').all()
             for strat in live_strategies:
                 if strat.timeframe:
-                    timeframes_set.add(strat.timeframe)
+                    self._bootstrapped_timeframes.add(strat.timeframe)
                 if strat.trading_coins:
-                    symbols_set.update(strat.trading_coins)
+                    self._bootstrapped_symbols.update(strat.trading_coins)
 
         # Set symbols and timeframes for WebSocket candle subscriptions
-        self.data_provider.symbols = list(symbols_set)
-        self.data_provider.timeframes = list(timeframes_set)
+        self.data_provider.symbols = list(self._bootstrapped_symbols)
+        self.data_provider.timeframes = list(self._bootstrapped_timeframes)
         logger.info(
-            f"WebSocket will subscribe to {len(symbols_set)} symbols x "
-            f"{len(timeframes_set)} timeframes from LIVE strategies"
+            f"WebSocket will subscribe to {len(self._bootstrapped_symbols)} symbols x "
+            f"{len(self._bootstrapped_timeframes)} timeframes from LIVE strategies"
         )
 
         # Rule #4b: Start WebSocket data provider FIRST
@@ -217,6 +219,10 @@ class ContinuousExecutorProcess:
         last_heartbeat = datetime.now(UTC)
         heartbeat_interval = 60  # seconds
 
+        # Incremental bootstrap tracking (check every 5 min for new strategies)
+        last_bootstrap_check = datetime.now(UTC)
+        bootstrap_check_interval = 300  # 5 minutes
+
         while not self.shutdown_event.is_set() and not self.force_exit:
             try:
                 loop_start = datetime.now(UTC)
@@ -252,6 +258,11 @@ class ContinuousExecutorProcess:
                 if (now - last_heartbeat).total_seconds() >= heartbeat_interval:
                     last_heartbeat = now
                     self._log_heartbeat(len(active_subaccounts), loop_duration)
+
+                # Check for new strategies (every 5 min) - incremental bootstrap
+                if (now - last_bootstrap_check).total_seconds() >= bootstrap_check_interval:
+                    last_bootstrap_check = now
+                    await self._check_and_bootstrap_new_streams()
 
             except Exception as e:
                 logger.error(f"Execution cycle error: {e}", exc_info=True)
@@ -322,6 +333,96 @@ class ContinuousExecutorProcess:
                     )
 
             session.commit()
+
+    async def _check_and_bootstrap_new_streams(self) -> None:
+        """
+        Check for new coins/timeframes from rotated strategies and bootstrap them.
+
+        Called every 5 minutes to detect newly deployed strategies that have
+        coins/timeframes not yet in the WebSocket cache.
+
+        Flow:
+        1. Query current LIVE strategies for coins/timeframes
+        2. Compare with already-bootstrapped sets
+        3. If new ones found:
+           a. Bootstrap historical data via HTTP
+           b. Subscribe to new WebSocket candle streams
+        """
+        try:
+            # Get current coins/timeframes from LIVE strategies
+            current_symbols: set = set()
+            current_timeframes: set = set()
+
+            with get_session() as session:
+                live_strategies = session.query(Strategy).filter(
+                    Strategy.status == 'LIVE'
+                ).all()
+
+                for strat in live_strategies:
+                    if strat.timeframe:
+                        current_timeframes.add(strat.timeframe)
+                    if strat.trading_coins:
+                        current_symbols.update(strat.trading_coins)
+
+            # Find new coins/timeframes
+            new_symbols = current_symbols - self._bootstrapped_symbols
+            new_timeframes = current_timeframes - self._bootstrapped_timeframes
+
+            if not new_symbols and not new_timeframes:
+                return  # Nothing new to bootstrap
+
+            # Calculate what needs bootstrapping
+            # New symbols need all existing timeframes + new timeframes
+            # New timeframes need all existing symbols + new symbols
+            symbols_to_bootstrap = new_symbols
+            timeframes_to_bootstrap = new_timeframes
+
+            # If we have new symbols, they need existing timeframes too
+            if new_symbols:
+                timeframes_to_bootstrap = current_timeframes
+
+            # If we have new timeframes, existing symbols need them too
+            if new_timeframes:
+                symbols_to_bootstrap = current_symbols
+
+            total_new = len(symbols_to_bootstrap) * len(timeframes_to_bootstrap)
+            logger.info(
+                f"Incremental bootstrap: {len(new_symbols)} new symbols, "
+                f"{len(new_timeframes)} new timeframes ({total_new} requests)"
+            )
+
+            # Bootstrap new streams via HTTP
+            self.data_provider.bootstrap_historical_data(
+                symbols=list(symbols_to_bootstrap),
+                timeframes=list(timeframes_to_bootstrap),
+                limit=200
+            )
+
+            # Subscribe to new WebSocket candle streams
+            for symbol in new_symbols:
+                for tf in current_timeframes:
+                    await self.data_provider.subscribe_candles(symbol, tf)
+
+            for tf in new_timeframes:
+                for symbol in current_symbols:
+                    await self.data_provider.subscribe_candles(symbol, tf)
+
+            # Update tracked sets
+            self._bootstrapped_symbols.update(new_symbols)
+            self._bootstrapped_timeframes.update(new_timeframes)
+
+            # Also update data_provider lists
+            self.data_provider.symbols = list(self._bootstrapped_symbols)
+            self.data_provider.timeframes = list(self._bootstrapped_timeframes)
+
+            logger.info(
+                f"Incremental bootstrap complete: now tracking "
+                f"{len(self._bootstrapped_symbols)} symbols x "
+                f"{len(self._bootstrapped_timeframes)} timeframes"
+            )
+
+        except Exception as e:
+            logger.error(f"Error in incremental bootstrap: {e}", exc_info=True)
 
     def _log_heartbeat(self, active_subaccounts_count: int, loop_duration: float = 0.0) -> None:
         """
