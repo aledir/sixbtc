@@ -81,13 +81,17 @@ class BalanceSyncService:
                             f"${old_balance or 0:.2f} -> ${actual_balance:.2f}"
                         )
 
-                    # Initialize peak_balance if not set
-                    if sa.peak_balance is None or sa.peak_balance == 0:
-                        sa.peak_balance = actual_balance
-                        sa.peak_balance_updated_at = datetime.now(UTC)
-                        logger.debug(f"Subaccount {sa.id}: initialized peak_balance=${actual_balance:.2f}")
-                    else:
-                        # Update timestamp to show data is fresh
+                    # IMPORTANT: Do NOT initialize peak_balance from Hyperliquid balance!
+                    # peak_balance must be based on allocated_capital (set by deployer)
+                    # Otherwise, manual Hyperliquid funding causes false 90% drawdown alerts.
+                    # See: Root cause analysis of EmergencyStopState bug.
+                    #
+                    # peak_balance is set by:
+                    # 1. StrategyDeployer when deploying (= allocated_capital)
+                    # 2. EmergencyStopManager when profits increase peak
+                    #
+                    # Only update timestamp to show data sync is fresh
+                    if sa.peak_balance is not None and sa.peak_balance > 0:
                         sa.peak_balance_updated_at = datetime.now(UTC)
 
                     results[sa.id] = actual_balance

@@ -174,6 +174,9 @@ class ContinuousExecutorProcess:
         else:
             logger.info("Balance sync: no subaccounts with funds found")
 
+        # Validate subaccount state to prevent false emergency stops
+        self._validate_subaccount_state()
+
         # Start trailing service
         await self.trailing_service.start()
 
@@ -226,6 +229,56 @@ class ContinuousExecutorProcess:
                 pass
 
         logger.info("Execution loop ended")
+
+    def _validate_subaccount_state(self):
+        """
+        Validate subaccount state to prevent false emergency stops.
+
+        Checks for inconsistencies that cause false drawdown alerts:
+        - peak_balance >> allocated_capital (from Hyperliquid balance bleed-through)
+
+        Fixes issues in-place and logs warnings.
+        """
+        with get_session() as session:
+            subaccounts = session.query(Subaccount).all()
+
+            for sa in subaccounts:
+                issues = []
+
+                # Check: peak_balance should not be massively higher than allocated_capital
+                # This happens when peak_balance was incorrectly initialized from Hyperliquid balance
+                if sa.allocated_capital and sa.peak_balance:
+                    if sa.peak_balance > sa.allocated_capital * 1.5:
+                        issues.append(
+                            f"peak_balance (${sa.peak_balance:.2f}) >> "
+                            f"allocated_capital (${sa.allocated_capital:.2f})"
+                        )
+                        # Auto-fix: reset peak to allocated_capital
+                        logger.warning(
+                            f"Subaccount {sa.id}: Fixing corrupt peak_balance "
+                            f"${sa.peak_balance:.2f} -> ${sa.allocated_capital:.2f}"
+                        )
+                        sa.peak_balance = sa.allocated_capital
+
+                # Check: peak_balance should be set if subaccount is ACTIVE
+                if sa.status == 'ACTIVE' and sa.strategy_id:
+                    if sa.peak_balance is None or sa.peak_balance <= 0:
+                        if sa.allocated_capital and sa.allocated_capital > 0:
+                            logger.warning(
+                                f"Subaccount {sa.id}: peak_balance not set for ACTIVE subaccount, "
+                                f"setting to allocated_capital ${sa.allocated_capital:.2f}"
+                            )
+                            sa.peak_balance = sa.allocated_capital
+                        else:
+                            issues.append("ACTIVE subaccount has no peak_balance or allocated_capital")
+
+                if issues:
+                    logger.warning(
+                        f"Subaccount {sa.id} validation issues:\n" +
+                        "\n".join(f"  - {issue}" for issue in issues)
+                    )
+
+            session.commit()
 
     def _get_active_subaccounts(self) -> List[Dict]:
         """Get all active subaccounts with their strategies"""

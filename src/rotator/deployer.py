@@ -158,11 +158,21 @@ class StrategyDeployer:
                         f"Subaccount {subaccount_id}: keeping existing capital=${subaccount.allocated_capital:.2f}"
                     )
 
-                # Initialize peak_balance to prevent false drawdown detection
-                # Use current_balance if available, otherwise allocated_capital
+                # Initialize peak_balance from allocated_capital ONLY
+                # CRITICAL: Do NOT use current_balance (Hyperliquid balance)!
+                # Using Hyperliquid balance causes false drawdown alerts when
+                # subaccount is manually funded with more than allocated capital.
+                # See: Root cause analysis of EmergencyStopState bug.
                 if subaccount.peak_balance is None or subaccount.peak_balance == 0:
-                    subaccount.peak_balance = subaccount.current_balance or subaccount.allocated_capital
-                    logger.info(f"Subaccount {subaccount_id}: set peak_balance=${subaccount.peak_balance:.2f}")
+                    if subaccount.allocated_capital and subaccount.allocated_capital > 0:
+                        subaccount.peak_balance = subaccount.allocated_capital
+                        logger.info(f"Subaccount {subaccount_id}: set peak_balance=${subaccount.peak_balance:.2f} (from allocated_capital)")
+                    else:
+                        logger.error(
+                            f"Subaccount {subaccount_id}: cannot set peak_balance - "
+                            f"allocated_capital not set. Deployment will fail."
+                        )
+                        return False
 
                 # Update strategy
                 db_strategy = session.query(Strategy).filter(

@@ -842,12 +842,18 @@ class EmergencyStopManager:
             sa.current_balance = current_balance
 
             # Update peak balance (high water mark) - only increase, never decrease
-            if sa.peak_balance is None or current_balance > sa.peak_balance:
-                sa.peak_balance = current_balance
-                sa.peak_balance_updated_at = now
-            else:
-                # Still update timestamp to show data is fresh
-                sa.peak_balance_updated_at = now
+            # CRITICAL: Do NOT initialize peak_balance from current_balance!
+            # peak_balance must be set by deployer (from allocated_capital).
+            # Only UPDATE peak if already set AND current is higher (profits).
+            if sa.peak_balance is not None and sa.peak_balance > 0:
+                if current_balance > sa.peak_balance:
+                    sa.peak_balance = current_balance
+                    sa.peak_balance_updated_at = now
+                    logger.debug(f"Subaccount {subaccount_id}: new peak ${current_balance:.2f}")
+                else:
+                    # Still update timestamp to show data is fresh
+                    sa.peak_balance_updated_at = now
+            # If peak_balance is None, don't set it - deployer handles initialization
 
             # Update daily PnL (reset if new day)
             today = now.date()

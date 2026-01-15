@@ -71,7 +71,7 @@ hyperliquid:
   # MASTER dry_run flag - controls ALL trading behavior
   # true = no real orders (safe testing)
   # false = real orders (live trading)
-  dry_run: true
+  dry_run: false
 
   # Testnet mode (if true, uses testnet API)
   testnet: false
