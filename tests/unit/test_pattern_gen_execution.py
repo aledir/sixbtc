@@ -17,7 +17,7 @@ from src.generator.pattern_gen.building_blocks import ALL_BLOCKS
 
 
 def create_test_ohlcv(rows: int = 500) -> pd.DataFrame:
-    """Create realistic OHLCV test data."""
+    """Create realistic OHLCV test data with DatetimeIndex."""
     np.random.seed(42)
 
     returns = np.random.normal(0, 0.02, rows)
@@ -28,13 +28,16 @@ def create_test_ohlcv(rows: int = 500) -> pd.DataFrame:
     open_price = low + (high - low) * np.random.random(rows)
     volume = np.random.uniform(1000, 10000, rows)
 
+    # DatetimeIndex required by pandas_ta indicators like VWAP
+    dates = pd.date_range(end=pd.Timestamp.now(), periods=rows, freq='15min')
+
     return pd.DataFrame({
         'open': open_price,
         'high': high,
         'low': low,
         'close': close,
         'volume': volume,
-    })
+    }, index=dates)
 
 
 def execute_strategy_code(code: str, df: pd.DataFrame) -> tuple[bool, Optional[str]]:

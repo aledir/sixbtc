@@ -295,7 +295,7 @@ class ExecutionValidator:
             n_bars: Number of bars to generate
 
         Returns:
-            DataFrame with OHLCV columns
+            DataFrame with OHLCV columns and DatetimeIndex
         """
         if n_bars == 0:
             return pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
@@ -319,10 +319,13 @@ class ExecutionValidator:
 
         volume = np.random.uniform(100, 1000, n_bars)
 
+        # Create DatetimeIndex (required by pandas_ta VWAP and other indicators)
+        dates = pd.date_range(end=pd.Timestamp.now(), periods=n_bars, freq='15min')
+
         return pd.DataFrame({
             'open': open_price,
             'high': high,
             'low': low,
             'close': close,
             'volume': volume
-        })
+        }, index=dates)
