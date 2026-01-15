@@ -701,10 +701,9 @@ export interface SnapshotBacktestStats {
 }
 
 export interface SnapshotScore {
-  passed: number;
-  rejected: number;
-  avg_passed_score: number | null;
-  min_score_threshold: number;
+  min_score: number;
+  max_score: number;
+  avg_score: number;
 }
 
 export interface SnapshotShuffle {

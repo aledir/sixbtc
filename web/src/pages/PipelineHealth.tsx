@@ -139,22 +139,22 @@ function PeriodSelector({ value, onChange }: { value: MetricsPeriod; onChange: (
   );
 }
 
-// Full 10-step pipeline funnel
+// Full pipeline funnel using actual API field names
 function PipelineFunnel({ snapshot }: { snapshot: MetricsSnapshotResponse }) {
-  const { funnel, failures } = snapshot;
+  const { funnel, failures, live } = snapshot;
+  const f = funnel as any; // Use any to access actual API fields
 
-  // Define all 10 pipeline stages
+  // Define pipeline stages with actual API field names
   const stages = [
-    { key: 'generated', label: 'Generated', value: funnel.generated, icon: Zap, color: '#6b7280' },
-    { key: 'validated', label: 'Validated', value: funnel.validated, failed: funnel.validation_failed, icon: CheckCircle, color: '#3b82f6' },
-    { key: 'combinations', label: 'Parametric', value: funnel.combinations_tested, icon: BarChart3, color: '#8b5cf6' },
-    { key: 'is_passed', label: 'IS Backtest', value: funnel.is_passed, icon: TrendingUp, color: '#06b6d4' },
-    { key: 'oos_passed', label: 'OOS Backtest', value: funnel.oos_passed, icon: TrendingUp, color: '#0891b2' },
-    { key: 'score_passed', label: 'Score Filter', value: funnel.score_passed, failed: failures.score_reject, icon: Filter, color: '#f59e0b' },
-    { key: 'shuffle_passed', label: 'Shuffle Test', value: funnel.shuffle_passed, failed: failures.shuffle_fail, icon: Shuffle, color: '#10b981' },
-    { key: 'mw_passed', label: 'Multi-Window', value: funnel.multi_window_passed, failed: failures.mw_fail, icon: TestTube, color: '#14b8a6' },
-    { key: 'robustness', label: 'Robustness', value: funnel.robustness_passed, icon: Database, color: '#22c55e' },
-    { key: 'live', label: 'LIVE', value: funnel.live, icon: Play, color: '#10b981' },
+    { key: 'generated', label: 'Generated', value: f.generated ?? 0, icon: Zap, color: '#6b7280' },
+    { key: 'validated', label: 'Validated', value: f.validated ?? 0, failed: f.validation_failed, icon: CheckCircle, color: '#3b82f6' },
+    { key: 'parametric', label: 'Parametric', value: f.parametric_output ?? 0, icon: BarChart3, color: '#8b5cf6' },
+    { key: 'scored', label: 'Scored', value: f.parametric_scored ?? 0, icon: TrendingUp, color: '#06b6d4' },
+    { key: 'score_ok', label: 'Score OK', value: f.score_ok ?? 0, failed: failures.score_reject, icon: Filter, color: '#f59e0b' },
+    { key: 'shuffle_ok', label: 'Shuffle OK', value: f.shuffle_ok ?? 0, failed: failures.shuffle_fail, icon: Shuffle, color: '#10b981' },
+    { key: 'mw_ok', label: 'Multi-Window', value: f.mw_ok ?? 0, failed: failures.mw_fail, icon: TestTube, color: '#14b8a6' },
+    { key: 'pool', label: 'Pool Added', value: f.pool ?? 0, icon: Database, color: '#22c55e' },
+    { key: 'live', label: 'LIVE', value: (live as any).live ?? 0, icon: Play, color: '#10b981' },
   ];
 
   // Calculate conversion rates
@@ -246,9 +246,9 @@ function RealtimeKPIs({ snapshot }: { snapshot: MetricsSnapshotResponse }) {
     },
     {
       label: 'Live Strategies',
-      value: live.count,
+      value: (live as any).live ?? 0,
       icon: Play,
-      profit: live.count > 0,
+      profit: ((live as any).live ?? 0) > 0,
     },
     {
       label: 'Avg BT Time',
@@ -395,8 +395,8 @@ function BacktestQuality({ snapshot }: { snapshot: MetricsSnapshotResponse }) {
       profit: (oos_backtest.passed_avg?.sharpe ?? 0) >= 1.0,
     },
     {
-      label: 'Score Threshold',
-      value: score.min_score_threshold.toFixed(1),
+      label: 'Min Score',
+      value: score.min_score?.toFixed(1) ?? '-',
     },
     {
       label: 'Avg Pool Score',
