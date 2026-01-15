@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import { LayoutDashboard, TrendingUp, LineChart, ScrollText, Settings, AlertTriangle, Activity, Trophy, FileCode, CheckCircle, Clock } from 'lucide-react';
-import { useStatus, useEmergencyStop } from '../hooks/useApi';
+import { useStatus } from '../hooks/useApi';
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Overview' },
@@ -26,16 +26,9 @@ function formatUptime(seconds: number): string {
 
 export default function Layout() {
   const { data: status, isError } = useStatus();
-  const emergencyStop = useEmergencyStop();
 
   const servicesOk = status?.services.every((s) => s.status === 'RUNNING') ?? false;
   const hasAlerts = (status?.alerts.length ?? 0) > 0;
-
-  const handleEmergencyStop = () => {
-    if (confirm('EMERGENCY STOP: This will halt all trading immediately. Continue?')) {
-      emergencyStop.mutate();
-    }
-  };
 
   return (
     <div className="flex min-h-screen bg-background text-foreground font-mono">
@@ -68,8 +61,8 @@ export default function Layout() {
           ))}
         </nav>
 
-        {/* System Status & Emergency Stop */}
-        <div className="p-3 border-t border-border space-y-3">
+        {/* System Status */}
+        <div className="p-3 border-t border-border">
           <div className="flex items-center justify-between text-xs">
             <div className="flex items-center gap-2">
               <span
@@ -85,14 +78,6 @@ export default function Layout() {
               <span className="text-muted">{formatUptime(status.uptime_seconds)}</span>
             )}
           </div>
-          <button
-            onClick={handleEmergencyStop}
-            disabled={emergencyStop.isPending}
-            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-loss/20 hover:bg-loss/30 text-loss rounded text-xs font-semibold transition-colors disabled:opacity-50"
-          >
-            <AlertTriangle size={14} />
-            {emergencyStop.isPending ? 'Stopping...' : 'Emergency Stop'}
-          </button>
         </div>
       </aside>
 

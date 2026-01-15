@@ -260,17 +260,6 @@ def get_system_alerts() -> List[Alert]:
                     timestamp=datetime.now(UTC),
                 ))
 
-            # Check for high number of failed strategies
-            failed_count = session.query(Strategy).filter(
-                Strategy.status == "FAILED"
-            ).count()
-
-            if failed_count > 50:
-                alerts.append(Alert(
-                    level="info",
-                    message=f"{failed_count} failed strategies pending cleanup",
-                    timestamp=datetime.now(UTC),
-                ))
 
     except Exception as e:
         logger.error(f"Error getting alerts: {e}")

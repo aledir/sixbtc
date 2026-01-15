@@ -168,7 +168,9 @@ function ThresholdsSection() {
             <div className="flex justify-between">
               <span className="text-muted">Max Leverage</span>
               <span className="font-mono">
-                {String(thresholds.risk?.max_leverage ?? '--')}x
+                {thresholds.risk?.max_leverage
+                  ? `${thresholds.risk.max_leverage}x`
+                  : 'Per-coin'}
               </span>
             </div>
           </div>

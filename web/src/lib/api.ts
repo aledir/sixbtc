@@ -110,13 +110,6 @@ export async function controlService(name: string, action: 'start' | 'stop' | 'r
   );
 }
 
-export async function emergencyStop() {
-  return fetchJson<import('../types').ServiceControlResponse>(
-    `${API_BASE}/services/emergency-stop`,
-    { method: 'POST' }
-  );
-}
-
 // Logs
 export async function getLogs(service: string, params?: {
   lines?: number;

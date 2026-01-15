@@ -90,18 +90,6 @@ export function useServiceControl() {
   });
 }
 
-export function useEmergencyStop() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: api.emergencyStop,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['services'] });
-      queryClient.invalidateQueries({ queryKey: ['status'] });
-    },
-  });
-}
-
 // Logs
 export function useLogs(service: string, params?: Parameters<typeof api.getLogs>[1]) {
   return useQuery({

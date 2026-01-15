@@ -726,18 +726,45 @@ python -c "from src.database.connection import get_engine; get_engine().connect(
 python -c "from src.executor.hyperliquid_client import HyperliquidClient; HyperliquidClient()"
 ```
 
-### 2. Running Daemons
+### 2. Process Management with Supervisor
+
+**CRITICAL RULES:**
+1. **Always use `supervisorctl` (without sudo)** to manage sixbtc services
+2. **Never start processes manually** with `python -m ...` - this duplicates processes
+3. **Never use `pkill` or `kill`** to stop services - use supervisorctl
+4. **Check for zombie processes** before and after operations
+
 ```bash
-# Start individual daemons (each in separate terminal/tmux pane)
-python -m src.generator.main_continuous    # Strategy generation
-python -m src.validator.main_continuous    # Validation pipeline
-python -m src.backtester.main_continuous   # Backtesting + scoring
-python -m src.rotator.main_continuous      # ACTIVE → LIVE rotation
-python -m src.executor.main_continuous     # Live trading execution
-python -m src.monitor.main_continuous      # Performance dashboard
-python -m src.scheduler.main_continuous    # Scheduled tasks
-python -m src.subaccount.main_continuous   # Subaccount management
+# Check status of all services
+supervisorctl status
+
+# Start/stop/restart individual services
+supervisorctl start sixbtc:api
+supervisorctl stop sixbtc:executor
+supervisorctl restart sixbtc:backtester
+
+# Restart all sixbtc services
+supervisorctl restart sixbtc:*
+
+# Check for zombie processes (should return nothing)
+ps aux | grep -E "(zombie|defunct|\<Z\>)" | grep -v grep
+
+# If zombies exist, investigate and clean up parent process
 ```
+
+**Available sixbtc services:**
+| Service | Purpose |
+|---------|---------|
+| `sixbtc:api` | FastAPI backend (port 8080) |
+| `sixbtc:frontend` | Vite dev server (port 5173) |
+| `sixbtc:generator` | Strategy generation |
+| `sixbtc:validator` | Validation pipeline |
+| `sixbtc:backtester` | Backtesting + scoring |
+| `sixbtc:rotator` | ACTIVE → LIVE rotation |
+| `sixbtc:executor` | Live trading execution |
+| `sixbtc:monitor` | Performance dashboard |
+| `sixbtc:scheduler` | Scheduled tasks |
+| `sixbtc:metrics` | Metrics collection |
 
 ### 3. CLI (Scaffold - Limited Functionality)
 ```bash

@@ -498,6 +498,8 @@ class CoinRegistry:
         Returns:
             Dict with cache stats
         """
+        self._ensure_cache()
+
         return {
             'total_coins': len(self._cache),
             'active_coins': len([c for c in self._cache.values() if c.is_active]),

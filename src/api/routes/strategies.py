@@ -67,10 +67,10 @@ async def list_strategies(
             # Convert to response format
             items = []
             for s in strategies:
-                # Get best backtest result for sharpe/win_rate
+                # Get best backtest result for sharpe/win_rate (use in_sample period)
                 best_backtest = session.query(BacktestResult).filter(
                     BacktestResult.strategy_id == s.id,
-                    BacktestResult.period_type == 'full',
+                    BacktestResult.period_type == 'in_sample',
                 ).order_by(desc(BacktestResult.sharpe_ratio)).first()
 
                 sharpe = best_backtest.sharpe_ratio if best_backtest else None
@@ -129,10 +129,10 @@ async def get_backtest_ranking(
             # Build ranking list
             ranking = []
             for s in strategies:
-                # Get backtest result for additional metrics
+                # Get backtest result for additional metrics (use in_sample period)
                 backtest = session.query(BacktestResult).filter(
                     BacktestResult.strategy_id == s.id,
-                    BacktestResult.period_type == 'full',
+                    BacktestResult.period_type == 'in_sample',
                 ).first()
 
                 ranking.append({
@@ -321,10 +321,10 @@ async def get_strategy(strategy_id: UUID):
             if not strategy:
                 raise HTTPException(status_code=404, detail="Strategy not found")
 
-            # Get best backtest result
+            # Get best backtest result (use in_sample period)
             backtest = session.query(BacktestResult).filter(
                 BacktestResult.strategy_id == strategy_id,
-                BacktestResult.period_type == 'full',
+                BacktestResult.period_type == 'in_sample',
             ).order_by(desc(BacktestResult.sharpe_ratio)).first()
 
             backtest_metrics = None

@@ -5,7 +5,6 @@ GET /api/services - Get all services status
 POST /api/services/{name}/start - Start a service
 POST /api/services/{name}/stop - Stop a service
 POST /api/services/{name}/restart - Restart a service
-POST /api/services/emergency-stop - Emergency stop all trading
 """
 import subprocess
 from typing import List
@@ -145,31 +144,3 @@ async def restart_service(service_name: str):
     )
 
 
-@router.post("/services/emergency-stop", response_model=ServiceControlResponse)
-async def emergency_stop():
-    """
-    Emergency stop all trading services.
-
-    Stops executor and monitor to halt all trading activity.
-    Other services (generator, backtester) continue running.
-    """
-    logger.warning("EMERGENCY STOP triggered via API")
-
-    # Stop trading services
-    trading_services = ["executor", "monitor"]
-    results = []
-
-    for service in trading_services:
-        success, message = run_supervisorctl("stop", service)
-        results.append(f"{service}: {message}")
-        if not success:
-            logger.error(f"Failed to stop {service}: {message}")
-
-    all_success = all("successful" in r or "stopped" in r.lower() for r in results)
-
-    return ServiceControlResponse(
-        success=all_success,
-        message="; ".join(results),
-        service="trading-services",
-        action="emergency-stop",
-    )
