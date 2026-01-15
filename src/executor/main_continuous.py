@@ -157,6 +157,12 @@ class ContinuousExecutorProcess:
         # Rule #4b: Start WebSocket data provider FIRST
         # This provides real-time prices and user data
         logger.info("Starting WebSocket data provider (Rule #4b: WebSocket First)...")
+
+        # Bootstrap historical candles BEFORE starting WebSocket
+        # This ensures strategies have enough data immediately
+        logger.info("Bootstrapping historical candles via HTTP...")
+        self.data_provider.bootstrap_historical_data(limit=200)
+
         self._ws_task = asyncio.create_task(self.data_provider.start())
 
         # Wait for WebSocket to establish connection and receive initial data
@@ -672,7 +678,13 @@ class ContinuousExecutorProcess:
 
     async def _get_market_data(self, symbol: str, timeframe: str):
         """
-        Get current market data for a symbol
+        Get current market data for a symbol from WebSocket cache.
+
+        Rule #4b: WebSocket First - use RAM cache populated by:
+        1. HTTP bootstrap at startup (historical candles)
+        2. WebSocket real-time updates (new candles)
+
+        NO HTTP calls at runtime - all data from RAM.
 
         Args:
             symbol: Trading pair (e.g., 'BTC', 'ETH')
@@ -682,27 +694,19 @@ class ContinuousExecutorProcess:
             DataFrame with OHLCV data or None
         """
         try:
-            # Use cache key to avoid reloading same data
-            cache_key = f"{symbol}_{timeframe}"
+            # Get candles from WebSocket RAM cache (Rule #4b: WebSocket First)
+            df = await self.data_provider.get_candles_as_dataframe(
+                symbol, timeframe, limit=200
+            )
 
-            # Check cache (valid for 60 seconds)
-            if cache_key in self._data_cache:
-                cached_data, cached_time = self._data_cache[cache_key]
-                if (datetime.now(UTC) - cached_time).seconds < 60:
-                    return cached_data
+            if df is None or df.empty:
+                logger.debug(f"No WebSocket data for {symbol}/{timeframe}")
+                return None
 
-            # Load fresh data
-            from src.backtester.data_loader import BacktestDataLoader
-            loader = BacktestDataLoader()
-            data = loader.load_single_symbol(symbol, timeframe, days=7)
-
-            # Update cache
-            self._data_cache[cache_key] = (data, datetime.now(UTC))
-
-            return data
+            return df
 
         except Exception as e:
-            logger.debug(f"Failed to get market data for {symbol}: {e}")
+            logger.warning(f"Failed to get WebSocket data for {symbol}/{timeframe}: {e}")
             return None
 
     async def _execute_signal(
