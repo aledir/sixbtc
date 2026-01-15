@@ -262,3 +262,12 @@ export function useMetricsCurrent() {
     refetchInterval: FAST_REFRESH,  // 10s - current state
   });
 }
+
+// Full pipeline snapshot - real-time computed metrics (same data as metrics.log)
+export function useMetricsSnapshot() {
+  return useQuery({
+    queryKey: ['metricsSnapshot'],
+    queryFn: api.getMetricsSnapshot,
+    refetchInterval: SLOW_REFRESH,  // 60s - matches collection interval
+  });
+}

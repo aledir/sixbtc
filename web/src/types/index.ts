@@ -591,3 +591,292 @@ export interface TimingResponse {
   period_hours: number;
   timing: Record<string, StageTiming>;
 }
+
+// =============================================================================
+// FULL PIPELINE SNAPSHOT (GET /api/metrics/snapshot)
+// =============================================================================
+
+export interface SnapshotCapital {
+  total: number;
+  main_account: number;
+  subaccounts: number;
+}
+
+export interface SnapshotGenerator {
+  total_24h: number;
+  by_source: Record<string, number>;
+  by_type: Record<string, number>;
+  by_direction: Record<string, number>;
+  by_timeframe: Record<string, number>;
+  timing_by_source: Record<string, number | null>;
+  leverage: {
+    min: number | null;
+    max: number | null;
+    avg: number | null;
+  };
+  by_provider: Record<string, number>;
+  failures: number;
+}
+
+export interface SnapshotAiCalls {
+  count: number | null;
+  max_calls: number | null;
+  remaining: number | null;
+}
+
+export interface SnapshotPatterns {
+  unique_used: number;
+  total_available: number | null;
+  remaining: number | null;
+}
+
+export interface SnapshotValidator {
+  queue: number;
+  passed_24h: number;
+  failed_24h: number;
+  by_source_passed: Record<string, number>;
+  by_source_failed: Record<string, number>;
+  timing_avg_ms: number | null;
+}
+
+export interface SnapshotParametric {
+  waiting: number;
+  processing: number;
+  total_bases: number;
+  total_combos: number;
+  passed_combos: number;
+  failed_combos: number;
+  bases_with_passed: number;
+  bases_with_failed: number;
+  passed_avg: {
+    sharpe: number;
+    wr: number;
+    exp: number;
+    trades: number;
+  } | null;
+  failed_avg: {
+    sharpe: number;
+    wr: number;
+    exp: number;
+    trades: number;
+  } | null;
+  fail_reasons: {
+    sharpe: number;
+    wr: number;
+    exp: number;
+    dd: number;
+    trades: number;
+  };
+  avg_duration_ms: number | null;
+  min_duration_ms: number | null;
+  max_duration_ms: number | null;
+}
+
+export interface SnapshotBacktestStats {
+  count: number;
+  passed: number;
+  failed: number;
+  passed_avg: {
+    sharpe: number | null;
+    wr: number | null;
+    exp: number | null;
+    trades: number | null;
+    dd?: number | null;
+  };
+  failed_avg: {
+    sharpe: number | null;
+    wr: number | null;
+    exp: number | null;
+    trades: number | null;
+    dd?: number | null;
+  };
+  fail_reasons: {
+    sharpe: number;
+    wr: number;
+    exp: number;
+    dd: number;
+    trades: number;
+  };
+  avg_duration_ms: number | null;
+}
+
+export interface SnapshotScore {
+  passed: number;
+  rejected: number;
+  avg_passed_score: number | null;
+  min_score_threshold: number;
+}
+
+export interface SnapshotShuffle {
+  failed: number;
+  cached: number;
+}
+
+export interface SnapshotWfa {
+  failed: number;
+}
+
+export interface SnapshotRobustness {
+  passed: number;
+  failed: number;
+  avg_passed: number | null;
+  min_threshold: number;
+  pool: {
+    avg_robustness: number | null;
+    min_robustness: number | null;
+    max_robustness: number | null;
+  };
+}
+
+export interface SnapshotPoolQuality {
+  expectancy_avg: number | null;
+  sharpe_avg: number | null;
+  winrate_avg: number | null;
+  dd_avg: number | null;
+}
+
+export interface SnapshotPool {
+  size: number;
+  limit: number;
+  score_min: number | null;
+  score_max: number | null;
+  score_avg: number | null;
+  quality: SnapshotPoolQuality;
+  by_source: Record<string, number>;
+  avg_score_by_source: Record<string, number | null>;
+  added_24h_by_source: Record<string, number>;
+}
+
+export interface SnapshotRetest {
+  tested: number;
+  passed: number;
+  failed: number;
+  pass_rate: number | null;
+}
+
+export interface SnapshotLive {
+  count: number;
+  avg_age_days: number | null;
+  avg_score: number | null;
+  type_distribution: Record<string, number>;
+  timeframe_distribution: Record<string, number>;
+  direction_distribution: Record<string, number>;
+  rotations_24h: number;
+  retirements_24h: number;
+}
+
+export interface SnapshotSubaccount {
+  id: number;
+  balance: number;
+  strategy_name: string | null;
+  timeframe: string | null;
+  direction: string | null;
+  coins_count: number;
+  uptime_days: number | null;
+  rpnl: number;
+  rpnl_pct: number;
+  upnl: number;
+  positions: number;
+  dd_pct: number;
+  wr_pct: number;
+  // True P&L from Hyperliquid (if available)
+  hl_balance?: number;
+  hl_net_deposits?: number;
+  hl_true_pnl?: number;
+  hl_true_pnl_pct?: number;
+}
+
+export interface SnapshotSchedulerTask {
+  last_run: string | null;
+  next_run: string | null;
+  status: string;
+  metadata: Record<string, any>;
+}
+
+export interface SnapshotScheduler {
+  total_ok: number;
+  total_tasks: number;
+  tasks: Record<string, SnapshotSchedulerTask>;
+}
+
+export interface SnapshotBackpressure {
+  gen_queue: number;
+  gen_limit: number;
+  gen_full: boolean;
+  val_queue: number;
+  val_limit: number;
+  bt_waiting: number;
+  bt_processing: number;
+}
+
+export interface SnapshotFunnel {
+  generated: number;
+  validated: number;
+  validation_failed: number;
+  combinations_tested: number;
+  is_passed: number;
+  oos_passed: number;
+  score_passed: number;
+  shuffle_passed: number;
+  multi_window_passed: number;
+  robustness_passed: number;
+  pool_added: number;
+  live: number;
+}
+
+export interface SnapshotThroughput {
+  generated: number;
+  validated: number;
+  backtested: number;
+}
+
+export interface SnapshotTiming {
+  validation: number | null;
+  backtesting: number | null;
+}
+
+export interface SnapshotFailures {
+  validation: number;
+  parametric_fail: number;
+  score_reject: number;
+  shuffle_fail: number;
+  shuffle_cached: number;
+  mw_fail: number;
+  pool_reject: number;
+}
+
+// Full snapshot response
+export interface MetricsSnapshotResponse {
+  timestamp: string;
+  status: string;
+  issue: string | null;
+  trading_mode: 'DRY_RUN' | 'LIVE';
+
+  capital: SnapshotCapital;
+  queue_depths: Record<string, number>;
+
+  generator: SnapshotGenerator;
+  ai_calls: SnapshotAiCalls;
+  patterns: SnapshotPatterns;
+
+  validator: SnapshotValidator;
+  parametric: SnapshotParametric;
+  is_backtest: SnapshotBacktestStats;
+  oos_backtest: SnapshotBacktestStats;
+  score: SnapshotScore;
+  shuffle: SnapshotShuffle;
+  wfa: SnapshotWfa;
+  robustness: SnapshotRobustness;
+  pool: SnapshotPool;
+  retest: SnapshotRetest;
+  live: SnapshotLive;
+
+  subaccounts: SnapshotSubaccount[];
+  scheduler: SnapshotScheduler;
+
+  backpressure: SnapshotBackpressure;
+  funnel: SnapshotFunnel;
+  throughput: SnapshotThroughput;
+  timing: SnapshotTiming;
+  failures: SnapshotFailures;
+}

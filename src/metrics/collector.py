@@ -3005,6 +3005,181 @@ class MetricsCollector:
         with get_session() as session:
             return self._get_failures_24h(session, since)
 
+    def get_full_snapshot(self) -> Dict[str, Any]:
+        """
+        Get the full pipeline snapshot as a dictionary for API consumption.
+
+        Returns all computed metrics as a structured dict, same data that
+        gets logged every collection interval.
+        """
+        try:
+            with get_session() as session:
+                # Time windows
+                now = datetime.now(UTC)
+                window_1min = now - timedelta(seconds=self.interval_seconds)
+                window_24h = now - timedelta(hours=24)
+
+                # Collect all metrics
+                queue_depths = self._get_queue_depths(session)
+                generator_stats = self._get_generator_stats_24h(session, window_24h)
+                ai_calls_today = self._get_ai_calls_today()
+                unused_patterns = self._get_unused_patterns(session)
+                funnel = self._get_funnel_24h(session, window_24h)
+                validation_by_source = self._get_validation_by_source_24h(session, window_24h)
+                pool_added_by_source = self._get_pool_added_by_source_24h(session, window_24h)
+                timing = self._get_timing_avg_24h(session, window_24h)
+                throughput = self._get_throughput_interval(session, window_1min)
+                failures = self._get_failures_24h(session, window_24h)
+                backpressure = self._get_backpressure_status(session, queue_depths)
+                pool_stats = self._get_pool_stats(session)
+                pool_quality = self._get_pool_quality(session)
+                pool_by_source = self._get_pool_by_source(session)
+                pool_avg_score_by_source = self._get_pool_avg_score_by_source(session)
+                is_stats = self._get_is_stats_24h(session, window_24h)
+                oos_stats = self._get_oos_stats_24h(session, window_24h)
+                score_stats = self._get_score_stats_24h(session, window_24h)
+                retest_stats = self._get_retest_stats_24h(session, window_24h)
+                robustness_stats = self._get_robustness_stats_24h(session, window_24h)
+                pool_robustness = self._get_pool_robustness_stats(session)
+                live_stats = self._get_live_rotation_stats(session, window_24h)
+                combo_stats = self._get_combo_stats_24h(session, window_24h)
+                scheduler_stats = self._get_scheduler_stats(session)
+                subaccount_stats = self._get_subaccount_stats(session)
+
+                # Overall status
+                status, issue = self._get_status_and_issue(
+                    queue_depths, backpressure, throughput
+                )
+
+                # Capital stats
+                main_balance = self._get_main_account_balance()
+                subs_balance = sum(sub['balance'] for sub in subaccount_stats)
+                total_balance = main_balance + subs_balance
+
+                # Trading mode
+                dry_run = self.config.get('hyperliquid', {}).get('dry_run', True)
+
+                return {
+                    'timestamp': now.isoformat(),
+                    'status': status,
+                    'issue': issue,
+                    'trading_mode': 'DRY_RUN' if dry_run else 'LIVE',
+
+                    # Capital summary
+                    'capital': {
+                        'total': total_balance,
+                        'main_account': main_balance,
+                        'subaccounts': subs_balance,
+                    },
+
+                    # Queue depths
+                    'queue_depths': queue_depths,
+
+                    # Generator (step 1)
+                    'generator': {
+                        'total_24h': generator_stats['total'],
+                        'by_source': generator_stats['by_source'],
+                        'by_type': generator_stats['by_type'],
+                        'by_direction': generator_stats['by_direction'],
+                        'by_timeframe': generator_stats['by_timeframe'],
+                        'timing_by_source': generator_stats['timing_by_source'],
+                        'leverage': generator_stats['leverage'],
+                        'by_provider': generator_stats['by_provider'],
+                        'failures': generator_stats['gen_failures'],
+                    },
+
+                    # AI calls
+                    'ai_calls': ai_calls_today,
+
+                    # Patterns (for pattern source)
+                    'patterns': unused_patterns,
+
+                    # Validator (step 2)
+                    'validator': {
+                        'queue': queue_depths.get('GENERATED', 0),
+                        'passed_24h': funnel['validated'],
+                        'failed_24h': funnel['validation_failed'],
+                        'by_source_passed': validation_by_source.get('passed', {}),
+                        'by_source_failed': validation_by_source.get('failed', {}),
+                        'timing_avg_ms': timing.get('validation'),
+                    },
+
+                    # Parametric (step 3)
+                    'parametric': {
+                        'waiting': backpressure['bt_waiting'],
+                        'processing': backpressure['bt_processing'],
+                        **combo_stats,
+                    },
+
+                    # IS Backtest (step 4)
+                    'is_backtest': is_stats,
+
+                    # OOS Backtest (step 5)
+                    'oos_backtest': oos_stats,
+
+                    # Score (step 6)
+                    'score': score_stats,
+
+                    # Shuffle test (step 7)
+                    'shuffle': {
+                        'failed': failures.get('shuffle_fail', 0),
+                        'cached': failures.get('shuffle_cached', 0),
+                    },
+
+                    # WFA/Multi-window (step 8)
+                    'wfa': {
+                        'failed': failures.get('mw_fail', 0),
+                    },
+
+                    # Robustness (step 9)
+                    'robustness': {
+                        **robustness_stats,
+                        'pool': pool_robustness,
+                    },
+
+                    # Pool (step 10)
+                    'pool': {
+                        **pool_stats,
+                        'quality': pool_quality,
+                        'by_source': pool_by_source,
+                        'avg_score_by_source': pool_avg_score_by_source,
+                        'added_24h_by_source': pool_added_by_source,
+                    },
+
+                    # Retest stats
+                    'retest': retest_stats,
+
+                    # Live trading
+                    'live': {
+                        **live_stats,
+                    },
+
+                    # Subaccounts (detailed per-subaccount stats)
+                    'subaccounts': subaccount_stats,
+
+                    # Scheduler
+                    'scheduler': scheduler_stats,
+
+                    # Backpressure status
+                    'backpressure': backpressure,
+
+                    # Funnel (raw data)
+                    'funnel': funnel,
+
+                    # Throughput
+                    'throughput': throughput,
+
+                    # Timing
+                    'timing': timing,
+
+                    # Failures
+                    'failures': failures,
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to get full snapshot: {e}", exc_info=True)
+            return {'error': str(e), 'timestamp': datetime.now(UTC).isoformat()}
+
     def run(self) -> None:
         """Main collection loop (runs forever)."""
         logger.info(f"Metrics collector started (interval: {self.interval_seconds}s)")

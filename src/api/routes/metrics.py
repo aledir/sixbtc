@@ -13,6 +13,17 @@ from sqlalchemy.orm import Session
 
 from src.database import get_db, PipelineMetricsSnapshot
 from src.database.models import StrategyEvent
+from src.metrics.collector import MetricsCollector
+
+# Singleton MetricsCollector instance for /snapshot endpoint
+_metrics_collector: Optional[MetricsCollector] = None
+
+def get_metrics_collector() -> MetricsCollector:
+    """Get or create singleton MetricsCollector instance."""
+    global _metrics_collector
+    if _metrics_collector is None:
+        _metrics_collector = MetricsCollector()
+    return _metrics_collector
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
@@ -648,3 +659,32 @@ async def get_timing_metrics(
         'period_hours': hours,
         'timing': timing,
     }
+
+
+@router.get("/snapshot")
+async def get_full_snapshot() -> Dict:
+    """
+    Get the full real-time pipeline snapshot.
+
+    Returns the complete computed metrics snapshot, same data that the
+    metrics service logs every 60 seconds. This is the richest endpoint
+    for dashboard display.
+
+    Includes:
+    - Pipeline status and trading mode
+    - Capital summary (main + subaccounts)
+    - Generator stats (24h breakdown by source, type, direction, timeframe)
+    - Validator stats (queue, pass/fail by source)
+    - Parametric stats (combos tested, pass/fail rates, fail reasons)
+    - IS/OOS backtest stats (pass rates, avg metrics, fail reasons)
+    - Score, Shuffle, WFA, Robustness stats
+    - Pool stats (size, quality metrics, distribution by source)
+    - Live stats (strategy count, diversity)
+    - Per-subaccount details (balance, PnL, drawdown, positions)
+    - Scheduler task status
+
+    Returns:
+        Dict with full snapshot data
+    """
+    collector = get_metrics_collector()
+    return collector.get_full_snapshot()

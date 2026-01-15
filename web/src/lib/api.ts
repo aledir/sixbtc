@@ -336,3 +336,10 @@ export async function getMetricsTiming(params?: { hours?: number }) {
     `${API_BASE}/metrics/timing${query ? `?${query}` : ''}`
   );
 }
+
+// Full pipeline snapshot - real-time computed metrics
+export async function getMetricsSnapshot() {
+  return fetchJson<import('../types').MetricsSnapshotResponse>(
+    `${API_BASE}/metrics/snapshot`
+  );
+}

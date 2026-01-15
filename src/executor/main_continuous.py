@@ -654,6 +654,9 @@ class ContinuousExecutorProcess:
         if signal is None:
             return
 
+        # Log signal generation (this means conditions were met!)
+        logger.info(f"[SIGNAL] {symbol}/{timeframe}: {signal.direction} signal generated")
+
         # CASE 1: Exit signal + open position -> close it
         if signal.direction == 'close' and open_trade:
             current_price = df_with_indicators['close'].iloc[-1]
@@ -810,7 +813,13 @@ class ContinuousExecutorProcess:
             )
 
             if df is None or df.empty:
-                logger.debug(f"No WebSocket data for {symbol}/{timeframe}")
+                # Only log once per coin to avoid spam
+                if not hasattr(self, '_no_data_logged'):
+                    self._no_data_logged = set()
+                key = f"{symbol}:{timeframe}"
+                if key not in self._no_data_logged:
+                    logger.warning(f"No WebSocket data for {symbol}/{timeframe}")
+                    self._no_data_logged.add(key)
                 return None
 
             return df
