@@ -19,7 +19,8 @@ from typing import List, Optional
 
 from jinja2 import Environment, FileSystemLoader
 
-from src.database import get_session, Strategy
+from src.database import get_session, Strategy, MarketRegime
+from src.generator.coin_direction_selector import CoinDirectionSelector
 from src.generator.unger.catalogs import (
     get_entry_by_id,
     get_filter_by_id,
@@ -60,7 +61,7 @@ class UngerGeneticResult:
     strategy_id: str
     strategy_type: str              # 'BRK', 'CRS', 'THR', 'VOL', 'CDL', 'REV'
     timeframe: str
-    pattern_coins: list[str]
+    trading_coins: list[str]
     entry_name: str
     exit_mechanism_name: str
     base_code_hash: str
@@ -139,10 +140,15 @@ class GeneticUngerGenerator:
         timeframes_config = trading_config.get('timeframes', {})
         self.timeframes = list(timeframes_config.values()) if timeframes_config else self.DEFAULT_TIMEFRAMES
 
+        # Initialize coin/direction selector (uses 'unger' config for market_regime setting)
+        self.selector = CoinDirectionSelector(config, 'unger')
+
+        regime_mode = "regime-aware" if self.selector.use_regime else "volume-based"
         logger.info(
             f"GeneticUngerGenerator initialized: "
             f"pool_score>={self.min_pool_score}, pool_size>={self.min_pool_size}, "
-            f"mutation={self.mutation_rate:.0%}, crossover={self.crossover_rate:.0%}"
+            f"mutation={self.mutation_rate:.0%}, crossover={self.crossover_rate:.0%}, "
+            f"coin selection: {regime_mode}"
         )
 
     def get_pool(self, force_refresh: bool = False) -> List[UngerGeneticIndividual]:
@@ -263,7 +269,7 @@ class GeneticUngerGenerator:
 
         Args:
             timeframe: Target timeframe (random if None)
-            direction: 'LONG', 'SHORT', or None (random)
+            direction: 'LONG', 'SHORT', 'BIDI' or None (selector-driven)
             count: Number of strategies to generate
 
         Returns:
@@ -282,8 +288,10 @@ class GeneticUngerGenerator:
         if timeframe is None:
             timeframe = self.rng.choice(self.timeframes)
 
+        # Use selector for direction (handles both volume-based and regime-based)
         if direction is None:
-            direction = self.rng.choice(['LONG', 'SHORT'])
+            direction, _ = self.selector.select()
+            # Note: we get coins separately per-strategy in _build_blueprint_from_components
 
         # Filter pool by direction
         filtered_pool = filter_pool_by_direction(pool, direction)
@@ -447,8 +455,8 @@ class GeneticUngerGenerator:
                 trailing = get_trailing_config_by_id(components['trailing_config_id'])
                 trailing_params = components['trailing_params'] or {}
 
-            # Get coins (from config or default)
-            coins = self._get_tradeable_coins()
+            # Get coins from market_regimes by direction
+            coins = self._get_coins_by_direction(direction)
 
             return StrategyBlueprint(
                 strategy_id=uuid.uuid4().hex[:8],
@@ -466,25 +474,34 @@ class GeneticUngerGenerator:
                 exit_params=exit_params,
                 trailing_config=trailing,
                 trailing_params=trailing_params,
-                pattern_coins=coins,
+                trading_coins=coins,
             )
 
         except Exception as e:
             logger.error(f"Failed to build blueprint: {e}")
             return None
 
-    def _get_tradeable_coins(self) -> List[str]:
-        """Get tradeable coins from database."""
-        try:
-            from src.database import Coin
-            with get_session() as session:
-                coins = session.query(Coin).filter(
-                    Coin.is_active == True,
-                    Coin.max_leverage > 0,
-                ).limit(20).all()
-                return [c.symbol for c in coins]
-        except Exception:
-            return ['BTC', 'ETH', 'SOL']
+    def _get_coins_by_direction(self, direction: str) -> List[str]:
+        """
+        Get coins for a strategy direction using selector.
+
+        Uses the coin/direction selector which handles both:
+        - Volume-based mode (top N by volume)
+        - Regime-based mode (query market_regimes)
+
+        Args:
+            direction: 'LONG', 'SHORT', or 'BIDI'
+
+        Returns:
+            List of coin symbols
+        """
+        _, coins = self.selector.select(direction_override=direction)
+        if coins:
+            return coins
+
+        # Ultimate fallback
+        logger.warning(f"No coins available for direction={direction}, using defaults")
+        return ['BTC', 'ETH', 'SOL']
 
     def _render_strategy(
         self,
@@ -519,7 +536,7 @@ class GeneticUngerGenerator:
                 strategy_id=blueprint.strategy_id,
                 strategy_type=blueprint.get_strategy_type(),
                 timeframe=blueprint.timeframe,
-                pattern_coins=blueprint.pattern_coins,
+                trading_coins=blueprint.trading_coins,
                 entry_name=blueprint.entry_condition.name,
                 exit_mechanism_name=blueprint.exit_mechanism.name,
                 base_code_hash=base_code_hash,

@@ -24,6 +24,7 @@ from src.generator.pattern_gen.building_blocks import (
     get_blocks_by_direction,
     get_compatible_blocks,
 )
+from src.generator.strategy_types import migrate_old_type
 
 
 @dataclass
@@ -37,10 +38,19 @@ class ComposedFormula:
     entry_signal_code: str              # Code to compute entry_signal boolean
     blocks_used: List[str]              # Block IDs used
     params: Dict[str, Any]              # Parameter values used
-    direction: str                      # 'long', 'short'
+    direction: str                      # 'long', 'short', 'bidi'
     lookback: int                       # Maximum lookback required
     indicators: List[str] = field(default_factory=list)  # Indicators needed
     strategy_type: str = "THR"          # Strategy type code
+
+    # BIDI support: separate LONG/SHORT code (only used when direction='bidi' and is_bidi=True)
+    is_bidi: bool = False               # True if using separate LONG/SHORT entry conditions
+    indicator_code_long: str = ""       # Code for LONG indicator calculations
+    indicator_code_short: str = ""      # Code for SHORT indicator calculations
+    entry_signal_code_long: str = ""    # Code for LONG entry signal
+    entry_signal_code_short: str = ""   # Code for SHORT entry signal
+    blocks_used_long: List[str] = field(default_factory=list)   # Block IDs for LONG
+    blocks_used_short: List[str] = field(default_factory=list)  # Block IDs for SHORT
 
 
 class FormulaComposer:
@@ -79,6 +89,131 @@ class FormulaComposer:
         formulas.extend(self.compose_template(template_count, direction))
         formulas.extend(self.compose_innovative(innovative_count, direction))
         return formulas
+
+    def compose_bidi(self, count: int = 1) -> List[ComposedFormula]:
+        """
+        Compose BIDI formulas with separate LONG and SHORT entry conditions.
+
+        BIDI strategies have two independent entry logics:
+        - LONG block (e.g., RSI oversold, breakout high)
+        - SHORT block (e.g., RSI overbought, breakout low)
+
+        The strategy generates long_signal and short_signal separately,
+        and entry_signal = long_signal | short_signal.
+
+        Args:
+            count: Number of formulas to generate
+
+        Returns:
+            List of ComposedFormula with is_bidi=True and separate codes
+        """
+        formulas = []
+
+        # Get blocks that work for LONG direction
+        long_blocks = get_blocks_by_direction('long')
+        self.rng.shuffle(long_blocks)
+
+        # Get blocks that work for SHORT direction
+        short_blocks = get_blocks_by_direction('short')
+        self.rng.shuffle(short_blocks)
+
+        if not long_blocks or not short_blocks:
+            return formulas
+
+        for i in range(min(count, len(long_blocks))):
+            long_block = long_blocks[i % len(long_blocks)]
+
+            # Try to find a SHORT block from the same category for coherence
+            same_category_short = [
+                b for b in short_blocks if b.category == long_block.category
+            ]
+            if same_category_short:
+                short_block = self.rng.choice(same_category_short)
+            else:
+                short_block = short_blocks[i % len(short_blocks)]
+
+            formula = self._compose_bidi_pair(long_block, short_block)
+            if formula and self._is_unique(formula):
+                formulas.append(formula)
+                self.generated_hashes.add(formula.formula_id)
+
+            if len(formulas) >= count:
+                break
+
+        return formulas
+
+    def _compose_bidi_pair(
+        self,
+        long_block: PatternBlock,
+        short_block: PatternBlock,
+    ) -> Optional[ComposedFormula]:
+        """
+        Compose a BIDI formula from separate LONG and SHORT blocks.
+
+        Args:
+            long_block: Block for LONG entry
+            short_block: Block for SHORT entry
+
+        Returns:
+            ComposedFormula with is_bidi=True
+        """
+        params_long = self._get_random_params(long_block)
+        params_short = self._get_random_params(short_block)
+
+        try:
+            code_long = long_block.formula_template.format(**params_long)
+            code_short = short_block.formula_template.format(**params_short)
+
+            # Parse both codes
+            ind_long, sig_long = self._split_indicator_signal(code_long)
+            ind_short, sig_short = self._split_indicator_signal(code_short)
+
+            # Rename entry_signal to long_entry in LONG code
+            ind_long = ind_long.replace("df['entry_signal']", "df['long_entry']")
+            sig_long = sig_long.replace("df['entry_signal']", "df['long_entry']")
+
+            # Rename entry_signal to short_entry in SHORT code
+            ind_short = ind_short.replace("df['entry_signal']", "df['short_entry']")
+            sig_short = sig_short.replace("df['entry_signal']", "df['short_entry']")
+
+            # Combined indicator code (both LONG and SHORT)
+            combined_indicator = f"# === LONG Indicators ({long_block.name}) ===\n{ind_long}\n\n# === SHORT Indicators ({short_block.name}) ===\n{ind_short}"
+
+            # Combined signal code
+            combined_signal = f"""{sig_long}
+{sig_short}
+df['long_signal'] = df['long_entry'].fillna(False).astype(bool)
+df['short_signal'] = df['short_entry'].fillna(False).astype(bool)
+df['entry_signal'] = df['long_signal'] | df['short_signal']"""
+
+            # Build name
+            name = f"BIDI: {long_block.name} / {short_block.name}"
+
+            full_code = f"{combined_indicator}\n{combined_signal}"
+
+            return ComposedFormula(
+                formula_id=self._compute_hash(full_code),
+                name=name,
+                composition_type="bidi",
+                indicator_code=combined_indicator,
+                entry_signal_code=combined_signal,
+                blocks_used=[long_block.id, short_block.id],
+                params={**params_long, **params_short},
+                direction="bidi",
+                lookback=max(long_block.lookback, short_block.lookback),
+                indicators=list(set(long_block.indicators + short_block.indicators)),
+                strategy_type=migrate_old_type(long_block.strategy_type).value,
+                # BIDI-specific fields
+                is_bidi=True,
+                indicator_code_long=ind_long,
+                indicator_code_short=ind_short,
+                entry_signal_code_long=sig_long,
+                entry_signal_code_short=sig_short,
+                blocks_used_long=[long_block.id],
+                blocks_used_short=[short_block.id],
+            )
+        except (KeyError, ValueError):
+            return None
 
     def compose_parametric(
         self,
@@ -235,10 +370,8 @@ class FormulaComposer:
             indicator_code = '\n'.join(indicator_lines)
             entry_signal_code = '\n'.join(signal_lines)
 
-            # Determine direction
+            # Determine direction (keep bidi as-is for template to handle)
             formula_direction = block.direction
-            if formula_direction == "bidi":
-                formula_direction = "long"  # Default bidi to long
 
             # Build param string for name
             param_str = "_".join(f"{k}{v}" for k, v in sorted(params.items()))
@@ -254,7 +387,7 @@ class FormulaComposer:
                 direction=formula_direction,
                 lookback=block.lookback,
                 indicators=block.indicators.copy(),
-                strategy_type=block.strategy_type,
+                strategy_type=migrate_old_type(block.strategy_type).value,
             )
         except (KeyError, ValueError):
             return None
@@ -293,7 +426,7 @@ class FormulaComposer:
 {sig2}
 df['entry_signal'] = df['entry_cond1'] & df['entry_cond2']"""
 
-            # Determine direction
+            # Determine direction (keep bidi as-is for template to handle)
             if block1.direction == block2.direction:
                 direction = block1.direction
             elif block1.direction == "bidi":
@@ -302,12 +435,10 @@ df['entry_signal'] = df['entry_cond1'] & df['entry_cond2']"""
                 direction = block1.direction
             else:
                 return None  # Incompatible directions
+            # Note: bidi is preserved for template to split into long/short
 
-            if direction == "bidi":
-                direction = "long"
-
-            # Determine strategy type (use primary block's type)
-            strategy_type = block1.strategy_type
+            # Determine strategy type (use primary block's type, migrated to unified 5 types)
+            strategy_type = migrate_old_type(block1.strategy_type).value
 
             # Build name
             name = f"{block1.name} + {block2.name}"
@@ -364,7 +495,7 @@ df['entry_signal'] = df['entry_cond1'] & df['entry_cond2']"""
 {sig3}
 df['entry_signal'] = df['entry_cond1'] & df['entry_cond2'] & df['entry_cond3']"""
 
-            # Determine direction
+            # Determine direction (keep bidi as-is for template to handle)
             directions = [block1.direction, block2.direction, block3.direction]
             non_bidi = [d for d in directions if d != "bidi"]
             if non_bidi:
@@ -372,7 +503,7 @@ df['entry_signal'] = df['entry_cond1'] & df['entry_cond2'] & df['entry_cond3']""
                     return None  # Conflicting directions
                 direction = non_bidi[0]
             else:
-                direction = "long"
+                direction = "bidi"  # All blocks are bidi
 
             name = f"{block1.name} + {block2.name} + {block3.name}"
             full_code = f"{indicator_code}\n{entry_signal_code}"
@@ -390,7 +521,7 @@ df['entry_signal'] = df['entry_cond1'] & df['entry_cond2'] & df['entry_cond3']""
                 indicators=list(set(
                     block1.indicators + block2.indicators + block3.indicators
                 )),
-                strategy_type=block1.strategy_type,
+                strategy_type=migrate_old_type(block1.strategy_type).value,
             )
         except (KeyError, ValueError):
             return None
@@ -465,7 +596,7 @@ df['entry_signal'] = df['entry_cond1'] & df['entry_cond2'] & df['entry_cond3']""
 df['secondary_recent'] = df['secondary_cond'].rolling({window}).max().fillna(0).astype(bool)
 df['entry_signal'] = df['primary_cond'] & df['secondary_recent']"""
 
-            # Direction logic
+            # Direction logic (keep bidi as-is for template to handle)
             if primary.direction == secondary.direction:
                 direction = primary.direction
             elif primary.direction == "bidi":
@@ -474,9 +605,7 @@ df['entry_signal'] = df['primary_cond'] & df['secondary_recent']"""
                 direction = primary.direction
             else:
                 return None
-
-            if direction == "bidi":
-                direction = "long"
+            # Note: bidi is preserved for template to split into long/short
 
             name = f"{primary.name} after {secondary.name} ({window}bar)"
             full_code = f"{indicator_code}\n{entry_signal_code}"
@@ -492,7 +621,7 @@ df['entry_signal'] = df['primary_cond'] & df['secondary_recent']"""
                 direction=direction,
                 lookback=max(primary.lookback, secondary.lookback) + window,
                 indicators=list(set(primary.indicators + secondary.indicators)),
-                strategy_type=primary.strategy_type,
+                strategy_type=migrate_old_type(primary.strategy_type).value,
             )
         except (KeyError, ValueError):
             return None
@@ -585,7 +714,8 @@ df['entry_signal'] = df['primary_cond'] & df['secondary_recent']"""
 {sig_long}
 df['entry_signal'] = df['short_cond'] & df['long_cond']"""
 
-            direction = block.direction if block.direction != "bidi" else "long"
+            # Keep bidi as-is for template to handle
+            direction = block.direction
             name = f"{block.name} dual ({short_period}/{long_period})"
             full_code = f"{indicator_code}\n{entry_signal_code}"
 
@@ -600,7 +730,7 @@ df['entry_signal'] = df['short_cond'] & df['long_cond']"""
                 direction=direction,
                 lookback=long_period + 20,
                 indicators=block.indicators.copy(),
-                strategy_type=block.strategy_type,
+                strategy_type=migrate_old_type(block.strategy_type).value,
             )
         except (KeyError, ValueError):
             return None

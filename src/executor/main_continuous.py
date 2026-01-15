@@ -24,6 +24,7 @@ from src.executor.risk_manager import RiskManager
 from src.executor.trailing_service import TrailingService
 from src.executor.emergency_stop_manager import EmergencyStopManager
 from src.executor.balance_sync import BalanceSyncService
+from src.data.hyperliquid_websocket import get_data_provider, HyperliquidDataProvider
 from src.data.coin_registry import get_registry, get_active_pairs, CoinNotFoundError
 from src.strategies.base import StrategyCore, Signal, StopLossType, ExitType
 from src.utils import get_logger, setup_logging
@@ -66,11 +67,27 @@ class ContinuousExecutorProcess:
         # Single source of truth for dry_run: hyperliquid.dry_run
         self.dry_run = self.config.get('hyperliquid.dry_run', True)
 
+        # Rule #4b: WebSocket First - Initialize data provider FIRST
+        # Data provider will be started in run_continuous() before main loop
+        # Note: Pass None to let data_provider call load_config() internally
+        # (passing _raw_config would break dot notation access like 'hyperliquid.user_address')
+        self.data_provider: HyperliquidDataProvider = get_data_provider()
+
         # Components - use injected or create new (Dependency Injection pattern)
-        self.client = client or HyperliquidClient(self.config._raw_config, dry_run=self.dry_run)
+        # Pass data_provider to client for WebSocket-first data reads
+        self.client = client or HyperliquidClient(
+            self.config._raw_config,
+            dry_run=self.dry_run,
+            data_provider=self.data_provider
+        )
         self.risk_manager = risk_manager or RiskManager(self.config._raw_config)
         self.trailing_service = trailing_service or TrailingService(self.client, self.config._raw_config)
-        self.emergency_manager = EmergencyStopManager(self.config._raw_config, self.client)
+        # Pass data_provider to emergency manager for WebSocket health check
+        self.emergency_manager = EmergencyStopManager(
+            self.config._raw_config,
+            self.client,
+            data_provider=self.data_provider
+        )
 
         # Load trading pairs (multi-coin support)
         self.trading_pairs = self._load_trading_pairs()
@@ -109,6 +126,41 @@ class ContinuousExecutorProcess:
     async def run_continuous(self):
         """Main continuous execution loop"""
         logger.info("Starting continuous execution loop")
+
+        # Rule #4b: Start WebSocket data provider FIRST
+        # This provides real-time prices and user data
+        logger.info("Starting WebSocket data provider (Rule #4b: WebSocket First)...")
+        self._ws_task = asyncio.create_task(self.data_provider.start())
+
+        # Wait for WebSocket to establish connection and receive initial data
+        logger.info("Waiting for WebSocket to be ready...")
+        max_wait = 30  # seconds
+        check_interval = 0.5
+        waited = 0
+
+        while waited < max_wait:
+            await asyncio.sleep(check_interval)
+            waited += check_interval
+
+            # Check if we have mid prices (allMids subscription working)
+            if len(self.data_provider.mid_prices) >= 50:
+                logger.info(
+                    f"WebSocket ready: {len(self.data_provider.mid_prices)} mid prices "
+                    f"(waited {waited:.1f}s)"
+                )
+                break
+
+            if waited % 5 == 0:
+                logger.info(
+                    f"  Waiting for WebSocket... "
+                    f"({len(self.data_provider.mid_prices)} mid prices, {waited:.1f}s elapsed)"
+                )
+
+        if len(self.data_provider.mid_prices) < 50:
+            logger.warning(
+                f"WebSocket has only {len(self.data_provider.mid_prices)} mid prices "
+                f"after {max_wait}s - continuing with REST fallback"
+            )
 
         # Sync subaccount balances from Hyperliquid at startup
         # This initializes allocated_capital for manually funded subaccounts
@@ -162,6 +214,17 @@ class ContinuousExecutorProcess:
 
         # Stop trailing service
         await self.trailing_service.stop()
+
+        # Stop WebSocket data provider
+        logger.info("Stopping WebSocket data provider...")
+        await self.data_provider.stop()
+        if hasattr(self, '_ws_task') and self._ws_task:
+            self._ws_task.cancel()
+            try:
+                await self._ws_task
+            except asyncio.CancelledError:
+                pass
+
         logger.info("Execution loop ended")
 
     def _get_active_subaccounts(self) -> List[Dict]:
@@ -187,8 +250,7 @@ class ContinuousExecutorProcess:
                     'strategy_code': strategy.code,
                     'timeframe': strategy.timeframe,
                     'allocated_capital': subaccount.allocated_capital,
-                    'backtest_pairs': strategy.backtest_pairs or [],
-                    'pattern_coins': strategy.pattern_coins
+                    'trading_coins': strategy.trading_coins or []
                 })
 
         return subaccounts
@@ -198,11 +260,11 @@ class ContinuousExecutorProcess:
         Process a single subaccount - scan tradable coins for signals
 
         Tradable pairs = intersection of:
-        - Pairs the strategy was backtested on (backtest_pairs)
+        - Strategy's trading_coins (assigned at generation)
         - Currently active coins with volume >= min_volume_24h
 
         This ensures we only trade pairs that:
-        1. Were validated in backtest (no blind trading)
+        1. Were assigned by generator and validated in backtest
         2. Are currently liquid enough for live trading
         """
         try:
@@ -233,34 +295,28 @@ class ContinuousExecutorProcess:
                 logger.warning(f"Could not load strategy {strategy_name}")
                 return
 
-            # Get tradable pairs for this strategy (pattern-aware)
-            # CoinRegistry handles validation and filtering
-            backtest_pairs = subaccount.get('backtest_pairs', [])
-            pattern_coins = subaccount.get('pattern_coins')
+            # Get tradable pairs for this strategy
+            # CoinRegistry handles liquidity validation (no fallback)
+            trading_coins = subaccount.get('trading_coins', [])
+            if not trading_coins:
+                logger.warning(f"Strategy {strategy_name} has no trading_coins - skipping")
+                return
+
             trading_pairs = get_registry().get_tradable_for_strategy(
-                pattern_coins=pattern_coins,
-                backtest_pairs=backtest_pairs
+                trading_coins=trading_coins
             )
 
             if not trading_pairs:
-                # Fallback to global pairs if strategy has no backtest_pairs recorded
-                if not backtest_pairs:
-                    logger.debug(
-                        f"Strategy {strategy_name} has no backtest_pairs recorded, "
-                        f"using global trading pairs"
-                    )
-                    trading_pairs = self.trading_pairs
-                else:
-                    logger.warning(
-                        f"Strategy {strategy_name} has no tradable pairs "
-                        f"(backtest_pairs={len(backtest_pairs)}, intersection=0)"
-                    )
-                    return
+                logger.warning(
+                    f"Strategy {strategy_name}: no tradable pairs "
+                    f"(assigned={len(trading_coins)}, liquid=0)"
+                )
+                return
 
             if len(trading_pairs) < 5:
                 logger.warning(
                     f"Strategy {strategy_name} has only {len(trading_pairs)} tradable pairs "
-                    f"(backtest_pairs={len(backtest_pairs)})"
+                    f"(assigned={len(trading_coins)})"
                 )
 
             # Scan tradable coins for signals

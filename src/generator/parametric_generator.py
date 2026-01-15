@@ -65,13 +65,13 @@ class GeneratedStrategy:
     validation_passed: bool = True
     validation_errors: list = None
     base_code_hash: str = ""  # SHA256 of base code BEFORE parameter embedding
-    pattern_coins: list = None  # Coins for pattern-based strategies
+    trading_coins: list = None  # Coins for pattern-based strategies
 
     def __post_init__(self):
         if self.validation_errors is None:
             self.validation_errors = []
-        if self.pattern_coins is None:
-            self.pattern_coins = []
+        if self.trading_coins is None:
+            self.trading_coins = []
 
 
 class ParametricGenerator:
@@ -176,7 +176,7 @@ class ParametricGenerator:
         timeframe: str,
         source_id: str,
         source_type: str,
-        pattern_coins: Optional[list] = None,
+        trading_coins: Optional[list] = None,
         max_strategies: Optional[int] = None
     ) -> list[GeneratedStrategy]:
         """
@@ -191,7 +191,7 @@ class ParametricGenerator:
             timeframe: Timeframe like "15m", "1h"
             source_id: UUID of source (pattern ID or template ID)
             source_type: "pattern" or "template"
-            pattern_coins: Optional list of coins for pattern-based strategies
+            trading_coins: Optional list of coins for pattern-based strategies
             max_strategies: Optional limit on strategies to generate
 
         Returns:
@@ -246,7 +246,7 @@ class ParametricGenerator:
                     validation_passed=validation_passed,
                     validation_errors=errors,
                     base_code_hash=base_code_hash,
-                    pattern_coins=pattern_coins or []
+                    trading_coins=trading_coins or []
                 )
                 strategies.append(strategy)
 

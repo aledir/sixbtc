@@ -518,7 +518,7 @@ class ContinuousGeneratorProcess:
                 pattern_ids=[],
                 template_id=None,
                 parameters=result.parameters,
-                pattern_coins=getattr(result, 'pattern_coins', None),
+                trading_coins=getattr(result, 'trading_coins', None),
                 base_code_hash=result.base_code_hash,
                 generation_mode=gen_mode,
                 duration_ms=gen_duration_ms,
@@ -536,7 +536,7 @@ class ContinuousGeneratorProcess:
             else:
                 logger.info(
                     f"Saved {strategy_name} "
-                    f"({result.regime_type}, {len(result.pattern_coins)} coins, "
+                    f"({result.regime_type}, {len(result.trading_coins)} coins, "
                     f"entry={result.entry_name}, exit={result.exit_mechanism_name})"
                 )
 
@@ -753,7 +753,7 @@ class ContinuousGeneratorProcess:
                     pattern_ids=[],
                     template_id=None,
                     parameters=result.parameters,
-                    pattern_coins=result.pattern_coins,
+                    trading_coins=result.trading_coins,
                     base_code_hash=result.base_code_hash,
                     generation_mode="pandas_ta",
                     duration_ms=gen_duration_ms,
@@ -826,7 +826,7 @@ class ContinuousGeneratorProcess:
                     pattern_ids=[],
                     template_id=None,
                     parameters=result.parameters,
-                    pattern_coins=None,
+                    trading_coins=result.trading_coins,
                     base_code_hash=result.base_code_hash,
                     generation_mode=gen_mode,
                     duration_ms=gen_duration_ms,
@@ -954,7 +954,7 @@ class ContinuousGeneratorProcess:
                 pattern_ids=result.patterns_used,
                 template_id=result.template_id,
                 parameters=result.parameters,
-                pattern_coins=getattr(result, 'pattern_coins', None),
+                trading_coins=getattr(result, 'trading_coins', None),
                 base_code_hash=getattr(result, 'base_code_hash', base_code_hash),
                 generation_mode=result_mode,
                 duration_ms=gen_duration_ms,
@@ -1028,7 +1028,7 @@ class ContinuousGeneratorProcess:
         pattern_ids: list,
         template_id: Optional[str] = None,
         parameters: Optional[dict] = None,
-        pattern_coins: Optional[list] = None,
+        trading_coins: Optional[list] = None,
         base_code_hash: Optional[str] = None,
         generation_mode: Optional[str] = None,
         duration_ms: Optional[int] = None,
@@ -1065,7 +1065,7 @@ class ContinuousGeneratorProcess:
                     pattern_ids=pattern_ids,
                     template_id=template_id,
                     parameters=parameters,
-                    pattern_coins=pattern_coins,
+                    trading_coins=trading_coins,
                     base_code_hash=base_code_hash,
                     generation_mode=generation_mode
                 )

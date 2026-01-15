@@ -346,7 +346,7 @@ async def get_strategy(strategy_id: UUID):
                 status=strategy.status,
                 code=strategy.code,
                 pattern_ids=strategy.pattern_ids,
-                pattern_coins=strategy.pattern_coins,
+                trading_coins=strategy.trading_coins,
                 created_at=strategy.created_at,
                 updated_at=strategy.tested_at,
                 backtest=backtest_metrics,

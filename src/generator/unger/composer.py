@@ -82,7 +82,13 @@ class StrategyBlueprint:
     trailing_params: Optional[dict] = None
 
     # Coins from market regime
-    pattern_coins: list[str] = field(default_factory=list)
+    trading_coins: list[str] = field(default_factory=list)
+
+    # BIDI support: separate LONG/SHORT entries (only used when direction='BIDI')
+    entry_condition_long: Optional[EntryCondition] = None
+    entry_condition_short: Optional[EntryCondition] = None
+    entry_params_long: Optional[dict] = None
+    entry_params_short: Optional[dict] = None
 
     def compute_hash(self) -> str:
         """
@@ -92,9 +98,22 @@ class StrategyBlueprint:
         - Caching shuffle test results (base code property)
         - Deduplication of identical strategies
         """
-        components = [
-            self.entry_condition.id,
-            str(sorted(self.entry_params.items())),
+        # BIDI: use both entry conditions
+        if self.direction == 'BIDI' and self.entry_condition_long:
+            components = [
+                self.entry_condition_long.id,
+                str(sorted(self.entry_params_long.items())) if self.entry_params_long else "",
+                self.entry_condition_short.id if self.entry_condition_short else "",
+                str(sorted(self.entry_params_short.items())) if self.entry_params_short else "",
+            ]
+        else:
+            components = [
+                self.entry_condition.id,
+                str(sorted(self.entry_params.items())),
+            ]
+
+        # Common components
+        components.extend([
             str([f[0].id for f in self.entry_filters]),
             str([str(sorted(f[1].items())) for f in self.entry_filters]),
             str(self.exit_mechanism.id),
@@ -106,26 +125,26 @@ class StrategyBlueprint:
             str(sorted(self.exit_params.items())) if self.exit_params else "",
             self.trailing_config.id if self.trailing_config else "",
             str(sorted(self.trailing_params.items())) if self.trailing_params else "",
-        ]
+        ])
         return hashlib.md5("".join(components).encode()).hexdigest()[:12]
 
     def get_strategy_type(self) -> str:
         """
         Determine strategy type prefix from entry category.
 
+        Uses unified 5-type system: TRD, MOM, REV, VLM, CDL
+
         Returns:
-            BRK (breakout), CRS (crossover), THR (threshold),
-            VOL (volatility), CDL (candlestick), REV (mean_reversion)
+            One of: TRD, MOM, REV, VLM, CDL
+
+        Raises:
+            ValueError: If category is not mapped (no fallback - fail fast)
         """
-        category_map = {
-            "breakout": "BRK",
-            "crossover": "CRS",
-            "threshold": "THR",
-            "volatility": "VOL",
-            "candlestick": "CDL",
-            "mean_reversion": "REV",
-        }
-        return category_map.get(self.entry_condition.category, "UNG")
+        from src.generator.strategy_types import get_type_from_category
+        # BIDI: use long entry for type determination
+        if self.direction == 'BIDI' and self.entry_condition_long:
+            return get_type_from_category(self.entry_condition_long.category).value
+        return get_type_from_category(self.entry_condition.category).value
 
     def get_class_name(self) -> str:
         """Generate strategy class name."""
@@ -133,19 +152,27 @@ class StrategyBlueprint:
 
     def describe(self) -> str:
         """Human-readable description."""
-        parts = [
-            f"Entry: {self.entry_condition.name}",
+        # BIDI: show both entries
+        if self.direction == 'BIDI' and self.entry_condition_long:
+            parts = [
+                f"LONG: {self.entry_condition_long.name}",
+                f"SHORT: {self.entry_condition_short.name}" if self.entry_condition_short else "",
+            ]
+        else:
+            parts = [f"Entry: {self.entry_condition.name}"]
+
+        parts.extend([
             f"Filters: {len(self.entry_filters)}",
             f"Exit: {self.exit_mechanism.name}",
             f"SL: {self.sl_config.name}",
-        ]
+        ])
         if self.tp_config:
             parts.append(f"TP: {self.tp_config.name}")
         if self.exit_condition:
             parts.append(f"EC: {self.exit_condition.name}")
         if self.trailing_config:
             parts.append(f"TS: {self.trailing_config.name}")
-        return " | ".join(parts)
+        return " | ".join([p for p in parts if p])
 
 
 class StrategyComposer:
@@ -193,6 +220,10 @@ class StrategyComposer:
         Returns:
             Complete StrategyBlueprint ready for code generation
         """
+        # BIDI: use separate composition with dual entries
+        if direction == 'BIDI':
+            return self._compose_bidi(timeframe, coins, num_filters)
+
         # 1. Select Entry Condition (or use override)
         if entry_override:
             entry = entry_override
@@ -260,7 +291,102 @@ class StrategyComposer:
             exit_params=exit_params,
             trailing_config=trailing,
             trailing_params=trailing_params,
-            pattern_coins=list(set(coins)),
+            trading_coins=list(set(coins)),
+        )
+
+    def _compose_bidi(
+        self,
+        timeframe: str,
+        coins: list[str],
+        num_filters: Optional[int] = None,
+    ) -> StrategyBlueprint:
+        """
+        Compose a BIDI strategy with two independent entries.
+
+        Selects:
+        - One LONG entry condition
+        - One SHORT entry condition (preferably from same category for coherence)
+        """
+        # 1. Select LONG entry
+        long_entries = get_entries_by_direction('LONG')
+        entry_long = self._rng.choice(long_entries)
+        entry_params_long = self._resolve_params(entry_long.params)
+
+        # 2. Select SHORT entry (prefer same category for logical coherence)
+        short_entries = get_entries_by_direction('SHORT')
+        same_category = [e for e in short_entries if e.category == entry_long.category]
+
+        if same_category:
+            entry_short = self._rng.choice(same_category)
+        else:
+            entry_short = self._rng.choice(short_entries)
+        entry_params_short = self._resolve_params(entry_short.params)
+
+        # 3. Select 0-2 Entry Filters (use LONG entry for compatibility check)
+        if num_filters is None:
+            num_filters = self._rng.choice([0, 0, 1, 1, 1, 2])
+
+        compatible_filters = get_compatible_filters(entry_long, 'BIDI')
+        selected_filters = self._select_orthogonal_filters(compatible_filters, num_filters)
+
+        # 4. Select Exit Mechanism
+        exit_mech = self._rng.choice(EXIT_MECHANISMS)
+
+        # 5. Select SL (always required)
+        sl_config = self._rng.choice(SL_CONFIGS)
+        sl_params = self._resolve_params(sl_config.params)
+
+        # 6. Select TP (if used by mechanism)
+        tp_config = None
+        tp_params = None
+        if exit_mech.uses_tp:
+            tp_config = self._rng.choice(TP_CONFIGS)
+            tp_params = self._resolve_params(tp_config.params)
+
+        # 7. Select Exit Condition (if used by mechanism)
+        exit_cond = None
+        exit_params = None
+        if exit_mech.uses_ec:
+            valid_exits = get_exits_by_direction('BIDI')
+            if valid_exits:
+                exit_cond = self._rng.choice(valid_exits)
+                exit_params = self._resolve_params(exit_cond.params)
+
+        # 8. Select Trailing Stop (if used by mechanism)
+        trailing = None
+        trailing_params = None
+        if exit_mech.uses_ts:
+            trailing = self._rng.choice(TRAILING_CONFIGS)
+            trailing_params = self._resolve_params(
+                {**trailing.activation_params, **trailing.trail_params}
+            )
+
+        # 9. Generate unique ID
+        strategy_id = uuid.uuid4().hex[:8]
+
+        return StrategyBlueprint(
+            strategy_id=strategy_id,
+            timeframe=timeframe,
+            direction='BIDI',
+            # Keep entry_condition for backward compat (used for lookback calculation)
+            entry_condition=entry_long,
+            entry_params=entry_params_long,
+            # BIDI entries
+            entry_condition_long=entry_long,
+            entry_condition_short=entry_short,
+            entry_params_long=entry_params_long,
+            entry_params_short=entry_params_short,
+            entry_filters=selected_filters,
+            exit_mechanism=exit_mech,
+            sl_config=sl_config,
+            sl_params=sl_params,
+            tp_config=tp_config,
+            tp_params=tp_params,
+            exit_condition=exit_cond,
+            exit_params=exit_params,
+            trailing_config=trailing,
+            trailing_params=trailing_params,
+            trading_coins=list(set(coins)),
         )
 
     def compose_exhaustive(
@@ -381,7 +507,7 @@ class StrategyComposer:
             exit_params=exit_params,
             trailing_config=trailing,
             trailing_params=trailing_params,
-            pattern_coins=list(set(coins)),
+            trading_coins=list(set(coins)),
         )
 
     def _select_orthogonal_filters(

@@ -88,7 +88,7 @@ filter_pass = ma.iloc[-1] < ma.iloc[-{slope_period}]''',
         logic_template='''ma20 = df["close"].rolling(20).mean().iloc[-1]
 ma50 = df["close"].rolling(50).mean().iloc[-1]
 ma100 = df["close"].rolling(100).mean().iloc[-1]
-filter_pass = (ma20 > ma50) and (ma50 > ma100)''',
+filter_pass = (ma20 > ma50) & (ma50 > ma100)''',
         params={},
         indicators_used=["MA"],
         compatible_directions=["LONG"],
@@ -101,7 +101,7 @@ filter_pass = (ma20 > ma50) and (ma50 > ma100)''',
         logic_template='''ma20 = df["close"].rolling(20).mean().iloc[-1]
 ma50 = df["close"].rolling(50).mean().iloc[-1]
 ma100 = df["close"].rolling(100).mean().iloc[-1]
-filter_pass = (ma20 < ma50) and (ma50 < ma100)''',
+filter_pass = (ma20 < ma50) & (ma50 < ma100)''',
         params={},
         indicators_used=["MA"],
         compatible_directions=["SHORT"],
@@ -132,7 +132,7 @@ filter_pass = adx.iloc[-1] > {threshold}''',
         category="trend",
         logic_template='''hh1 = df["high"].iloc[-1] > df["high"].iloc[-{N}:-1].max()
 hh2 = df["high"].iloc[-{N}:-1].max() > df["high"].iloc[-{N}*2:-{N}].max()
-filter_pass = hh1 or hh2''',
+filter_pass = hh1 | hh2''',
         params={"N": [5, 10]},
         indicators_used=[],
         compatible_directions=["LONG"],
@@ -155,7 +155,7 @@ gain = delta.clip(lower=0).rolling(14).mean()
 loss = (-delta.clip(upper=0)).rolling(14).mean()
 rs = gain / (loss + 1e-10)
 rsi = 100 - (100 / (1 + rs))
-filter_pass = (rsi.iloc[-1] > 40) and (rsi.iloc[-1] < 60)''',
+filter_pass = (rsi.iloc[-1] > 40) & (rsi.iloc[-1] < 60)''',
         params={},
         indicators_used=["RSI"],
         compatible_directions=["LONG", "SHORT"],
@@ -427,7 +427,7 @@ filter_pass = df["close"].iloc[-1] > recent_low * 1.02''',
         category="structure",
         logic_template='''recent_high = df["high"].iloc[-{N}-1:-1].max()
 recent_low = df["low"].iloc[-{N}-1:-1].min()
-filter_pass = (df["close"].iloc[-1] < recent_high) and (df["close"].iloc[-1] > recent_low)''',
+filter_pass = (df["close"].iloc[-1] < recent_high) & (df["close"].iloc[-1] > recent_low)''',
         params={"N": [10, 20]},
         indicators_used=[],
         compatible_directions=["LONG", "SHORT"],
@@ -451,7 +451,7 @@ filter_pass = recent_range < atr * {mult}''',
         category="structure",
         logic_template='''ma = df["close"].rolling({ma_period}).mean()
 recent_high = df["high"].iloc[-{N}-1:-1].max()
-filter_pass = (df["close"].iloc[-1] < recent_high) and (df["close"].iloc[-1] > ma.iloc[-1])''',
+filter_pass = (df["close"].iloc[-1] < recent_high) & (df["close"].iloc[-1] > ma.iloc[-1])''',
         params={"N": [5, 10], "ma_period": [20, 50]},
         indicators_used=["MA"],
         compatible_directions=["LONG"],
@@ -463,7 +463,7 @@ filter_pass = (df["close"].iloc[-1] < recent_high) and (df["close"].iloc[-1] > m
         category="structure",
         logic_template='''ma = df["close"].rolling({ma_period}).mean()
 recent_low = df["low"].iloc[-{N}-1:-1].min()
-filter_pass = (df["close"].iloc[-1] > recent_low) and (df["close"].iloc[-1] < ma.iloc[-1])''',
+filter_pass = (df["close"].iloc[-1] > recent_low) & (df["close"].iloc[-1] < ma.iloc[-1])''',
         params={"N": [5, 10], "ma_period": [20, 50]},
         indicators_used=["MA"],
         compatible_directions=["SHORT"],

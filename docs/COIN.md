@@ -1,366 +1,290 @@
 # COIN Pipeline
 
-Questo documento descrive il percorso completo dei coin attraverso il sistema SixBTC, dalla selezione iniziale fino al live trading.
+Come i coin vengono selezionati e usati nelle strategie.
 
 ---
 
-## Overview
+## 0. CoinRegistry - Single Source of Truth
 
-```
-Hyperliquid API (224 coin)
-        ↓
-    [PAIRS UPDATER] ← Binance API (541 coin)
-        ↓
-   64 coin attivi (is_active=true)
-        ↓
-   [BINANCE DOWNLOADER]
-        ↓
-   320 file parquet (64 coin × 5 TF)
-        ↓
-   [REGIME DETECTOR]
-        ↓
-   41 coin con regime forte (strength ≥ 0.5)
-        ↓
-   [GENERATORS]
-        ↓
-   Strategia con trading_coins (9-30 coin)
-        ↓
-   [BACKTESTER]
-        ↓
-   Strategia ACTIVE
-        ↓
-   [EXECUTOR]
-        ↓
-   Ordini su Hyperliquid
-```
+**File**: `src/data/coin_registry.py`
+
+CoinRegistry è il modulo centralizzato per la gestione dei coin. Tutti i componenti del sistema usano CoinRegistry per:
+
+| Funzione | Usata da | Descrizione |
+|----------|----------|-------------|
+| `get_coins_with_sufficient_data()` | Generator (CoinDirectionSelector) | Top N coin con copertura dati sufficiente |
+| `get_top_coins_by_volume()` | Fallback | Top N coin per volume (senza filtro dati) |
+| `get_tradable_for_strategy()` | Executor | Filtro runtime per liquidità |
+| `has_sufficient_data()` | Validation | Verifica singolo coin |
+| `is_tradable()` | Ovunque | Verifica coin attivo e liquido |
+
+**Copertura dati garantita**:
+- Il campo `data_coverage_days` nella tabella `coins` traccia i giorni di dati OHLCV disponibili
+- `get_coins_with_sufficient_data()` filtra coin con copertura < `(is_days + oos_days) * min_coverage_pct`
+- Default: (120 + 60) × 0.80 = **144 giorni minimi**
+- Questo filtro avviene **prima** della generazione, non durante il backtest
 
 ---
 
-## 1. PAIRS UPDATER
+## 1. Pipeline AUX (scheduled 2x/giorno)
 
-**Schedule**: 2x al giorno (01:45, 13:45 UTC)
+Prepara i dati per i generator.
 
-**Input**:
-- API Hyperliquid → lista perpetual correnti
-- API Binance → lista perpetual disponibili
-
-**Flusso**:
 ```
-Hyperliquid API → 224 perpetual
-Binance API → 541 perpetual
-        ↓
-Intersezione (su entrambi) → 184 coin
-        ↓
-Filtro volume ≥ $1M → ~70 coin
-        ↓
-Salva in DB: coins.is_active = true
+┌─────────────────────────────────────────────────────────────┐
+│ UPDATE PAIRS (01:45, 13:45 UTC)                             │
+│                                                             │
+│ Hyperliquid API (224) ∩ Binance API (541) = 184 coin        │
+│ Filtro volume ≥ $1M → 64 coin attivi                        │
+│ Output: tabella `coins` con is_active=true                  │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ DATA DOWNLOADER (02:00, 14:00 UTC)                          │
+│                                                             │
+│ Per ogni coin attivo: scarica OHLCV da Binance              │
+│ Output: 320 file parquet (64 coin × 5 timeframe)            │
+│                                                             │
+│ Dopo download: calcola data_coverage_days per ogni coin     │
+│ usando il file 15m come riferimento.                        │
+│ Coin con copertura < 144d vengono esclusi dalla generazione │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ REGIME DETECTOR (02:30, 14:30 UTC)                          │
+│                                                             │
+│ Input: 64 coin attivi                                       │
+│ Per ogni coin con ≥90 giorni di dati:                       │
+│   - Calcola regime_type (TREND/REVERSAL)                    │
+│   - Calcola direction (LONG/SHORT/BOTH)                     │
+│   - Calcola strength (0.0-1.0)                              │
+│ Output: tabella `market_regimes` (41 coin con strength≥0.5) │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**Output**:
-- Tabella `coins`: ~64 coin attivi (numero varia con volumi di mercato)
-- Tabella `coins`: ~185 coin totali (include storici inattivi)
-
-**Note**:
-- Il numero 224 non è hardcoded, viene dall'API Hyperliquid in tempo reale
-- Coin nuovi su HL appaiono automaticamente al prossimo ciclo
-- Coin delistati da HL diventano `is_active=false` automaticamente
-- Il filtro volume ($1M) è configurabile in `config.yaml` → `trading.min_volume_24h`
+**Risultato AUX**: 64 coin attivi, ~60 con copertura sufficiente, 41 con regime forte.
 
 ---
 
-## 2. BINANCE DOWNLOADER
+## 2. Coin/Direction Selection - Due Modalità
 
-**Schedule**: 2x al giorno (02:00, 14:00 UTC) - 15 min dopo pairs_updater
+Ogni generatore può essere configurato per usare una delle due modalità:
 
-**Input**: Coin attivi da tabella `coins` (is_active=true)
+### Modalità 1: Volume-Based (DEFAULT)
 
-**Flusso**:
-```
-Per ogni coin attivo (~64):
-  Per ogni timeframe [15m, 30m, 1h, 2h, 1d]:
-    Scarica OHLCV da Binance
-    Salva in data/binance/{SYMBOL}_{TF}.parquet
-```
-
-**Output**:
-- ~320 file parquet (64 coin × 5 timeframe)
-- Ogni file contiene ultimi 365+ giorni di candele OHLCV
-
-**Note**:
-- I dati vengono da Binance (non Hyperliquid) per maggiore storico
-- File corrotti vengono auto-riparati (re-download)
-- Supporta backfill per nuovi coin
-
----
-
-## 3. REGIME DETECTOR
-
-**Schedule**: 2x al giorno (02:30, 14:30 UTC) - 30 min dopo download_data
-
-**Input**: File parquet daily (`*_1d.parquet`) per coin attivi
-
-**Flusso**:
-```
-Per ogni coin attivo (~64):
-  Se ha ≥ 90 giorni di dati daily:
-    Esegue breakout test (trend-following)
-    Esegue reversal test (mean-reversion)
-    Calcola regime_type: TREND o REVERSAL
-    Calcola direction: LONG, SHORT, o BOTH
-    Calcola strength: 0.0 - 1.0
-    Salva in market_regimes
-  Altrimenti:
-    Skip (dati insufficienti)
+```yaml
+# config.yaml
+generation:
+  strategy_sources:
+    unger:
+      market_regime:
+        enabled: false  # DEFAULT
 ```
 
-**Output** (tabella `market_regimes`):
-- ~66 coin con regime calcolato
-- ~41 coin con strength ≥ 0.5 (usabili dai generator regime-aware)
-
-**Breakdown per Direction** (strength ≥ 0.5):
-
-| Direction | Count | Descrizione |
-|-----------|-------|-------------|
-| LONG | ~13 | Solo long profittevole storicamente |
-| SHORT | ~19 | Solo short profittevole storicamente |
-| BOTH | ~9 | Entrambe le direzioni profittevoli |
-
-**Breakdown per Regime Type** (strength ≥ 0.5):
-
-| Regime | Count | Descrizione |
-|--------|-------|-------------|
-| TREND | ~25 | Breakout test più profittevole |
-| REVERSAL | ~16 | Reversal test più profittevole |
-
-**Note**:
-- Coin nuovi (< 90 giorni di dati) non hanno regime
-- Coin senza regime non vengono usati da Unger/Pandas_ta
-- Coin senza regime VENGONO usati da Pattern_gen (usa top 30 by volume)
-
----
-
-## 4. GENERATORS
-
-### 4.1 UNGER (`UngStrat_*`) - ATTIVO
-
-**Input**: Tabella `market_regimes` (strength ≥ 0.5)
-
-**Selezione coin**:
-```
-50% delle volte → direzione dominante (SHORT se più coin SHORT)
-50% delle volte → BIDI (usa coin con direction=BOTH)
-```
-
-**Coin assegnati a `trading_coins`**:
-- Se direction=LONG → ~13 coin (tutti i LONG)
-- Se direction=SHORT → ~19 coin (tutti i SHORT)
-- Se direction=BIDI → ~9 coin (tutti i BOTH)
-
----
-
-### 4.2 UNGER GENETIC (`UggStrat_*`) - ATTIVO
-
-**Input**: Strategie ACTIVE Unger con score ≥ 40
-
-**Selezione coin**: Eredita `trading_coins` dal parent (con possibili mutazioni)
-
-**Coin assegnati**: Stessi del parent (~9-19 coin)
-
----
-
-### 4.3 PANDAS_TA (`PtaStrat_*`) - ATTIVO
-
-**Input**: Tabella `market_regimes` (strength ≥ 0.5)
-
-**Selezione coin**: Identica a Unger
-```
-50% delle volte → direzione dominante
-50% delle volte → BIDI
-```
-
-**Coin assegnati a `trading_coins`**:
-- Se direction=LONG → ~13 coin
-- Se direction=SHORT → ~19 coin
-- Se direction=BIDI → ~9 coin
-
----
-
-### 4.4 PATTERN_GEN (`PGnStrat_*`) - ATTIVO
-
-**Input**: Tabella `coins` (is_active=true) - **NON usa market_regimes**
-
-**Selezione coin**:
-```
-get_top_coins_by_volume(30) → top 30 coin per volume 24h
-```
-
-**Coin assegnati a `trading_coins`**: 30 coin (top per volume, indipendente dal regime)
-
-**Note**: Include anche coin nuovi senza regime (se nel top 30 per volume)
-
----
-
-### 4.5 PATTERN_GEN GENETIC (`PGgStrat_*`) - ATTIVO
-
-**Input**: Strategie ACTIVE pattern_gen con score ≥ 40
-
-**Selezione coin**: Eredita `trading_coins` dal parent
-
-**Coin assegnati**: 30 coin (stessi del parent)
-
----
-
-### 4.6 PATTERN (`PatStrat_*`) - DISATTIVO
-
-**Input**: Pattern-discovery API (servizio esterno)
-
-**Selezione coin**: Coin specifici dal pattern (basati su edge statistico)
-
-**Coin assegnati**: Variabile (definiti dal pattern stesso)
-
----
-
-### 4.7 AI_FREE (`AIFStrat_*`) - DISATTIVO
-
-**Input**: Prompt AI + indicatori scelti liberamente dall'AI
-
-**Selezione coin**: `get_top_coins_by_volume(30)`
-
-**Coin assegnati**: 30 coin
-
----
-
-### 4.8 AI_ASSIGNED (`AIAStrat_*`) - DISATTIVO
-
-**Input**: Prompt AI + indicatori pre-assegnati da IndicatorCombinator
-
-**Selezione coin**: `get_top_coins_by_volume(30)`
-
-**Coin assegnati**: 30 coin
-
----
-
-### Riepilogo Generators
-
-| Generator | Stato | Coin Source | Coin Count | Classe |
-|-----------|-------|-------------|------------|--------|
-| Unger | Attivo | market_regimes (direction) | 9-19 | `UngStrat_*` |
-| Unger Genetic | Attivo | Eredita da parent | 9-19 | `UggStrat_*` |
-| Pandas_ta | Attivo | market_regimes (direction) | 9-19 | `PtaStrat_*` |
-| Pattern_gen | Attivo | Top 30 by volume | 30 | `PGnStrat_*` |
-| Pattern_gen Genetic | Attivo | Eredita da parent | 30 | `PGgStrat_*` |
-| Pattern | Disattivo | Pattern-discovery API | Variabile | `PatStrat_*` |
-| AI_free | Disattivo | Top 30 by volume | 30 | `AIFStrat_*` |
-| AI_assigned | Disattivo | Top 30 by volume | 30 | `AIAStrat_*` |
-
----
-
-## 5. BACKTESTER
-
-**Schedule**: Continuo (processa strategie VALIDATED)
-
-**Input**: Strategia con `trading_coins` (9-30 coin a seconda del generator)
-
-**Validazione coin** (3 livelli):
-```
-trading_coins (es. 19 coin dalla strategia)
-        ↓
-Level 1: Liquidity filter
-  - Coin ancora is_active=true?
-  - Rimuove coin delistati/illiquidi
-        ↓
-Level 2: Cache filter
-  - File parquet esiste per questo coin/timeframe?
-  - Rimuove coin senza dati
-        ↓
-Level 3: Coverage filter
-  - Almeno 80% dei giorni richiesti coperti?
-  - Rimuove coin con troppi gap nei dati
-        ↓
-validated_coins (es. 17 coin dopo filtri)
-```
-
-**Output**: Backtest eseguito su `validated_coins`
-
-**Note**:
-- Se troppi coin vengono filtrati, la strategia può fallire per "insufficient trades"
-- Il backtester NON modifica `trading_coins` della strategia (solo valida temporaneamente)
-
----
-
-## 6. EXECUTOR
-
-**Schedule**: Continuo (esegue strategie LIVE)
-
-**Input**: Strategia LIVE con `trading_coins`
-
-**Filtro runtime**:
-```
-trading_coins (es. 19 coin dalla strategia)
-        ↓
-is_tradable(coin):
-  - is_active = true (coin ancora su Hyperliquid)
-  - volume_24h ≥ soglia configurata
-        ↓
-tradable_coins (es. 18 coin dopo filtro)
-        ↓
-Per ogni nuova candela:
-  Per ogni tradable_coin:
-    Calcola indicatori
-    Verifica entry condition
-    Se signal → esegue ordine su Hyperliquid
-```
-
-**Output**: Ordini eseguiti su Hyperliquid
-
-**Note**:
-- Coin delistati vengono automaticamente esclusi (ordini rifiutati da HL)
-- Coin illiquidi vengono filtrati per evitare slippage eccessivo
-- La strategia continua a funzionare con meno coin (no crash)
-
----
-
-## Coin Lifecycle
+**Comportamento**:
+- **Coin**: Top N per volume 24h (da `trading.top_coins_limit`)
+- **Direction**: Round-robin sequenziale (LONG → SHORT → BIDI → LONG → ...)
 
 ```
-[NUOVO SU HYPERLIQUID]
-        ↓
-pairs_updater lo aggiunge a coins (is_active=true)
-        ↓
-binance_downloader inizia a scaricare dati
-        ↓
-[ATTESA 90 GIORNI per dati sufficienti]
-        ↓
-regime_detector lo classifica (TREND/REVERSAL, LONG/SHORT/BOTH)
-        ↓
-[DISPONIBILE PER GENERATORS REGIME-AWARE]
-        ↓
-generators lo includono in trading_coins delle nuove strategie
-        ↓
-backtester lo usa per testare strategie
-        ↓
-executor lo usa per trading live
-        ↓
-[SE DELISTATO DA HYPERLIQUID]
-        ↓
-pairs_updater lo marca is_active=false
-        ↓
-Strategie esistenti continuano ma senza questo coin
-(ordini rifiutati, segnali ignorati)
+┌─────────────────────────────────────────────────────────────┐
+│ VOLUME-BASED SELECTION                                      │
+│                                                             │
+│ Coin: get_top_coins_by_volume(30) → 30 coin                 │
+│ Direction: round-robin cycle → LONG/SHORT/BIDI              │
+│                                                             │
+│ Risultato: tutti i coin, tutte le direzioni (diversificato) │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Modalità 2: Regime-Based
+
+```yaml
+# config.yaml
+generation:
+  strategy_sources:
+    unger:
+      market_regime:
+        enabled: true  # Usa market_regimes
+```
+
+**Comportamento**:
+- **Coin**: Query `market_regimes` per direction
+- **Direction**: Basata sul regime dominante (+ 50% BIDI)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ REGIME-BASED SELECTION                                      │
+│                                                             │
+│ Query market_regimes → group by direction                   │
+│ LONG: 13 coin | SHORT: 19 coin | BOTH: 9 coin               │
+│                                                             │
+│ Selezione:                                                  │
+│ 1. Trova direzione dominante (es. SHORT=19)                 │
+│ 2. 50% usa dominante, 50% usa BIDI                          │
+│                                                             │
+│ Risultato: coin coerenti con regime corrente                │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## FAQ
+## 3. Configurazione per Generatore
 
-**Q: Cosa succede se un coin scende sotto $1M di volume?**
-A: Al prossimo ciclo pairs_updater diventa `is_active=false`. Le strategie che lo avevano in `trading_coins` continuano a funzionare ma con un coin in meno.
+| Generator | Supported Directions | market_regime | Note |
+|-----------|---------------------|---------------|------|
+| **Unger** | LONG, SHORT, BIDI | ✅ | Vedi PIPELINE_01_GENERATOR.md |
+| **Unger Genetic** | LONG, SHORT, BIDI | ✅ | Vedi PIPELINE_01_GENERATOR.md |
+| **Pandas_ta** | LONG, SHORT, BIDI | ✅ | Vedi PIPELINE_01_GENERATOR.md |
+| **Pattern_gen** | LONG, SHORT, BIDI | ✅ | Vedi PIPELINE_01_GENERATOR.md |
+| **Pattern_gen Genetic** | LONG, SHORT, BIDI | ✅ | Vedi PIPELINE_01_GENERATOR.md |
+| **AI_free** | LONG, SHORT | ✅ | No BIDI |
+| **AI_assigned** | LONG, SHORT | ✅ | No BIDI |
+| **Pattern** | Da pattern | ❌ | Usa `pattern.get_high_edge_coins()` |
 
-**Q: Cosa succede se un coin cambia regime (da LONG a SHORT)?**
-A: Le strategie esistenti continuano con la direzione originale. Se non performano, il meccanismo di rotazione le ritira. Nuove strategie useranno il nuovo regime.
+### Esempio Config
 
-**Q: Come vengono trattati i coin nuovi senza regime?**
-A: Unger e Pandas_ta li ignorano (richiedono regime). Pattern_gen li include se sono nel top 30 per volume.
+```yaml
+generation:
+  strategy_sources:
+    unger:
+      enabled: true
+      market_regime:
+        enabled: false  # Volume-based (default)
 
-**Q: I coin sono ordinati in qualche modo?**
-A: Sì, per volume 24h decrescente in tutte le query.
+    pandas_ta:
+      enabled: true
+      market_regime:
+        enabled: true   # Regime-based
+
+    pattern_gen:
+      enabled: true
+      market_regime:
+        enabled: false  # Volume-based (default)
+```
+
+---
+
+## 4. CoinDirectionSelector
+
+Modulo centralizzato che gestisce la selezione coin/direction.
+
+**File**: `src/generator/coin_direction_selector.py`
+
+```python
+from src.generator.coin_direction_selector import CoinDirectionSelector
+
+# Initialize per generator
+selector = CoinDirectionSelector(config, 'unger')
+
+# Select coin and direction
+direction, coins = selector.select()
+# direction = 'LONG', 'SHORT', or 'BIDI'
+# coins = ['BTC', 'ETH', 'SOL', ...]
+
+# Con override (forza direzione specifica)
+direction, coins = selector.select(direction_override='SHORT')
+```
+
+**Round-robin sequenziale** (per volume-based mode):
+- Ciclo: LONG → SHORT → BIDI → LONG → ...
+- Persistente per-generator tra chiamate
+- Resetta al restart del daemon
+
+---
+
+## 5. Pipeline MAIN - Dove entrano i coin
+
+### GENERATION (step 1)
+
+**Dove sono salvati i coin**:
+- **64 coin attivi** → tabella `coins` (colonna `is_active=true`)
+- **41 coin con regime** → tabella `market_regimes` (colonna `strength>=0.5`)
+- **trading_coins della strategia** → tabella `strategies` (colonna `trading_coins`, JSON)
+
+**Chi salva trading_coins**: ogni generator via CoinDirectionSelector
+
+| Generator | Modalità Default | Risultato |
+|-----------|------------------|-----------|
+| **Unger** | Volume-based | 30 coin (top volume) |
+| **Unger Genetic** | Volume-based | 30 coin (top volume) |
+| **Pandas_ta** | Volume-based | 30 coin (top volume) |
+| **Pattern_gen** | Volume-based | 30 coin (top volume) |
+| **Pattern_gen Genetic** | Volume-based | 30 coin (top volume) |
+| **AI_free** | Volume-based | 30 coin (top volume) |
+| **AI_assigned** | Volume-based | 30 coin (top volume) |
+| **Pattern** | Pattern-specific | variabile (high-edge coins) |
+
+**Config**: `trading.top_coins_limit` (default: 30)
+
+---
+
+### VALIDATION → PARAMETRIC → BACKTEST IS/OOS → SCORE → SHUFFLE → WFA → ROBUSTNESS
+
+**Nessuna modifica ai coin**. Usano tutti `strategy.trading_coins`.
+
+Durante il backtest c'è una **validazione temporanea** (safety net):
+```
+trading_coins (es. 30 coin)
+       ↓
+   coin ancora is_active? ──→ NO → escluso
+       ↓ SI
+   ha file parquet? ──→ NO → escluso
+       ↓ SI
+   copertura dati ≥80%? ──→ NO → escluso
+       ↓ SI
+   validated_coins (es. 27 coin)
+```
+
+⚠️ `trading_coins` NON viene modificato. I coin esclusi sono solo ignorati per quel backtest.
+
+**NOTA**: Grazie al filtro `data_coverage_days` a monte (vedi sezione 0), questo check non dovrebbe mai scattare. È mantenuto come safety net per edge case (es. coin delistato tra generazione e backtest).
+
+---
+
+### POOL ENTRY (step 9)
+
+Strategia entra nel pool ACTIVE con i suoi `trading_coins` originali.
+
+---
+
+### EXECUTOR (step 10 - live)
+
+Filtro runtime su `trading_coins`:
+```
+trading_coins (es. 30 coin salvati)
+       ↓
+   coin ancora su Hyperliquid? ──→ NO → skip
+       ↓ SI
+   volume_24h ≥ $1M? ──→ NO → skip
+       ↓ SI
+   tradable_coins (es. 28 coin oggi)
+```
+
+⚠️ Anche qui `trading_coins` NON viene modificato. Il filtro è runtime.
+
+---
+
+## 6. Riepilogo
+
+| Fase | Cosa succede ai coin |
+|------|---------------------|
+| **AUX: Update pairs** | Crea pool di 64 coin attivi |
+| **AUX: Regime detector** | Classifica 41 coin con regime |
+| **MAIN: Generation** | Salva coin in `trading_coins` via selector |
+| **MAIN: Backtest** | Valida temporaneamente, usa quelli con dati |
+| **MAIN: Executor** | Filtra runtime, usa quelli ancora liquidi |
+
+**Regola fondamentale**: `trading_coins` viene scritto UNA volta (dal generator) e mai più modificato.
+
+---
+
+## 7. Quando usare quale modalità
+
+| Scenario | Modalità | Motivazione |
+|----------|----------|-------------|
+| **Massima diversificazione** | Volume-based | Tutti i coin liquidi, tutte le direzioni |
+| **Seguire il trend** | Regime-based | Solo coin in trend/reversal forte |
+| **Bootstrap iniziale** | Volume-based | Genera molte strategie velocemente |
+| **Fine-tuning** | Regime-based | Strategie più mirate al regime |
+
+**Default consigliato**: Volume-based per tutti i generatori (massima diversificazione).

@@ -358,40 +358,33 @@ class TestTradability:
         assert 'FAKE' in invalid  # Doesn't exist
 
 
-class TestPatternAwareFiltering:
-    """Tests for get_tradable_for_strategy()."""
+class TestTradingCoinsFiltering:
+    """Tests for get_tradable_for_strategy() with unified trading_coins."""
 
     @patch('src.data.coin_registry.get_session')
-    def test_prefers_pattern_coins(self, mock_get_session, mock_session, mock_coins):
-        """get_tradable_for_strategy() prefers pattern_coins over backtest_pairs."""
+    def test_returns_valid_trading_coins(self, mock_get_session, mock_session, mock_coins):
+        """get_tradable_for_strategy() returns valid coins from trading_coins."""
         mock_get_session.return_value.__enter__.return_value = mock_session
 
         registry = CoinRegistry.instance()
         result = registry.get_tradable_for_strategy(
-            pattern_coins=['ETH', 'SOL'],
-            backtest_pairs=['BTC', 'ETH']
+            trading_coins=['ETH', 'SOL', 'BTC']
         )
 
-        # Should use pattern_coins, not backtest_pairs
-        # ETH and SOL are both valid
+        # All three are valid (active and meet volume threshold)
         assert 'ETH' in result
         assert 'SOL' in result
-        # BTC should NOT be in result (not in pattern_coins)
-        assert 'BTC' not in result
+        assert 'BTC' in result
 
     @patch('src.data.coin_registry.get_session')
-    def test_falls_back_to_backtest_pairs(self, mock_get_session, mock_session, mock_coins):
-        """get_tradable_for_strategy() uses backtest_pairs if no pattern_coins."""
+    def test_returns_empty_if_no_trading_coins(self, mock_get_session, mock_session, mock_coins):
+        """get_tradable_for_strategy() returns empty list if no trading_coins."""
         mock_get_session.return_value.__enter__.return_value = mock_session
 
         registry = CoinRegistry.instance()
-        result = registry.get_tradable_for_strategy(
-            pattern_coins=None,
-            backtest_pairs=['BTC', 'ETH']
-        )
+        result = registry.get_tradable_for_strategy(trading_coins=None)
 
-        assert 'BTC' in result
-        assert 'ETH' in result
+        assert result == []
 
     @patch('src.data.coin_registry.get_session')
     def test_filters_out_invalid_coins(self, mock_get_session, mock_session, mock_coins):
@@ -400,8 +393,7 @@ class TestPatternAwareFiltering:
 
         registry = CoinRegistry.instance()
         result = registry.get_tradable_for_strategy(
-            pattern_coins=['BTC', 'SHIB', 'FAKE'],  # SHIB inactive, FAKE doesn't exist
-            backtest_pairs=[]
+            trading_coins=['BTC', 'SHIB', 'FAKE']  # SHIB inactive, FAKE doesn't exist
         )
 
         assert 'BTC' in result

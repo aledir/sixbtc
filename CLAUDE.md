@@ -1,6 +1,6 @@
 # SixBTC - AI-Powered Trading System Development Guide
 
-**Last Updated**: 2026-01-14 | **Python**: 3.11+ | **Core**: Numba-JIT Backtester + Hyperliquid SDK
+**Last Updated**: 2026-01-15 | **Python**: 3.11+ | **Core**: Numba-JIT Backtester + Hyperliquid SDK
 
 ---
 
@@ -282,6 +282,45 @@ bars_24h = bars_in_period('24h')  # Works with any TF
 - In case of discrepancy, Hyperliquid prevails ALWAYS
 - Sync local state with exchange before every critical operation
 
+### Rule #4b: WebSocket First - IMPERATIVE
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ WEBSOCKET È OBBLIGATORIO E PRIORITARIO                                  │
+│                                                                         │
+│ Per QUALSIASI comunicazione con Hyperliquid:                           │
+│ 1. PRIMA: Verifica se WebSocket può essere usato                       │
+│ 2. SOLO SE IMPOSSIBILE: Usa REST API (con rate limits!)                │
+│                                                                         │
+│ "Impossibile" significa:                                                │
+│ - L'endpoint non esiste su WebSocket                                   │
+│ - Documentazione Hyperliquid conferma che non è supportato             │
+│ - NON significa "è più facile usare REST"                              │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**WebSocket implementation**: `src/data/hyperliquid_websocket.py`
+- `HyperliquidDataProvider` singleton class
+- Supports: `allMids`, `candle`, `webData2` (account state), `userFills`, `orderUpdates`
+- Auto-reconnection with exponential backoff
+- Use this for ALL real-time data needs
+
+**When REST API is allowed** (only after verifying WebSocket is impossible):
+```python
+# ❌ FORBIDDEN - REST for data that WebSocket provides
+balance = client.get_account_balance()  # Wrong! Use webData2 subscription
+
+# ✅ CORRECT - REST only for actions (place order, cancel, etc.)
+client.place_order(order)  # OK - WebSocket doesn't support order placement
+```
+
+**If using REST API, MUST respect Hyperliquid rate limits:**
+- Max 1200 requests per minute (20/second)
+- Implement exponential backoff on 429 errors
+- Use caching where appropriate
+- Log all REST calls for monitoring
+
+**Rationale**: WebSocket provides real-time updates without polling overhead. REST polling wastes resources and can hit rate limits. The `data stale` issue we encountered is a direct consequence of not using WebSocket for balance updates.
+
 ### Rule #5: No AI Prompt Hardcoding
 ```python
 # ❌ FORBIDDEN - Hardcoded prompts
@@ -314,6 +353,22 @@ prompt = template.render(threshold=threshold, patterns=patterns)
 ```
 
 **Rejection criteria**: If any metric fails threshold, strategy is discarded.
+
+### Rule #7b: Robustness Filtering
+```python
+# Every strategy entering ACTIVE pool must pass robustness check:
+# Formula: robustness = 0.50*oos_ratio + 0.35*trade_score + 0.15*simplicity
+#
+# Components:
+# - oos_ratio = OOS_Sharpe / IS_Sharpe (generalization to unseen data)
+# - trade_score = total_trades / 150 (statistical significance)
+# - simplicity = 1 / num_indicators (overfitting resistance)
+#
+# Threshold: robustness >= 0.80
+```
+
+**Why**: Score measures historical performance. Robustness measures confidence
+the edge is real. Both are needed for live deployment.
 
 ### Rule #8: Emergency Stop Discipline
 ```python

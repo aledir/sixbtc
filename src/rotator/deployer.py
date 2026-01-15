@@ -158,6 +158,12 @@ class StrategyDeployer:
                         f"Subaccount {subaccount_id}: keeping existing capital=${subaccount.allocated_capital:.2f}"
                     )
 
+                # Initialize peak_balance to prevent false drawdown detection
+                # Use current_balance if available, otherwise allocated_capital
+                if subaccount.peak_balance is None or subaccount.peak_balance == 0:
+                    subaccount.peak_balance = subaccount.current_balance or subaccount.allocated_capital
+                    logger.info(f"Subaccount {subaccount_id}: set peak_balance=${subaccount.peak_balance:.2f}")
+
                 # Update strategy
                 db_strategy = session.query(Strategy).filter(
                     Strategy.id == strategy_id

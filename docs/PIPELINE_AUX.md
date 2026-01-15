@@ -79,12 +79,20 @@ Tutti i task di manutenzione giornaliera eseguono tra 01:00 e 02:00 UTC (low-act
 
 **API**:
 - `get_active_pairs(min_volume, limit)` → List[str]
+- `get_coins_with_sufficient_data(required_days, min_volume, limit)` → List[str]
 - `get_coin(symbol)` → CoinInfo
 - `get_max_leverage(symbol)` → int
 - `is_tradable(symbol)` → bool
+- `has_sufficient_data(symbol, required_days)` → bool
 - `get_tradable_for_strategy(...)` → List[str]
 
-**Usato da**: Backtester, Executor, Rotator, Generator
+**Data coverage filtering**:
+- `data_coverage_days` campo in `coins` table
+- Aggiornato da `BinanceDownloader.update_coin_data_coverage()` dopo ogni download
+- `get_coins_with_sufficient_data()` filtra coin con < (is_days + oos_days) * min_coverage_pct giorni
+- Default: (120 + 60) × 0.80 = **144 giorni minimi**
+
+**Usato da**: Backtester, Executor, Rotator, Generator (via CoinDirectionSelector)
 
 ### Config
 
@@ -137,6 +145,12 @@ data_scheduler:
    - OHLCV validation (no negative, high >= low)
    - Atomic write (temp file + rename)
    - Update metadata
+
+6. **Update data coverage** (dopo tutti i download)
+   - `update_coin_data_coverage()` calcola giorni di dati per ogni coin
+   - Usa file 15m come riferimento
+   - Aggiorna `coins.data_coverage_days`
+   - Coin con copertura < 144 giorni esclusi dalla generazione
 
 ### Auto-Healing Features
 
@@ -487,6 +501,7 @@ Questa finestra è scelta perché è un periodo di bassa attività per i mercati
 - Esegue 5 min dopo update_pairs
 - Supporta backfill + forward update
 - Auto-healing per file corrotti
+- **Dopo download**: aggiorna `coins.data_coverage_days` per tutti i coin
 - Dettagli in sezione A2
 
 ### Config

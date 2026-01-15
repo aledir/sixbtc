@@ -12,6 +12,7 @@ Database field: generation_mode = "pattern_gen"
 
 import hashlib
 import random
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,8 @@ from typing import List, Optional
 
 from jinja2 import Environment, FileSystemLoader
 
+from src.data.coin_registry import get_top_coins_by_volume
+from src.generator.coin_direction_selector import CoinDirectionSelector
 from src.generator.pattern_gen.formula_composer import ComposedFormula, FormulaComposer
 from src.utils import get_logger
 
@@ -31,10 +34,11 @@ class PatternGenResult:
 
     code: str
     strategy_id: str
-    strategy_type: str                  # 'THR', 'CRS', 'VOL', 'PRC', 'STA'
+    strategy_type: str                  # Unified 5 types: TRD, MOM, REV, VOL, CDL
     timeframe: str
     base_code_hash: str
     formula_hash: str
+    trading_coins: List[str]            # Top coins by volume at generation time
     generation_mode: str = "pattern_gen"
     ai_provider: str = "pattern_gen"
     direction: str = "long"
@@ -92,6 +96,7 @@ class PatternGenGenerator:
         self.parametric_ratio = self.pattern_gen_config.get('parametric_ratio', 0.50)
         self.template_ratio = self.pattern_gen_config.get('template_ratio', 0.30)
         self.innovative_ratio = self.pattern_gen_config.get('innovative_ratio', 0.20)
+        self.top_coins_limit = config['trading']['top_coins_limit']
 
         # Genetic config (Phase 2)
         genetic_config = self.pattern_gen_config.get('genetic', {})
@@ -118,11 +123,16 @@ class PatternGenGenerator:
         timeframes_config = trading_config.get('timeframes', {})
         self.timeframes = list(timeframes_config.values()) if timeframes_config else self.DEFAULT_TIMEFRAMES
 
+        # Initialize coin/direction selector
+        self.selector = CoinDirectionSelector(config, 'pattern_gen')
+
         genetic_status = "enabled" if self.genetic_enabled else "disabled"
+        regime_mode = "regime-aware" if self.selector.use_regime else "volume-based"
         logger.info(
             f"PatternGenGenerator initialized: ratios={self.parametric_ratio:.0%}/"
             f"{self.template_ratio:.0%}/{self.innovative_ratio:.0%}, "
-            f"genetic={genetic_status}, {len(self.timeframes)} timeframes"
+            f"genetic={genetic_status}, coin selection: {regime_mode}, "
+            f"{len(self.timeframes)} timeframes"
         )
 
     @property
@@ -222,6 +232,7 @@ class PatternGenGenerator:
             timeframe=genetic_result.timeframe,
             base_code_hash=genetic_result.base_code_hash,
             formula_hash=genetic_result.formula_hash,
+            trading_coins=genetic_result.trading_coins,
             generation_mode=genetic_result.generation_mode,
             ai_provider=genetic_result.ai_provider,
             direction=genetic_result.direction,
@@ -248,21 +259,27 @@ class PatternGenGenerator:
         if timeframe is None:
             timeframe = self.rng.choice(self.timeframes)
 
+        # Use selector for direction (handles both volume-based and regime-based)
         if direction is None:
-            direction = self.rng.choice(['long', 'short'])
+            dir_from_selector, _ = self.selector.select()
+            direction = dir_from_selector.lower()  # pattern_gen uses lowercase
 
-        # Calculate counts based on ratios
-        parametric_count = max(1, int(count * self.parametric_ratio))
-        template_count = max(1, int(count * self.template_ratio))
-        innovative_count = max(0, count - parametric_count - template_count)
+        # BIDI: Use special composition with separate LONG/SHORT blocks
+        if direction == 'bidi':
+            formulas = self.composer.compose_bidi(count=count)
+        else:
+            # Calculate counts based on ratios
+            parametric_count = max(1, int(count * self.parametric_ratio))
+            template_count = max(1, int(count * self.template_ratio))
+            innovative_count = max(0, count - parametric_count - template_count)
 
-        # Compose formulas
-        formulas = self.composer.compose_all(
-            parametric_count=parametric_count,
-            template_count=template_count,
-            innovative_count=innovative_count,
-            direction=direction,
-        )
+            # Compose formulas
+            formulas = self.composer.compose_all(
+                parametric_count=parametric_count,
+                template_count=template_count,
+                innovative_count=innovative_count,
+                direction=direction,
+            )
 
         # Shuffle and limit
         self.rng.shuffle(formulas)
@@ -326,11 +343,8 @@ class PatternGenGenerator:
             PatternGenResult or None if rendering fails
         """
         try:
-            # Generate unique strategy ID from formula hash + random suffix
-            random_suffix = hashlib.sha256(
-                f"{formula.formula_id}{self.rng.random()}".encode()
-            ).hexdigest()[:4]
-            strategy_id = f"{formula.formula_id}{random_suffix}"
+            # Generate unique strategy ID (8 char UUID, consistent with other generators)
+            strategy_id = uuid.uuid4().hex[:8]
 
             # Pick random exit parameters
             sl_pct = self.rng.choice(self.SL_RANGE)
@@ -366,6 +380,14 @@ class PatternGenGenerator:
                 'exit_bars': exit_bars,
                 'execution_type': execution_type,
                 'generated_at': datetime.now(timezone.utc).isoformat(),
+                # BIDI support: separate LONG/SHORT code
+                'is_bidi': formula.is_bidi,
+                'indicator_code_long': formula.indicator_code_long,
+                'indicator_code_short': formula.indicator_code_short,
+                'entry_signal_code_long': formula.entry_signal_code_long,
+                'entry_signal_code_short': formula.entry_signal_code_short,
+                'blocks_used_long': formula.blocks_used_long,
+                'blocks_used_short': formula.blocks_used_short,
             }
 
             # Render template
@@ -375,6 +397,10 @@ class PatternGenGenerator:
             # Compute base code hash (for dedup and shuffle test caching)
             base_code_hash = hashlib.sha256(code.encode()).hexdigest()[:16]
 
+            # Get coins via selector (direction already set in formula)
+            strategy_direction = formula.direction.upper()
+            _, coins = self.selector.select(direction_override=strategy_direction)
+
             return PatternGenResult(
                 code=code,
                 strategy_id=strategy_id,
@@ -382,6 +408,7 @@ class PatternGenGenerator:
                 timeframe=timeframe,
                 base_code_hash=base_code_hash,
                 formula_hash=formula.formula_id,
+                trading_coins=coins,
                 direction=formula.direction,
                 pattern_name=formula.name,
                 blocks_used=formula.blocks_used,

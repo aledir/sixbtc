@@ -11,6 +11,11 @@ CRITICAL:
 Credentials:
 - Agent wallet credentials are loaded from database (Credential table)
 - Run scripts/setup_hyperliquid.py to initialize credentials
+
+Rule #4b: WebSocket First - IMPERATIVE
+- When data_provider is set, ALL data reads use WebSocket (prices, balance, positions)
+- REST API is used ONLY for trading operations (place_order, cancel_order, set_leverage)
+- REST API is also used for bootstrap/fallback when WebSocket is not available
 """
 
 import os
@@ -29,6 +34,11 @@ from hyperliquid.utils import constants
 from src.database.connection import get_session
 from src.database.models import Credential
 from src.utils.logger import get_logger
+
+# Import type hint only to avoid circular import
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.data.hyperliquid_websocket import HyperliquidDataProvider
 
 logger = get_logger(__name__)
 
@@ -88,7 +98,8 @@ class HyperliquidClient:
     def __init__(
         self,
         config: Optional[Dict] = None,
-        dry_run: bool = True
+        dry_run: bool = True,
+        data_provider: Optional['HyperliquidDataProvider'] = None
     ):
         """
         Initialize Hyperliquid client with multi-subaccount support.
@@ -96,14 +107,19 @@ class HyperliquidClient:
         Architecture:
         - SHARED: Info client, CCXT client, asset cache (one instance)
         - PER-SUBACCOUNT: Exchange clients (lazy loading, one per subaccount)
+        - DATA PROVIDER: WebSocket data source (Rule #4b: WebSocket First)
 
         Args:
             config: Configuration dict
             dry_run: If True, log operations without executing
+            data_provider: HyperliquidDataProvider for WebSocket data (Rule #4b)
 
         Raises:
             ValueError: If live mode without valid credentials
         """
+        # WebSocket data provider (Rule #4b: WebSocket First)
+        # When set, ALL data reads use WebSocket instead of REST
+        self.data_provider = data_provider
         # Determine dry_run mode - single source of truth: hyperliquid.dry_run
         if config is not None:
             self.dry_run = config.get('hyperliquid', {}).get('dry_run', dry_run)
@@ -338,7 +354,9 @@ class HyperliquidClient:
 
     def get_current_price(self, symbol: str) -> float:
         """
-        Get current market price for symbol
+        Get current market price for symbol.
+
+        Rule #4b: WebSocket First - uses data_provider when available.
 
         Args:
             symbol: Trading pair (e.g., 'BTC')
@@ -346,12 +364,21 @@ class HyperliquidClient:
         Returns:
             Current mid price
         """
+        # Normalize symbol (BTC, BTC-USDC, BTC/USDC:USDC all → BTC)
+        base_symbol = symbol.split("/")[0].split("-")[0]
+
+        # Rule #4b: WebSocket First
+        if self.data_provider:
+            price = self.data_provider.get_price_sync(base_symbol)
+            if price is not None:
+                return price
+            # Fallback to REST only if WebSocket has no data
+            logger.debug(f"WebSocket has no price for {base_symbol}, falling back to REST")
+
+        # REST fallback (or when data_provider not set)
         try:
             self._wait_rate_limit()
             all_mids = self.info.all_mids()
-
-            # Normalize symbol (BTC, BTC-USDC, BTC/USDC:USDC all → BTC)
-            base_symbol = symbol.split("/")[0].split("-")[0]
 
             if base_symbol in all_mids:
                 return float(all_mids[base_symbol])
@@ -365,11 +392,21 @@ class HyperliquidClient:
 
     def get_current_prices(self) -> Dict[str, float]:
         """
-        Get current prices for all symbols
+        Get current prices for all symbols.
+
+        Rule #4b: WebSocket First - uses data_provider when available.
 
         Returns:
             Dict mapping symbol to price
         """
+        # Rule #4b: WebSocket First
+        if self.data_provider and self.data_provider.mid_prices:
+            return {
+                coin: mid.price
+                for coin, mid in self.data_provider.mid_prices.items()
+            }
+
+        # REST fallback (or when data_provider not set)
         try:
             self._wait_rate_limit()
             all_mids = self.info.all_mids()

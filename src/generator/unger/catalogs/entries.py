@@ -674,8 +674,8 @@ entry_condition = df["close"].iloc[-1] < bb_lower.iloc[-1]''',
 std = df["close"].rolling(20).std()
 bb_width = (4 * std) / sma
 squeeze = bb_width < bb_width.rolling(50).quantile(0.2)
-release = (squeeze.iloc[-2]) and (not squeeze.iloc[-1])
-entry_condition = release and (df["close"].iloc[-1] > sma.iloc[-1])''',
+release = squeeze.iloc[-2] & (~squeeze.iloc[-1])
+entry_condition = release & (df["close"].iloc[-1] > sma.iloc[-1])''',
         params={},
         lookback_required=55,
         indicators_used=["BB"],
@@ -690,8 +690,8 @@ entry_condition = release and (df["close"].iloc[-1] > sma.iloc[-1])''',
 std = df["close"].rolling(20).std()
 bb_width = (4 * std) / sma
 squeeze = bb_width < bb_width.rolling(50).quantile(0.2)
-release = (squeeze.iloc[-2]) and (not squeeze.iloc[-1])
-entry_condition = release and (df["close"].iloc[-1] < sma.iloc[-1])''',
+release = squeeze.iloc[-2] & (~squeeze.iloc[-1])
+entry_condition = release & (df["close"].iloc[-1] < sma.iloc[-1])''',
         params={},
         lookback_required=55,
         indicators_used=["BB"],
@@ -766,8 +766,8 @@ CANDLESTICK_ENTRIES = [
         direction="LONG",
         logic_template='''prev_bearish = df["close"].iloc[-2] < df["open"].iloc[-2]
 curr_bullish = df["close"].iloc[-1] > df["open"].iloc[-1]
-engulfs = (df["open"].iloc[-1] < df["close"].iloc[-2]) and (df["close"].iloc[-1] > df["open"].iloc[-2])
-entry_condition = prev_bearish and curr_bullish and engulfs''',
+engulfs = (df["open"].iloc[-1] < df["close"].iloc[-2]) & (df["close"].iloc[-1] > df["open"].iloc[-2])
+entry_condition = prev_bearish & curr_bullish & engulfs''',
         params={},
         lookback_required=10,
         indicators_used=[],
@@ -780,8 +780,8 @@ entry_condition = prev_bearish and curr_bullish and engulfs''',
         direction="SHORT",
         logic_template='''prev_bullish = df["close"].iloc[-2] > df["open"].iloc[-2]
 curr_bearish = df["close"].iloc[-1] < df["open"].iloc[-1]
-engulfs = (df["open"].iloc[-1] > df["close"].iloc[-2]) and (df["close"].iloc[-1] < df["open"].iloc[-2])
-entry_condition = prev_bullish and curr_bearish and engulfs''',
+engulfs = (df["open"].iloc[-1] > df["close"].iloc[-2]) & (df["close"].iloc[-1] < df["open"].iloc[-2])
+entry_condition = prev_bullish & curr_bearish & engulfs''',
         params={},
         lookback_required=10,
         indicators_used=[],
@@ -795,7 +795,7 @@ entry_condition = prev_bullish and curr_bearish and engulfs''',
         logic_template='''body = abs(df["close"].iloc[-1] - df["open"].iloc[-1])
 lower_wick = min(df["close"].iloc[-1], df["open"].iloc[-1]) - df["low"].iloc[-1]
 upper_wick = df["high"].iloc[-1] - max(df["close"].iloc[-1], df["open"].iloc[-1])
-entry_condition = (lower_wick > body * 2) and (upper_wick < body * 0.3) and (body > 0)''',
+entry_condition = (lower_wick > body * 2) & (upper_wick < body * 0.3) & (body > 0)''',
         params={},
         lookback_required=5,
         indicators_used=[],
@@ -809,7 +809,7 @@ entry_condition = (lower_wick > body * 2) and (upper_wick < body * 0.3) and (bod
         logic_template='''body = abs(df["close"].iloc[-1] - df["open"].iloc[-1])
 lower_wick = min(df["close"].iloc[-1], df["open"].iloc[-1]) - df["low"].iloc[-1]
 upper_wick = df["high"].iloc[-1] - max(df["close"].iloc[-1], df["open"].iloc[-1])
-entry_condition = (upper_wick > body * 2) and (lower_wick < body * 0.3) and (body > 0)''',
+entry_condition = (upper_wick > body * 2) & (lower_wick < body * 0.3) & (body > 0)''',
         params={},
         lookback_required=5,
         indicators_used=[],
@@ -822,7 +822,7 @@ entry_condition = (upper_wick > body * 2) and (lower_wick < body * 0.3) and (bod
         direction="BIDI",
         logic_template='''body = abs(df["close"].iloc[-1] - df["open"].iloc[-1])
 range_ = df["high"].iloc[-1] - df["low"].iloc[-1]
-entry_condition = (body < range_ * 0.1) and (range_ > 0)''',
+entry_condition = (body < range_ * 0.1) & (range_ > 0)''',
         params={},
         lookback_required=5,
         indicators_used=[],
@@ -838,7 +838,7 @@ c2_bull = df["close"].iloc[-2] > df["open"].iloc[-2]
 c3_bull = df["close"].iloc[-1] > df["open"].iloc[-1]
 c2_higher = df["close"].iloc[-2] > df["close"].iloc[-3]
 c3_higher = df["close"].iloc[-1] > df["close"].iloc[-2]
-entry_condition = c1_bull and c2_bull and c3_bull and c2_higher and c3_higher''',
+entry_condition = c1_bull & c2_bull & c3_bull & c2_higher & c3_higher''',
         params={},
         lookback_required=10,
         indicators_used=[],
@@ -854,7 +854,7 @@ c2_bear = df["close"].iloc[-2] < df["open"].iloc[-2]
 c3_bear = df["close"].iloc[-1] < df["open"].iloc[-1]
 c2_lower = df["close"].iloc[-2] < df["close"].iloc[-3]
 c3_lower = df["close"].iloc[-1] < df["close"].iloc[-2]
-entry_condition = c1_bear and c2_bear and c3_bear and c2_lower and c3_lower''',
+entry_condition = c1_bear & c2_bear & c3_bear & c2_lower & c3_lower''',
         params={},
         lookback_required=10,
         indicators_used=[],
@@ -869,7 +869,7 @@ entry_condition = c1_bear and c2_bear and c3_bear and c2_lower and c3_lower''',
 c2_small = abs(df["close"].iloc[-2] - df["open"].iloc[-2]) < (df["high"].iloc[-2] - df["low"].iloc[-2]) * 0.3
 c3_bull = df["close"].iloc[-1] > df["open"].iloc[-1]
 c3_closes_above_mid = df["close"].iloc[-1] > (df["open"].iloc[-3] + df["close"].iloc[-3]) / 2
-entry_condition = c1_bear and c2_small and c3_bull and c3_closes_above_mid''',
+entry_condition = c1_bear & c2_small & c3_bull & c3_closes_above_mid''',
         params={},
         lookback_required=10,
         indicators_used=[],
@@ -884,7 +884,7 @@ entry_condition = c1_bear and c2_small and c3_bull and c3_closes_above_mid''',
 c2_small = abs(df["close"].iloc[-2] - df["open"].iloc[-2]) < (df["high"].iloc[-2] - df["low"].iloc[-2]) * 0.3
 c3_bear = df["close"].iloc[-1] < df["open"].iloc[-1]
 c3_closes_below_mid = df["close"].iloc[-1] < (df["open"].iloc[-3] + df["close"].iloc[-3]) / 2
-entry_condition = c1_bull and c2_small and c3_bear and c3_closes_below_mid''',
+entry_condition = c1_bull & c2_small & c3_bear & c3_closes_below_mid''',
         params={},
         lookback_required=10,
         indicators_used=[],
@@ -900,7 +900,7 @@ lower_wick = min(df["close"].iloc[-1], df["open"].iloc[-1]) - df["low"].iloc[-1]
 upper_wick = df["high"].iloc[-1] - max(df["close"].iloc[-1], df["open"].iloc[-1])
 range_ = df["high"].iloc[-1] - df["low"].iloc[-1]
 body_at_top = max(df["close"].iloc[-1], df["open"].iloc[-1]) > df["low"].iloc[-1] + range_ * 0.7
-entry_condition = (lower_wick > body * 2.5) and body_at_top and (range_ > 0)''',
+entry_condition = (lower_wick > body * 2.5) & body_at_top & (range_ > 0)''',
         params={},
         lookback_required=5,
         indicators_used=[],
@@ -1935,7 +1935,9 @@ def get_entries_by_category(category: str) -> list[EntryCondition]:
 def get_entries_by_direction(direction: str) -> list[EntryCondition]:
     """Get all entries compatible with a direction (LONG, SHORT, or BIDI)."""
     if direction == 'BIDI':
-        return ALL_ENTRIES
+        # BIDI blueprint requires entries that are intrinsically bidirectional
+        # LONG-only entries (e.g., RSI Oversold) don't make sense flipped to SHORT
+        return [e for e in ALL_ENTRIES if e.direction == 'BIDI']
     return [e for e in ALL_ENTRIES if e.direction == direction or e.direction == 'BIDI']
 
 

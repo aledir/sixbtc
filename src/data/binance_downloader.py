@@ -1400,6 +1400,88 @@ class BinanceDataDownloader:
         logger.debug("cleanup_obsolete_pairs() is disabled - keeping all historical data")
         return 0
 
+    def update_coin_data_coverage(self) -> dict:
+        """
+        Update data_coverage_days in coins table for all active coins.
+
+        Calculates the number of days of OHLCV data available in cache
+        for each coin (using 15m timeframe as reference).
+
+        This enables filtering coins with insufficient data BEFORE strategy
+        generation, rather than discovering it during backtesting.
+
+        Returns:
+            Dict with counts: total, updated, insufficient
+        """
+        from src.config.loader import load_config
+        from src.database import get_session, Coin
+        from src.backtester.cache_reader import BacktestCacheReader, CacheNotFoundError
+
+        config = load_config()
+
+        # Get required days from config (IS + OOS)
+        is_days = config.get('backtesting.is_days')
+        oos_days = config.get('backtesting.oos_days')
+        min_coverage_pct = config.get('backtesting.min_coverage_pct')
+        required_days = int((is_days + oos_days) * min_coverage_pct)
+
+        try:
+            cache_reader = BacktestCacheReader(cache_dir=str(self.data_dir))
+        except CacheNotFoundError:
+            logger.warning("Cache not found, skipping coverage update")
+            return {'total': 0, 'updated': 0, 'insufficient': 0}
+
+        # Reference timeframe for coverage calculation (smallest = most candles)
+        reference_tf = '15m'
+
+        updated = 0
+        insufficient = 0
+
+        with get_session() as session:
+            active_coins = session.query(Coin).filter(Coin.is_active == True).all()
+
+            for coin in active_coins:
+                try:
+                    cache_info = cache_reader.get_cache_info(coin.symbol, reference_tf)
+
+                    if cache_info and cache_info.get('days'):
+                        coverage_days = cache_info['days']
+                    else:
+                        coverage_days = 0
+
+                    # Update if changed
+                    if coin.data_coverage_days != coverage_days:
+                        coin.data_coverage_days = coverage_days
+                        updated += 1
+
+                    # Track insufficient coverage
+                    if coverage_days < required_days:
+                        insufficient += 1
+                        logger.debug(
+                            f"{coin.symbol}: {coverage_days}d < {required_days}d required"
+                        )
+
+                except Exception as e:
+                    logger.debug(f"Failed to get coverage for {coin.symbol}: {e}")
+                    coin.data_coverage_days = 0
+                    updated += 1
+                    insufficient += 1
+
+            session.commit()
+
+        logger.info(
+            f"Updated data coverage: {updated} coins updated, "
+            f"{insufficient}/{len(active_coins)} with insufficient data "
+            f"(required: {required_days}d = {is_days}+{oos_days} * {min_coverage_pct:.0%})"
+        )
+
+        return {
+            'total': len(active_coins),
+            'updated': updated,
+            'insufficient': insufficient,
+            'required_days': required_days,
+        }
+
 
 def _display_verification_results(results: Dict[str, Dict]) -> None:
     """Display verification results in a table"""

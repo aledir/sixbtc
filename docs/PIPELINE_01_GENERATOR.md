@@ -287,6 +287,51 @@ Config per controllare il mix:
 
 ---
 
+## Direction: BIDI
+
+Le strategie BIDI (bidirectional) possono aprire sia LONG che SHORT.
+
+**Generatori con supporto BIDI**: Unger, Pandas_ta, Pattern_gen (e varianti genetic)
+
+### Logica BIDI
+
+Ogni strategia BIDI ha **due entry condition indipendenti**:
+- `entry_long`: condizione per entrare LONG (es. RSI < 30, Breakout N-Bar High)
+- `entry_short`: condizione per entrare SHORT (es. RSI > 70, Breakout N-Bar Low)
+
+```python
+# Generazione segnali
+long_signal = entry_long_condition(df)   # Indipendente
+short_signal = entry_short_condition(df) # Indipendente
+entry_signal = long_signal | short_signal
+
+# Direzione determinata da quale signal è attivo
+if long_signal: direction = 'long'
+elif short_signal: direction = 'short'
+```
+
+### Implementazione per Generatore
+
+| Generator | LONG Entry | SHORT Entry |
+|-----------|------------|-------------|
+| **Unger** | `entry_condition_long` da catalogo | `entry_condition_short` da catalogo (stessa categoria) |
+| **Pandas_ta** | `entry_conditions_long` (1-3 indicatori) | `entry_conditions_short` (1-3 indicatori) |
+| **Pattern_gen** | Block LONG da `building_blocks` | Block SHORT da `building_blocks` |
+
+### Selezione Entry Coerenti
+
+I generatori preferiscono entry "gemelle" dalla stessa categoria:
+- Unger: `BRK_01` (Breakout High) + `BRK_02` (Breakout Low)
+- Pandas_ta: RSI < 30 (oversold) + RSI > 70 (overbought)
+- Pattern_gen: Block threshold LONG + Block threshold SHORT
+
+### Generatori senza BIDI
+
+- **AI_free / AI_assigned**: Solo LONG o SHORT (Claude non genera BIDI)
+- **Pattern**: Direction dal pattern (`target_direction`)
+
+---
+
 ## Log Format
 
 ```

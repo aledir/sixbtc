@@ -700,3 +700,46 @@ def get_thresholds_for_indicator(indicator_id: str, condition_type: ConditionTyp
 def get_direction_for_condition(category: str, condition_type: ConditionType) -> str:
     """Get trade direction for a category + condition combination."""
     return CONDITION_DIRECTION.get((category, condition_type), "BIDI")
+
+
+def get_opposite_threshold(
+    indicator_id: str,
+    threshold: float,
+    condition_type: ConditionType
+) -> float | None:
+    """
+    Get the opposite threshold for BIDI signal generation.
+
+    For threshold_below (oversold), returns an overbought threshold.
+    For threshold_above (overbought), returns an oversold threshold.
+
+    Args:
+        indicator_id: Indicator identifier (e.g., "RSI")
+        threshold: The primary threshold value
+        condition_type: The condition type
+
+    Returns:
+        Opposite threshold value, or None if not applicable
+    """
+    thresholds = INDICATOR_THRESHOLDS.get(indicator_id, {})
+
+    if condition_type == ConditionType.THRESHOLD_BELOW:
+        # Primary is oversold, opposite is overbought
+        overbought = thresholds.get("overbought", [])
+        if overbought:
+            # Pick middle value from overbought range
+            return overbought[len(overbought) // 2]
+        # Fallback: mirror around 50 (for 0-100 indicators)
+        return 100 - threshold if threshold < 50 else None
+
+    elif condition_type == ConditionType.THRESHOLD_ABOVE:
+        # Primary is overbought, opposite is oversold
+        oversold = thresholds.get("oversold", [])
+        if oversold:
+            # Pick middle value from oversold range
+            return oversold[len(oversold) // 2]
+        # Fallback: mirror around 50
+        return 100 - threshold if threshold > 50 else None
+
+    # For other condition types (slope, crossed), no threshold opposite needed
+    return None

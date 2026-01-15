@@ -20,10 +20,10 @@ from typing import Optional
 from jinja2 import Environment, FileSystemLoader
 
 from src.database import get_session, MarketRegime, Coin
+from src.generator.coin_direction_selector import CoinDirectionSelector
 from src.utils import get_logger
 
 from .composer import PtaBlueprint, PtaComposer, PtaEntryCondition
-from .catalogs import get_direction_for_condition
 
 logger = get_logger(__name__)
 
@@ -36,7 +36,7 @@ class PtaGeneratedStrategy:
     strategy_id: str
     strategy_type: str  # 'MOM', 'TRN', 'CRS', 'VOL', 'VLM'
     timeframe: str
-    pattern_coins: list[str]
+    trading_coins: list[str]
     entry_indicators: list[str]  # List of indicator IDs used
     exit_mechanism_name: str
     base_code_hash: str
@@ -98,16 +98,20 @@ class PandasTaGenerator:
         self.timeframes = list(timeframes_config.values()) if timeframes_config else self.DEFAULT_TIMEFRAMES
 
         # Get pandas_ta specific config
-        pta_config = config.get('strategy_sources', {}).get('pandas_ta', {})
+        pta_config = config.get('generation', {}).get('strategy_sources', {}).get('pandas_ta', {})
         self.indicator_ratios = pta_config.get('indicator_ratios', {
             'single': 0.30,
             'double': 0.50,
             'triple': 0.20,
         })
 
+        # Initialize coin/direction selector
+        self.selector = CoinDirectionSelector(config, 'pandas_ta')
+
+        regime_mode = "regime-aware" if self.selector.use_regime else "volume-based"
         logger.info(
             f"PandasTaGenerator initialized: {len(self.timeframes)} timeframes, "
-            f"~158M possible strategies"
+            f"coin selection: {regime_mode}, ~158M possible strategies"
         )
 
     def get_regime_coins(self, regime_type: str) -> list[str]:
@@ -147,6 +151,83 @@ class PandasTaGenerator:
             logger.warning(f"Failed to query tradeable coins: {e}")
             return []
 
+    def get_direction_groups(self) -> dict[str, list[str]]:
+        """
+        Query MarketRegime and group symbols by direction.
+
+        Returns:
+            {"LONG": [...], "SHORT": [...], "BOTH": [...]}
+        """
+        regime_config = self.config.get('regime', {})
+        min_strength = regime_config.get('min_strength', 0.5)
+
+        groups: dict[str, list[str]] = {"LONG": [], "SHORT": [], "BOTH": []}
+        try:
+            with get_session() as session:
+                regimes = session.query(MarketRegime).filter(
+                    MarketRegime.strength >= min_strength
+                ).all()
+                for r in regimes:
+                    if r.direction in groups:
+                        groups[r.direction].append(r.symbol)
+            return groups
+        except Exception as e:
+            logger.warning(f"Failed to query direction groups: {e}")
+            return groups
+
+    def select_direction_and_coins(self) -> tuple[str, list[str]]:
+        """
+        Select direction and coins based on regime with 50/50 BIDI diversity.
+
+        Logic:
+        - Bearish regime (SHORT dominant): 50% SHORT + 50% BIDI
+        - Bullish regime (LONG dominant): 50% LONG + 50% BIDI
+        - BIDI is neutral, never goes against regime
+
+        Returns:
+            (direction, coins) - e.g., ("BIDI", ["BTC", "ETH", ...])
+        """
+        groups = self.get_direction_groups()
+
+        # Filter empty groups
+        non_empty = {d: coins for d, coins in groups.items() if coins}
+
+        if not non_empty:
+            # Fallback: no regime data available
+            from src.data.coin_registry import get_top_coins_by_volume
+            top_coins_limit = self.config['trading']['top_coins_limit']
+            logger.info(f"No regime direction data, falling back to top {top_coins_limit} coins by volume")
+            return "LONG", get_top_coins_by_volume(top_coins_limit)
+
+        # Separate directional (LONG/SHORT) from neutral (BOTH)
+        directional = {d: c for d, c in non_empty.items() if d in ('LONG', 'SHORT')}
+        has_bidi = 'BOTH' in non_empty and len(non_empty['BOTH']) > 0
+
+        # If only BOTH available, use BIDI
+        if not directional:
+            logger.debug(f"Only BOTH available ({len(groups['BOTH'])} coins) -> BIDI")
+            return "BIDI", groups['BOTH']
+
+        # Find dominant directional regime (LONG or SHORT)
+        max_size = max(len(c) for c in directional.values())
+        candidates = [d for d, c in directional.items() if len(c) == max_size]
+        dominant = random.choice(candidates)
+
+        # 50/50 split: dominant direction vs BIDI (if BOTH has coins)
+        if has_bidi and random.random() < 0.50:
+            direction = "BIDI"
+            coins = groups['BOTH']
+        else:
+            direction = dominant
+            coins = groups[dominant]
+
+        logger.debug(
+            f"Direction groups: LONG={len(groups['LONG'])}, SHORT={len(groups['SHORT'])}, "
+            f"BOTH={len(groups['BOTH'])} | dominant={dominant} -> selected {direction}"
+        )
+
+        return direction, coins
+
     def generate(
         self,
         timeframe: Optional[str] = None,
@@ -160,8 +241,8 @@ class PandasTaGenerator:
 
         Args:
             timeframe: Target timeframe (None = random from config)
-            direction: 'LONG', 'SHORT', 'BIDI' (None = random)
-            regime_type: 'TREND' or 'REVERSAL' for coin selection (None = all coins)
+            direction: 'LONG', 'SHORT', 'BIDI' (None = selector-driven)
+            regime_type: 'TREND' or 'REVERSAL' (only used when market_regime.enabled)
             count: Number of strategies to generate
             seed: Random seed for reproducibility
 
@@ -179,11 +260,9 @@ class PandasTaGenerator:
             # Select timeframe
             tf = timeframe or random.choice(self.timeframes)
 
-            # Select direction (bias toward LONG/SHORT over BIDI)
-            if direction:
-                dir_ = direction
-            else:
-                dir_ = random.choice(['LONG', 'LONG', 'SHORT', 'SHORT', 'BIDI'])
+            # Select direction and coins via selector
+            # Selector handles both volume-based and regime-based modes
+            dir_, coins = self.selector.select(direction_override=direction)
 
             # Select number of indicators based on ratios
             num_indicators = random.choices(
@@ -194,23 +273,6 @@ class PandasTaGenerator:
                     self.indicator_ratios.get('triple', 0.20),
                 ]
             )[0]
-
-            # Get coins based on regime or all
-            if regime_type:
-                coins = self.get_regime_coins(regime_type)
-                if not coins:
-                    # Fallback to opposite regime
-                    fallback = 'REVERSAL' if regime_type == 'TREND' else 'TREND'
-                    coins = self.get_regime_coins(fallback)
-            else:
-                # Mix from both regimes
-                trend_coins = self.get_regime_coins('TREND')
-                reversal_coins = self.get_regime_coins('REVERSAL')
-                coins = list(set(trend_coins + reversal_coins))
-
-            # Fallback to all tradeable coins
-            if not coins:
-                coins = self.get_all_tradeable_coins()
 
             if not coins:
                 logger.warning("No coins available for strategy generation")
@@ -249,7 +311,7 @@ class PandasTaGenerator:
                 strategy_id=blueprint.strategy_id,
                 strategy_type=blueprint.get_strategy_type(),
                 timeframe=tf,
-                pattern_coins=blueprint.pattern_coins,
+                trading_coins=blueprint.trading_coins,
                 entry_indicators=[ec.indicator.id for ec in blueprint.entry_conditions],
                 exit_mechanism_name=blueprint.exit_mechanism.name,
                 base_code_hash=bp_hash,
@@ -325,27 +387,17 @@ class PandasTaGenerator:
             for key, value in bp.exit_params.items():
                 exit_logic = exit_logic.replace(f'{{{key}}}', str(value))
 
-        # Derive effective direction from entry conditions
-        # This ensures we don't set direction='bidi' which requires separate
-        # long_signal/short_signal columns that we don't create
-        effective_direction = bp.direction
-        if bp.direction == 'BIDI' and bp.entry_conditions:
-            # Use first entry condition's direction
-            first_ec = bp.entry_conditions[0]
-            derived = get_direction_for_condition(
-                first_ec.indicator.category,
-                first_ec.condition_type
-            )
-            # Only use if it's concrete (LONG/SHORT), else default to LONG
-            effective_direction = derived if derived in ('LONG', 'SHORT') else 'LONG'
+        # Check if this is a BIDI strategy with separate condition sets
+        is_bidi = bp.direction == 'BIDI' and bp.entry_conditions_long and bp.entry_conditions_short
 
+        # Pass direction directly - template handles BIDI with long_signal/short_signal
         return self.template.render(
             # Meta
             strategy_id=bp.strategy_id,
             class_name=bp.get_class_name(),
             strategy_type=bp.get_strategy_type(),
             timeframe=bp.timeframe,
-            direction=effective_direction,
+            direction=bp.direction,
             regime_type=bp.regime_type,
             generated_at=datetime.now(timezone.utc).isoformat(),
             # Entry
@@ -355,6 +407,10 @@ class PandasTaGenerator:
             entry_reason=entry_reason,
             max_lookback=max_lookback,
             needs_atr=needs_atr,
+            # BIDI support: separate LONG/SHORT conditions
+            is_bidi=is_bidi,
+            entry_conditions_long=bp.entry_conditions_long if is_bidi else [],
+            entry_conditions_short=bp.entry_conditions_short if is_bidi else [],
             # Exit
             exit_mechanism=bp.exit_mechanism,
             sl_config=bp.sl_config,
@@ -367,7 +423,7 @@ class PandasTaGenerator:
             trailing=bp.trailing_config,
             trailing_params=bp.trailing_params,
             # Coins
-            pattern_coins=bp.pattern_coins,
+            trading_coins=bp.trading_coins,
         )
 
     def generate_batch(
@@ -462,7 +518,7 @@ class PandasTaGenerator:
                     strategy_id=blueprint.strategy_id,
                     strategy_type=blueprint.get_strategy_type(),
                     timeframe=tf,
-                    pattern_coins=blueprint.pattern_coins,
+                    trading_coins=blueprint.trading_coins,
                     entry_indicators=[ec.indicator.id for ec in blueprint.entry_conditions],
                     exit_mechanism_name=blueprint.exit_mechanism.name,
                     base_code_hash=bp_hash,

@@ -21,13 +21,14 @@ class {{ class_name }}(StrategyCore):
     {% if trailing %}Trailing: {{ trailing.name }}{% endif %}
     """
 
-    # Direction (use entry's direction, not blueprint-level)
-    direction = '{{ entry.direction | lower }}'
+    # Direction
+    direction = '{{ direction | lower }}'
 
     # Indicator columns for lookahead test
     indicator_columns = [
         {% if 'RSI' in entry.indicators_used or (exit_condition and 'RSI' in exit_condition.indicators_used) %}'rsi',{% endif %}
         {% if 'MA' in entry.indicators_used %}{% if entry_params.get('fast') %}'ma_fast', 'ma_slow',{% else %}'ma',{% endif %}{% endif %}
+        {% if 'EMA' in entry.indicators_used %}'ema_20',{% endif %}
         {% if 'EMA' in entry.indicators_used %}'ema_fast', 'ema_slow',{% endif %}
         {% if 'MACD' in entry.indicators_used or (exit_condition and 'MACD' in exit_condition.indicators_used) %}'macd', 'macd_signal',{% endif %}
         {% if 'BB' in entry.indicators_used %}'bb_mid', 'bb_std', 'bb_upper', 'bb_lower',{% endif %}
@@ -36,13 +37,15 @@ class {{ class_name }}(StrategyCore):
         {% if 'CCI' in entry.indicators_used %}'cci',{% endif %}
         {% if 'ADX' in entry.indicators_used or (exit_condition and 'ADX' in exit_condition.indicators_used) %}'adx',{% endif %}
         {% if 'ROC' in entry.indicators_used or (exit_condition and 'ROC' in exit_condition.indicators_used) %}'roc',{% endif %}
+        {% if is_bidi %}'long_signal', 'short_signal',{% endif %}
+        'entry_signal',
     ]
 
     # Parametric placeholders (expanded by backtester)
     SL_PCT = {{ sl_params.get('sl_pct', 0.02) }}
     TP_PCT = {{ tp_params.get('tp_pct', 0.04) if tp_params else 0.04 }}
     LEVERAGE = 1
-    LOOKBACK = {{ entry.lookback_required }}
+    LOOKBACK = {{ computed_lookback }}  # Auto-computed from indicators
     {% if exit_params and exit_params.get('N') %}
     exit_after_bars = {{ exit_params.get('N', 20) }}
     {% else %}
@@ -166,30 +169,104 @@ class {{ class_name }}(StrategyCore):
         df['roc'] = (df['close'] - df['close'].shift(10)) / df['close'].shift(10) * 100
         {% endif %}
 
+        # Vectorized entry signal
+        # Wrapped in try-except to handle pandas_ta None returns gracefully
+        try:
+            {% if is_bidi %}
+            # === BIDI: LONG ENTRY ({{ entry_long.name }}) ===
+            {{ entry_logic_long_vectorized | indent(12) }}
+            long_entry = entry_signal.copy()
+
+            # === BIDI: SHORT ENTRY ({{ entry_short.name }}) ===
+            {{ entry_logic_short_vectorized | indent(12) }}
+            short_entry = entry_signal.copy()
+
+            {% for filter, filter_params, filter_logic, filter_logic_vectorized in filters %}
+            # Filter {{ loop.index }}: {{ filter.name }} (applied to both)
+            {{ filter_logic_vectorized | indent(12) }}
+            long_entry = long_entry & filter_pass
+            short_entry = short_entry & filter_pass
+            {% endfor %}
+
+            df['long_signal'] = long_entry.astype(bool)
+            df['short_signal'] = short_entry.astype(bool)
+            df['entry_signal'] = (long_entry | short_entry).astype(bool)
+            {% else %}
+            # LONG or SHORT: single entry signal
+            {{ entry_logic_vectorized | indent(12) }}
+
+            {% for filter, filter_params, filter_logic, filter_logic_vectorized in filters %}
+            # Filter {{ loop.index }}: {{ filter.name }} (vectorized)
+            {{ filter_logic_vectorized | indent(12) }}
+            entry_signal = entry_signal & filter_pass
+            {% endfor %}
+
+            df['entry_signal'] = entry_signal.astype(bool)
+            {% endif %}
+        except (AttributeError, TypeError, KeyError) as e:
+            # pandas_ta returned None or missing column - set all signals to False
+            df['entry_signal'] = pd.Series(False, index=df.index).astype(bool)
+            {% if is_bidi %}
+            df['long_signal'] = pd.Series(False, index=df.index).astype(bool)
+            df['short_signal'] = pd.Series(False, index=df.index).astype(bool)
+            {% endif %}
+
         return df
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = None) -> Signal | None:
         if len(df) < self.LOOKBACK + 10:
             return None
 
+        {% if is_bidi %}
+        # === BIDI: Check both entry conditions independently ===
+        # LONG Entry: {{ entry_long.name }}
+        try:
+            {{ entry_logic_long | indent(12) }}
+            {% for filter, filter_params, filter_logic, filter_logic_vectorized in filters %}
+            {{ filter_logic | indent(12) }}
+            entry_condition = bool(entry_condition) and bool(filter_pass)
+            {% endfor %}
+            long_entry = bool(entry_condition)
+        except (AttributeError, TypeError, KeyError):
+            long_entry = False
+
+        # SHORT Entry: {{ entry_short.name }}
+        try:
+            {{ entry_logic_short | indent(12) }}
+            {% for filter, filter_params, filter_logic, filter_logic_vectorized in filters %}
+            {{ filter_logic | indent(12) }}
+            entry_condition = bool(entry_condition) and bool(filter_pass)
+            {% endfor %}
+            short_entry = bool(entry_condition)
+        except (AttributeError, TypeError, KeyError):
+            short_entry = False
+
+        # Determine which signal fired
+        if long_entry:
+            signal_direction = 'long'
+        elif short_entry:
+            signal_direction = 'short'
+        else:
+            return None
+        {% else %}
         # === ENTRY CONDITION: {{ entry.name }} ===
-        {{ entry_logic | indent(8) }}
+        # Wrapped in try-except to handle pandas_ta None returns gracefully
+        try:
+            {{ entry_logic | indent(12) }}
 
-        {% for filter, filter_params, filter_logic in filters %}
-        # Filter {{ loop.index }}: {{ filter.name }}
-        {{ filter_logic | indent(8) }}
-        entry_condition = entry_condition and filter_pass
-        {% endfor %}
-
-        if not entry_condition:
+            {% for filter, filter_params, filter_logic, filter_logic_vectorized in filters %}
+            # Filter {{ loop.index }}: {{ filter.name }}
+            {{ filter_logic | indent(12) }}
+            entry_condition = bool(entry_condition) and bool(filter_pass)
+            {% endfor %}
+        except (AttributeError, TypeError, KeyError) as e:
+            # pandas_ta returned None or missing column - insufficient data
             return None
 
-        # === BUILD SIGNAL ===
-        # Use entry's direction (BIDI entries default to long)
-        {% if entry.direction == 'BIDI' %}
-        signal_direction = 'long'  # True BIDI entries default to long
-        {% else %}
-        signal_direction = '{{ entry.direction | lower }}'
+        if not bool(entry_condition):
+            return None
+
+        signal_direction = '{{ direction | lower }}'
         {% endif %}
 
         signal_kwargs = {
@@ -203,7 +280,9 @@ class {{ class_name }}(StrategyCore):
             'atr_stop_multiplier': self.atr_stop_multiplier,
             {% elif sl_config.sl_type == 'structure' %}
             # Calculate sl_price from lookback (swing low for long, swing high for short)
-            {% if entry.direction == 'SHORT' %}
+            {% if is_bidi %}
+            'sl_price': df['high'].iloc[-self.structure_lookback:].max() if signal_direction == 'short' else df['low'].iloc[-self.structure_lookback:].min(),
+            {% elif direction | lower == 'short' %}
             'sl_price': df['high'].iloc[-self.structure_lookback:].max(),
             {% else %}
             'sl_price': df['low'].iloc[-self.structure_lookback:].min(),

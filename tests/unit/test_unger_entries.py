@@ -102,3 +102,36 @@ class TestUngerEntriesValidation:
                 invalid.append(f"{entry.id}: {entry.direction}")
 
         assert not invalid, f"Entries with invalid direction:\n" + "\n".join(invalid)
+
+    def test_all_indicators_have_lookback_formulas(self):
+        """
+        Ensure all indicators_used in entries have lookback formulas.
+
+        This prevents runtime warnings like:
+        'Unknown indicator for lookback calculation: XXX'
+        """
+        from src.generator.unger.lookback import LOOKBACK_FORMULAS
+
+        # Collect all unique indicators from all entries
+        all_indicators = set()
+        for entry in ALL_ENTRIES:
+            if entry.indicators_used:
+                for indicator in entry.indicators_used:
+                    all_indicators.add(indicator.upper())
+
+        # Check which are missing
+        missing = []
+        for indicator in sorted(all_indicators):
+            if indicator not in LOOKBACK_FORMULAS:
+                # Find which entries use this indicator
+                using_entries = [
+                    e.id for e in ALL_ENTRIES
+                    if e.indicators_used and indicator in [i.upper() for i in e.indicators_used]
+                ]
+                missing.append(f"{indicator} (used by: {', '.join(using_entries[:3])}{'...' if len(using_entries) > 3 else ''})")
+
+        assert not missing, (
+            f"\n{len(missing)} indicators missing lookback formulas in lookback.py:\n"
+            + "\n".join(f"  - {m}" for m in missing)
+            + "\n\nAdd formulas to LOOKBACK_FORMULAS in src/generator/unger/lookback.py"
+        )

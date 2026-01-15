@@ -4233,7 +4233,7 @@ df['entry_signal'] = df['above_mid'] & df['was_below']""",
 WILLIAMS_R_BLOCKS = [
     # Williams %R oversold
     PatternBlock(
-        id="WILLR_OVERSOLD",
+        id="WLR_OVERSOLD",
         name="Williams %R Oversold",
         category="williams_r",
         formula_template="""df['willr'] = ta.WILLR(df['high'], df['low'], df['close'], timeperiod={period})
@@ -4247,7 +4247,7 @@ df['entry_signal'] = df['willr'] < -{threshold}""",
     ),
     # Williams %R overbought
     PatternBlock(
-        id="WILLR_OVERBOUGHT",
+        id="WLR_OVERBOUGHT",
         name="Williams %R Overbought",
         category="williams_r",
         formula_template="""df['willr'] = ta.WILLR(df['high'], df['low'], df['close'], timeperiod={period})
@@ -4301,7 +4301,7 @@ df['entry_signal'] = df['was_overbought'] & df['now_below']""",
 MFI_BLOCKS = [
     # MFI oversold
     PatternBlock(
-        id="MFI_OVERSOLD",
+        id="MFI_LEVEL_OVERSOLD",
         name="Money Flow Index Oversold",
         category="mfi",
         formula_template="""df['mfi'] = ta.MFI(df['high'], df['low'], df['close'], df['volume'], timeperiod={period})
@@ -4315,7 +4315,7 @@ df['entry_signal'] = df['mfi'] < {threshold}""",
     ),
     # MFI overbought
     PatternBlock(
-        id="MFI_OVERBOUGHT",
+        id="MFI_LEVEL_OVERBOUGHT",
         name="Money Flow Index Overbought",
         category="mfi",
         formula_template="""df['mfi'] = ta.MFI(df['high'], df['low'], df['close'], df['volume'], timeperiod={period})
@@ -6696,7 +6696,7 @@ df['entry_signal'] = df['gap_down'] & df['continues_down']""",
     ),
     # Gap fill reversal (gap up then fills)
     PatternBlock(
-        id="GAP_UP_FILL",
+        id="OCR_GAP_UP_FILL",
         name="Gap Up Fill Reversal",
         category="open_close_rel",
         formula_template="""df['gap_up'] = df['open'] > df['close'].shift(1) * (1 + {gap_pct})
@@ -9433,7 +9433,7 @@ df['entry_signal'] = df['extreme_days']""",
 DETRENDED_PRICE_BLOCKS = [
     # DPO Oversold
     PatternBlock(
-        id="DPO_OVERSOLD",
+        id="DTP_OVERSOLD",
         name="DPO Oversold",
         category="detrended_price",
         formula_template="""df['dpo_period'] = {period} // 2 + 1
@@ -9494,7 +9494,7 @@ df['entry_signal'] = df['dpo_positive'] & df['dpo_rising']""",
 TRUE_STRENGTH_INDEX_BLOCKS = [
     # TSI Oversold
     PatternBlock(
-        id="TSI_OVERSOLD",
+        id="TSX_OVERSOLD",
         name="TSI Oversold",
         category="true_strength_index",
         formula_template="""df['pc'] = df['close'] - df['close'].shift(1)
@@ -11427,7 +11427,7 @@ df['entry_signal'] = df['strong_momentum'] & df['k_above_d']""",
 WILLIAMS_AD_BLOCKS = [
     # Williams AD Rising
     PatternBlock(
-        id="WAD_RISING",
+        id="WAX_RISING",
         name="Williams AD Rising",
         category="williams_ad",
         formula_template="""df['trh'] = np.maximum(df['high'], df['close'].shift(1))
@@ -11888,7 +11888,7 @@ df['entry_signal'] = df['cross_zero'] & df['ppo_rising']""",
 ABSOLUTE_PRICE_OSC_BLOCKS = [
     # APO Cross Up
     PatternBlock(
-        id="APO_CROSS_UP",
+        id="APO_SIGNAL_CROSS_UP",
         name="APO Cross Up",
         category="absolute_price_osc",
         formula_template="""df['apo'] = ta.APO(df['close'], fastperiod={fast}, slowperiod={slow}, matype=1)
@@ -15687,7 +15687,7 @@ df['entry_signal'] = df['clean'] & df['bullish'] & df['vol_confirm']""",
 VOLUME_CLIMAX_EXT_BLOCKS = [
     # Buying Climax
     PatternBlock(
-        id="BUYING_CLIMAX",
+        id="VCX_BUYING_CLIMAX",
         name="Buying Climax",
         category="volume_climax_ext",
         formula_template="""df['vol_surge'] = df['volume'] > df['volume'].rolling(20).mean() * {mult}
@@ -15705,7 +15705,7 @@ df['entry_signal'] = df['climax']""",
     ),
     # Selling Climax
     PatternBlock(
-        id="SELLING_CLIMAX",
+        id="VCX_SELLING_CLIMAX",
         name="Selling Climax",
         category="volume_climax_ext",
         formula_template="""df['vol_surge'] = df['volume'] > df['volume'].rolling(20).mean() * {mult}
@@ -15966,7 +15966,7 @@ df['entry_signal'] = df['expanding'] & df['positive']""",
     ),
     # MA Squeeze
     PatternBlock(
-        id="MA_SQUEEZE",
+        id="MAS_SQUEEZE",
         name="MA Squeeze",
         category="ma_system_ext",
         formula_template="""df['ema10'] = ta.EMA(df['close'], timeperiod=10)
@@ -16094,7 +16094,7 @@ df['entry_signal'] = df['extreme_squeeze'].shift(1) & df['break_up']""",
     ),
     # ATR Squeeze
     PatternBlock(
-        id="ATR_SQUEEZE",
+        id="VSQ_ATR_SQUEEZE",
         name="ATR Squeeze",
         category="volatility_squeeze_ext",
         formula_template="""df['atr'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
@@ -16431,7 +16431,7 @@ df['entry_signal'] = df['strong_mom'] & df['positive']""",
 CANDLE_SEQUENCE_BLOCKS = [
     # Three White Soldiers
     PatternBlock(
-        id="THREE_WHITE_SOLDIERS",
+        id="CSQ_THREE_WHITE_SOLDIERS",
         name="Three White Soldiers",
         category="candle_sequence",
         formula_template="""df['bull1'] = df['close'].shift(2) > df['open'].shift(2)
@@ -16453,7 +16453,7 @@ df['entry_signal'] = df['soldiers']""",
     ),
     # Three Black Crows
     PatternBlock(
-        id="THREE_BLACK_CROWS",
+        id="CSQ_THREE_BLACK_CROWS",
         name="Three Black Crows",
         category="candle_sequence",
         formula_template="""df['bear1'] = df['close'].shift(2) < df['open'].shift(2)

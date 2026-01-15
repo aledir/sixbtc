@@ -65,18 +65,36 @@ Portfolio backtest con vincoli realistici:
 
 ---
 
-## Validazione IS (5 Threshold)
+## Validazione IS (6 Threshold)
 
-IS applica gli **STESSI 5 threshold di PARAMETRIC**:
+IS applica gli **STESSI 5 threshold di PARAMETRIC + CI filter**:
 
 1. `sharpe >= 0.3`
 2. `win_rate >= 35%`
 3. `expectancy >= 0.002`
 4. `max_drawdown <= 50%`
 5. `trades >= min_trades_is[timeframe]`
+6. `CI <= max_ci_is (10%)` - significatività statistica
+
+### CI Filter (Confidence Interval)
+
+```
+CI = 1.96 × √(WR × (1-WR) / N)
+```
+
+Dove:
+- **WR** = win_rate dal backtest
+- **N** = total_trades
+- **1.96** = z-score per 95% confidence
+
+Il CI misura l'incertezza sul win rate. Se CI > 10%, l'incertezza è troppo alta per fidarsi dei risultati.
+
+**Esempio**:
+- N=100, WR=55% → CI = 9.8% ✓ passa
+- N=60, WR=50% → CI = 12.6% ✗ troppa incertezza
 
 Se fallisce qualsiasi threshold:
-- **DELETE strategy** (reason: "IS sharpe/wr/exp/dd/trades too low/high")
+- **DELETE strategy** (reason: "IS sharpe/wr/exp/dd/trades/ci too low/high")
 
 > Questo cattura discrepanze tra kernel PARAMETRIC e BacktestEngine (~2-3% delle strategie potrebbero avere metriche leggermente diverse a causa di differenze nell'allineamento dati)
 

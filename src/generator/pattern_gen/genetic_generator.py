@@ -11,6 +11,7 @@ Output naming: PGgStrat_{type}_{hash}
 import hashlib
 import random
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +19,9 @@ from typing import List, Optional
 
 from jinja2 import Environment, FileSystemLoader
 
+from src.data.coin_registry import get_top_coins_by_volume
 from src.database import get_session, Strategy
+from src.generator.coin_direction_selector import CoinDirectionSelector
 from src.generator.pattern_gen.building_blocks import BLOCKS_BY_ID
 from src.generator.pattern_gen.formula_composer import ComposedFormula, FormulaComposer
 from src.generator.pattern_gen.genetic_operators import (
@@ -40,10 +43,11 @@ class GeneticResult:
 
     code: str
     strategy_id: str
-    strategy_type: str              # 'THR', 'CRS', 'VOL', 'PRC', 'STA'
+    strategy_type: str              # Unified 5 types: TRD, MOM, REV, VOL, CDL
     timeframe: str
     base_code_hash: str
     formula_hash: str
+    trading_coins: List[str]        # Top coins by volume at generation time
     generation_mode: str = "pattern_gen_genetic"
     ai_provider: str = "pattern_gen"
     direction: str = "long"
@@ -105,6 +109,7 @@ class GeneticPatternGenerator:
         self.tournament_size = genetic_config.get('tournament_size', 3)
         self.mutation_rate = genetic_config.get('mutation_rate', 0.20)
         self.crossover_rate = genetic_config.get('crossover_rate', 0.80)
+        self.top_coins_limit = config['trading']['top_coins_limit']
 
         # Formula composer for creating formulas from blocks
         self.composer = FormulaComposer(seed=seed)
@@ -127,10 +132,15 @@ class GeneticPatternGenerator:
         timeframes_config = trading_config.get('timeframes', {})
         self.timeframes = list(timeframes_config.values()) if timeframes_config else self.DEFAULT_TIMEFRAMES
 
+        # Initialize coin/direction selector (uses 'pattern_gen' config for market_regime setting)
+        self.selector = CoinDirectionSelector(config, 'pattern_gen')
+
+        regime_mode = "regime-aware" if self.selector.use_regime else "volume-based"
         logger.info(
             f"GeneticPatternGenerator initialized: "
             f"pool_score>={self.min_pool_score}, pool_size>={self.min_pool_size}, "
-            f"mutation={self.mutation_rate:.0%}, crossover={self.crossover_rate:.0%}"
+            f"mutation={self.mutation_rate:.0%}, crossover={self.crossover_rate:.0%}, "
+            f"coin selection: {regime_mode}"
         )
 
     def get_pool(self, force_refresh: bool = False) -> List[GeneticIndividual]:
@@ -247,8 +257,10 @@ class GeneticPatternGenerator:
         if timeframe is None:
             timeframe = self.rng.choice(self.timeframes)
 
+        # Use selector for direction (handles both volume-based and regime-based)
         if direction is None:
-            direction = self.rng.choice(['long', 'short'])
+            dir_from_selector, _ = self.selector.select()
+            direction = dir_from_selector.lower()  # pattern_gen uses lowercase
 
         # Filter pool by direction
         filtered_pool = filter_pool_by_direction(pool, direction)
@@ -343,11 +355,8 @@ class GeneticPatternGenerator:
             GeneticResult or None if rendering fails
         """
         try:
-            # Generate unique strategy ID
-            random_suffix = hashlib.sha256(
-                f"{formula.formula_id}{self.rng.random()}{datetime.now().isoformat()}".encode()
-            ).hexdigest()[:4]
-            strategy_id = f"{formula.formula_id}{random_suffix}"
+            # Generate unique strategy ID (8 char UUID, consistent with other generators)
+            strategy_id = uuid.uuid4().hex[:8]
 
             # Pick random exit parameters
             sl_pct = self.rng.choice(self.SL_RANGE)
@@ -391,6 +400,10 @@ class GeneticPatternGenerator:
             # Compute base code hash
             base_code_hash = hashlib.sha256(code.encode()).hexdigest()[:16]
 
+            # Get coins via selector (direction from formula)
+            strategy_direction = formula.direction.upper()
+            _, coins = self.selector.select(direction_override=strategy_direction)
+
             return GeneticResult(
                 code=code,
                 strategy_id=strategy_id,
@@ -398,6 +411,7 @@ class GeneticPatternGenerator:
                 timeframe=timeframe,
                 base_code_hash=base_code_hash,
                 formula_hash=formula.formula_id,
+                trading_coins=coins,
                 direction=formula.direction,
                 pattern_name=f"Evolved: {formula.name}",
                 blocks_used=formula.blocks_used,

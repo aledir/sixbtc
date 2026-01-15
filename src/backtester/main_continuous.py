@@ -173,6 +173,11 @@ class ContinuousBacktesterProcess:
         self.min_trades_is = dict(zip(timeframes, min_is))
         self.min_trades_oos = dict(zip(timeframes, min_oos))
 
+        # Max CI (statistical significance filter)
+        # CI = 1.96 × sqrt(WR × (1-WR) / N) - lower CI = more confidence
+        self.max_ci_is = self.config.get_required('backtesting.max_ci.in_sample')
+        self.max_ci_oos = self.config.get_required('backtesting.max_ci.out_of_sample')
+
         # Initial capital for expectancy normalization
         self.initial_capital = self.config.get_required('backtesting.initial_capital')
 
@@ -738,6 +743,9 @@ class ContinuousBacktesterProcess:
             is_trades = is_result.get('total_trades', 0)
             min_trades_is_tf = self.min_trades_is.get(assigned_tf, self.min_trades)
 
+            # Calculate CI for statistical significance
+            is_ci = self._calculate_ci(is_win_rate, is_trades)
+
             # CUMULATIVE threshold check (like PARAMETRIC) - count ALL violations
             fail_types = {
                 'sharpe': 1 if is_sharpe < self.min_sharpe else 0,
@@ -745,6 +753,7 @@ class ContinuousBacktesterProcess:
                 'exp': 1 if is_expectancy < self.min_expectancy else 0,
                 'dd': 1 if is_max_drawdown > self.max_drawdown else 0,
                 'trades': 1 if is_trades < min_trades_is_tf else 0,
+                'ci': 1 if is_ci > self.max_ci_is else 0,
             }
 
             if sum(fail_types.values()) > 0:
@@ -760,6 +769,8 @@ class ContinuousBacktesterProcess:
                     reasons.append(f"dd={is_max_drawdown:.1%}>{self.max_drawdown:.0%}")
                 if fail_types['trades']:
                     reasons.append(f"trades={is_trades}<{min_trades_is_tf}")
+                if fail_types['ci']:
+                    reasons.append(f"ci={is_ci:.1%}>{self.max_ci_is:.0%}")
                 reason = "IS failed: " + ", ".join(reasons)
 
                 from src.database.event_tracker import EventTracker
@@ -1594,6 +1605,25 @@ class ContinuousBacktesterProcess:
 
         return results
 
+    @staticmethod
+    def _calculate_ci(win_rate: float, n_trades: int) -> float:
+        """
+        Calculate Confidence Interval for win rate.
+
+        Formula: CI = 1.96 × sqrt(WR × (1-WR) / N)
+
+        Args:
+            win_rate: Win rate (0-1)
+            n_trades: Number of trades
+
+        Returns:
+            CI as decimal (e.g., 0.10 = 10% uncertainty)
+        """
+        if n_trades <= 0 or win_rate <= 0 or win_rate >= 1:
+            return 1.0  # Max uncertainty if invalid inputs
+        import math
+        return 1.96 * math.sqrt(win_rate * (1 - win_rate) / n_trades)
+
     def _validate_oos(
         self,
         is_result: Dict,
@@ -1601,14 +1631,15 @@ class ContinuousBacktesterProcess:
         timeframe: str
     ) -> Dict:
         """
-        Validate out-of-sample performance with 5 thresholds + degradation check.
+        Validate out-of-sample performance with 6 thresholds + degradation check + CI filter.
 
-        OOS validation applies the SAME 5 thresholds as IS:
+        OOS validation applies the SAME thresholds as IS plus CI filter:
         1. sharpe >= min_sharpe (0.3)
         2. win_rate >= min_win_rate (35%)
         3. expectancy >= min_expectancy (0.002)
         4. max_drawdown <= max_drawdown (50%)
         5. trades >= min_trades_oos[timeframe]
+        6. CI <= max_ci_oos (statistical significance)
 
         Plus degradation check: (is_sharpe - oos_sharpe) / is_sharpe <= 50%
 
@@ -1641,6 +1672,9 @@ class ContinuousBacktesterProcess:
         else:
             degradation = 0.0
 
+        # Calculate CI for statistical significance
+        oos_ci = self._calculate_ci(oos_win_rate, oos_trades)
+
         # CUMULATIVE threshold check (like PARAMETRIC) - count ALL violations
         fail_types = {
             'sharpe': 1 if oos_sharpe < self.min_sharpe else 0,
@@ -1648,6 +1682,7 @@ class ContinuousBacktesterProcess:
             'exp': 1 if oos_expectancy < self.min_expectancy else 0,
             'dd': 1 if oos_max_drawdown > self.max_drawdown else 0,
             'trades': 1 if oos_trades < min_oos else 0,
+            'ci': 1 if oos_ci > self.max_ci_oos else 0,
             'degradation': 1 if (is_sharpe > 0 and degradation > self.oos_max_degradation) else 0,
         }
 
@@ -1664,6 +1699,8 @@ class ContinuousBacktesterProcess:
                 reasons.append(f"dd={oos_max_drawdown:.1%}>{self.max_drawdown:.0%}")
             if fail_types['trades']:
                 reasons.append(f"trades={oos_trades}<{min_oos}")
+            if fail_types['ci']:
+                reasons.append(f"ci={oos_ci:.1%}>{self.max_ci_oos:.0%}")
             if fail_types['degradation']:
                 reasons.append(f"degradation={degradation:.0%}>{self.oos_max_degradation:.0%}")
             reason = "OOS failed: " + ", ".join(reasons)
@@ -1688,7 +1725,7 @@ class ContinuousBacktesterProcess:
         return {
             'passed': True,
             'reason': 'OOS validated',
-            'fail_types': {'sharpe': 0, 'wr': 0, 'exp': 0, 'dd': 0, 'trades': 0, 'degradation': 0},
+            'fail_types': {'sharpe': 0, 'wr': 0, 'exp': 0, 'dd': 0, 'trades': 0, 'ci': 0, 'degradation': 0},
             'degradation': degradation,
             'oos_bonus': oos_bonus,
         }
@@ -2635,7 +2672,7 @@ class ContinuousBacktesterProcess:
         Returns:
             Robustness score between 0 and 1
         """
-        robustness_config = self.config['backtesting']['robustness']
+        robustness_config = self.config.get('backtesting.robustness')
         weights = robustness_config['weights']
         trade_target = robustness_config['trade_significance_target']
 
@@ -2801,7 +2838,7 @@ class ContinuousBacktesterProcess:
                     session.commit()
 
             # Check robustness threshold
-            min_robustness = self.config['backtesting']['robustness']['min_threshold']
+            min_robustness = self.config.get('backtesting.robustness.min_threshold')
 
             if robustness < min_robustness:
                 EventTracker.emit(

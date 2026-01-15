@@ -35,7 +35,11 @@ class {{ class_name }}(StrategyCore):
     signal_column = 'entry_signal'
 
     # Indicator columns for lookahead test
+    {% if is_bidi %}
+    indicator_columns = [{% for ec in entry_conditions_long %}'{{ ec.indicator.id | lower }}_long', {% endfor %}{% for ec in entry_conditions_short %}'{{ ec.indicator.id | lower }}_short', {% endfor %}{% if needs_atr %}'atr', {% endif %}'long_signal', 'short_signal', 'entry_signal']
+    {% else %}
     indicator_columns = [{% for ec in entry_conditions %}'{{ ec.indicator.id | lower }}', {% endfor %}{% if needs_atr %}'atr', {% endif %}'entry_signal']
+    {% endif %}
 
     # Parametric placeholders (expanded by backtester)
     SL_PCT = {{ sl_params.get('sl_pct', 0.02) }}
@@ -88,6 +92,155 @@ class {{ class_name }}(StrategyCore):
         df = df.copy()
 
         # === CALCULATE INDICATORS ===
+        {% if is_bidi %}
+        # BIDI: Calculate indicators for LONG conditions
+        {% for ec in entry_conditions_long %}
+        # LONG Indicator {{ loop.index }}: {{ ec.indicator.name }}
+        {% if ec.indicator.input_type == 'hlc' %}
+        {{ ec.indicator.id | lower }}_long_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['high'], df['low'], df['close'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'hl' %}
+        {{ ec.indicator.id | lower }}_long_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['high'], df['low'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'ohlcv' %}
+        {{ ec.indicator.id | lower }}_long_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['open'], df['high'], df['low'], df['close'], df['volume'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'hlcv' %}
+        {{ ec.indicator.id | lower }}_long_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['high'], df['low'], df['close'], df['volume'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'cv' %}
+        {{ ec.indicator.id | lower }}_long_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['close'], df['volume'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'ohlc' %}
+        {{ ec.indicator.id | lower }}_long_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['open'], df['high'], df['low'], df['close'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'oc' %}
+        {{ ec.indicator.id | lower }}_long_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['open'], df['close'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'volume' %}
+        {{ ec.indicator.id | lower }}_long_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['volume'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% else %}
+        {{ ec.indicator.id | lower }}_long_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['close'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% endif %}
+        if isinstance({{ ec.indicator.id | lower }}_long_result, pd.DataFrame):
+            df['{{ ec.indicator.id | lower }}_long'] = {{ ec.indicator.id | lower }}_long_result.iloc[:, 0]
+        else:
+            df['{{ ec.indicator.id | lower }}_long'] = {{ ec.indicator.id | lower }}_long_result
+
+        {% endfor %}
+        # BIDI: Calculate indicators for SHORT conditions
+        {% for ec in entry_conditions_short %}
+        # SHORT Indicator {{ loop.index }}: {{ ec.indicator.name }}
+        {% if ec.indicator.input_type == 'hlc' %}
+        {{ ec.indicator.id | lower }}_short_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['high'], df['low'], df['close'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'hl' %}
+        {{ ec.indicator.id | lower }}_short_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['high'], df['low'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'ohlcv' %}
+        {{ ec.indicator.id | lower }}_short_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['open'], df['high'], df['low'], df['close'], df['volume'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'hlcv' %}
+        {{ ec.indicator.id | lower }}_short_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['high'], df['low'], df['close'], df['volume'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'cv' %}
+        {{ ec.indicator.id | lower }}_short_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['close'], df['volume'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'ohlc' %}
+        {{ ec.indicator.id | lower }}_short_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['open'], df['high'], df['low'], df['close'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'oc' %}
+        {{ ec.indicator.id | lower }}_short_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['open'], df['close'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% elif ec.indicator.input_type == 'volume' %}
+        {{ ec.indicator.id | lower }}_short_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['volume'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% else %}
+        {{ ec.indicator.id | lower }}_short_result = ta.{{ ec.indicator.pandas_ta_func }}(
+            df['close'],
+            {% for param, value in ec.indicator_params.items() %}
+            {{ param }}={% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %},
+            {% endfor %}
+        )
+        {% endif %}
+        if isinstance({{ ec.indicator.id | lower }}_short_result, pd.DataFrame):
+            df['{{ ec.indicator.id | lower }}_short'] = {{ ec.indicator.id | lower }}_short_result.iloc[:, 0]
+        else:
+            df['{{ ec.indicator.id | lower }}_short'] = {{ ec.indicator.id | lower }}_short_result
+
+        {% endfor %}
+        {% else %}
+        # NON-BIDI: Calculate indicators from entry_conditions
         {% for ec in entry_conditions %}
         # Indicator {{ loop.index }}: {{ ec.indicator.name }}
         {% if ec.indicator.input_type == 'hlc' %}
@@ -161,6 +314,7 @@ class {{ class_name }}(StrategyCore):
             df['{{ ec.indicator.id | lower }}'] = {{ ec.indicator.id | lower }}_result
 
         {% endfor %}
+        {% endif %}
 
         {% if needs_atr %}
         # ATR for SL/TP calculations
@@ -168,6 +322,104 @@ class {{ class_name }}(StrategyCore):
         {% endif %}
 
         # === VECTORIZED ENTRY SIGNAL ===
+        {% if is_bidi %}
+        # === BIDI: Separate LONG and SHORT entry conditions ===
+        # LONG uses entry_conditions_long, SHORT uses entry_conditions_short
+
+        # --- LONG SIGNAL ---
+        long_signal = pd.Series(True, index=df.index)
+        {% for ec in entry_conditions_long %}
+        # LONG Condition {{ loop.index }}: {{ ec.indicator.name }} {{ ec.condition_type.value }} {{ ec.threshold }}
+        {% if ec.condition_type.value == 'threshold_below' %}
+        long_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}_long'] < {{ ec.threshold }}
+        {% elif ec.condition_type.value == 'threshold_above' %}
+        long_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}_long'] > {{ ec.threshold }}
+        {% elif ec.condition_type.value == 'crossed_above' %}
+        long_cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}_long'] > {{ ec.threshold }}) & (df['{{ ec.indicator.id | lower }}_long'].shift(1) <= {{ ec.threshold }})
+        {% elif ec.condition_type.value == 'crossed_below' %}
+        long_cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}_long'] < {{ ec.threshold }}) & (df['{{ ec.indicator.id | lower }}_long'].shift(1) >= {{ ec.threshold }})
+        {% elif ec.condition_type.value == 'between' %}
+        long_cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}_long'] > {{ ec.threshold }}) & (df['{{ ec.indicator.id | lower }}_long'] < {{ ec.threshold_high }})
+        {% elif ec.condition_type.value == 'slope_up' %}
+        long_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}_long'] > df['{{ ec.indicator.id | lower }}_long'].shift(1)
+        {% elif ec.condition_type.value == 'slope_down' %}
+        long_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}_long'] < df['{{ ec.indicator.id | lower }}_long'].shift(1)
+        {% endif %}
+        long_signal = long_signal & long_cond_{{ loop.index }}
+        {% endfor %}
+
+        # --- SHORT SIGNAL ---
+        short_signal = pd.Series(True, index=df.index)
+        {% for ec in entry_conditions_short %}
+        # SHORT Condition {{ loop.index }}: {{ ec.indicator.name }} {{ ec.condition_type.value }} {{ ec.threshold }}
+        {% if ec.condition_type.value == 'threshold_below' %}
+        short_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}_short'] < {{ ec.threshold }}
+        {% elif ec.condition_type.value == 'threshold_above' %}
+        short_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}_short'] > {{ ec.threshold }}
+        {% elif ec.condition_type.value == 'crossed_above' %}
+        short_cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}_short'] > {{ ec.threshold }}) & (df['{{ ec.indicator.id | lower }}_short'].shift(1) <= {{ ec.threshold }})
+        {% elif ec.condition_type.value == 'crossed_below' %}
+        short_cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}_short'] < {{ ec.threshold }}) & (df['{{ ec.indicator.id | lower }}_short'].shift(1) >= {{ ec.threshold }})
+        {% elif ec.condition_type.value == 'between' %}
+        short_cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}_short'] > {{ ec.threshold }}) & (df['{{ ec.indicator.id | lower }}_short'] < {{ ec.threshold_high }})
+        {% elif ec.condition_type.value == 'slope_up' %}
+        short_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}_short'] > df['{{ ec.indicator.id | lower }}_short'].shift(1)
+        {% elif ec.condition_type.value == 'slope_down' %}
+        short_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}_short'] < df['{{ ec.indicator.id | lower }}_short'].shift(1)
+        {% endif %}
+        short_signal = short_signal & short_cond_{{ loop.index }}
+        {% endfor %}
+
+        # Store BIDI signals
+        df['long_signal'] = long_signal.astype(bool)
+        df['short_signal'] = short_signal.astype(bool)
+        df['entry_signal'] = (long_signal | short_signal).astype(bool)
+        {% elif direction | lower == 'bidi' %}
+        # Legacy BIDI: Generate separate long/short signals with opposite thresholds
+        long_signal = pd.Series(True, index=df.index)
+        short_signal = pd.Series(True, index=df.index)
+
+        {% for ec in entry_conditions %}
+        # Condition {{ loop.index }}: {{ ec.indicator.name }}
+        {% if ec.condition_type.value == 'threshold_below' %}
+        # Long: {{ ec.indicator.id }} < {{ ec.threshold }} | Short: {{ ec.indicator.id }} > {{ ec.threshold_opposite or 70 }}
+        long_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}'] < {{ ec.threshold }}
+        short_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}'] > {{ ec.threshold_opposite or 70 }}
+        {% elif ec.condition_type.value == 'threshold_above' %}
+        # Long: {{ ec.indicator.id }} > {{ ec.threshold }} | Short: {{ ec.indicator.id }} < {{ ec.threshold_opposite or 30 }}
+        long_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}'] > {{ ec.threshold }}
+        short_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}'] < {{ ec.threshold_opposite or 30 }}
+        {% elif ec.condition_type.value == 'crossed_above' %}
+        # Long: crossed above | Short: crossed below
+        long_cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}'] > {{ ec.threshold }}) & (df['{{ ec.indicator.id | lower }}'].shift(1) <= {{ ec.threshold }})
+        short_cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}'] < {{ ec.threshold_opposite or ec.threshold }}) & (df['{{ ec.indicator.id | lower }}'].shift(1) >= {{ ec.threshold_opposite or ec.threshold }})
+        {% elif ec.condition_type.value == 'crossed_below' %}
+        # Long: crossed below | Short: crossed above
+        long_cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}'] < {{ ec.threshold }}) & (df['{{ ec.indicator.id | lower }}'].shift(1) >= {{ ec.threshold }})
+        short_cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}'] > {{ ec.threshold_opposite or ec.threshold }}) & (df['{{ ec.indicator.id | lower }}'].shift(1) <= {{ ec.threshold_opposite or ec.threshold }})
+        {% elif ec.condition_type.value == 'between' %}
+        # Long: between low and high | Short: outside range (inverted)
+        long_cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}'] > {{ ec.threshold }}) & (df['{{ ec.indicator.id | lower }}'] < {{ ec.threshold_high }})
+        short_cond_{{ loop.index }} = (df['{{ ec.indicator.id | lower }}'] < {{ ec.threshold }}) | (df['{{ ec.indicator.id | lower }}'] > {{ ec.threshold_high }})
+        {% elif ec.condition_type.value == 'slope_up' %}
+        # Long: slope up | Short: slope down
+        long_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}'] > df['{{ ec.indicator.id | lower }}'].shift(1)
+        short_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}'] < df['{{ ec.indicator.id | lower }}'].shift(1)
+        {% elif ec.condition_type.value == 'slope_down' %}
+        # Long: slope down | Short: slope up
+        long_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}'] < df['{{ ec.indicator.id | lower }}'].shift(1)
+        short_cond_{{ loop.index }} = df['{{ ec.indicator.id | lower }}'] > df['{{ ec.indicator.id | lower }}'].shift(1)
+        {% endif %}
+        long_signal = long_signal & long_cond_{{ loop.index }}
+        short_signal = short_signal & short_cond_{{ loop.index }}
+
+        {% endfor %}
+        # Store BIDI signals
+        df['long_signal'] = long_signal.astype(bool)
+        df['short_signal'] = short_signal.astype(bool)
+        df['entry_signal'] = (long_signal | short_signal).astype(bool)
+        {% else %}
+        # Unidirectional: single entry signal
         entry_signal = pd.Series(True, index=df.index)
 
         {% for ec in entry_conditions %}
@@ -190,9 +442,9 @@ class {{ class_name }}(StrategyCore):
         entry_signal = entry_signal & cond_{{ loop.index }}
 
         {% endfor %}
-
         # Store as boolean column
         df['entry_signal'] = entry_signal.astype(bool)
+        {% endif %}
 
         return df
 
@@ -210,8 +462,17 @@ class {{ class_name }}(StrategyCore):
             return None
 
         # === BUILD SIGNAL ===
-        # Direction derived from entry conditions (never BIDI at strategy level)
+        {% if direction | lower == 'bidi' %}
+        # BIDI: Determine direction from which signal fired
+        if df['long_signal'].iloc[-1]:
+            signal_direction = 'long'
+        elif df['short_signal'].iloc[-1]:
+            signal_direction = 'short'
+        else:
+            return None  # Should not happen if entry_signal is True
+        {% else %}
         signal_direction = '{{ direction | lower }}'
+        {% endif %}
 
         signal_kwargs = {
             'direction': signal_direction,

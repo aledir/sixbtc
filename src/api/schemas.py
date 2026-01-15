@@ -106,7 +106,7 @@ class StrategyDetail(BaseModel):
     status: str
     code: Optional[str] = None
     pattern_ids: Optional[List[str]] = None
-    pattern_coins: Optional[List[str]] = None
+    trading_coins: Optional[List[str]] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     backtest: Optional[BacktestMetrics] = None

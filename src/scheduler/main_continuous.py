@@ -885,6 +885,10 @@ class ContinuousSchedulerProcess:
             # Download all pairs/timeframes
             downloader.download_for_pairs()
 
+            # Update data coverage in coins table
+            # This enables filtering coins with insufficient data BEFORE generation
+            coverage_result = downloader.update_coin_data_coverage()
+
             # Get stats
             from src.data.coin_registry import get_active_pairs
             symbols = get_active_pairs()
@@ -895,6 +899,8 @@ class ContinuousSchedulerProcess:
                 'downloaded': 1,
                 'symbols': len(symbols),
                 'cleaned': deleted,
+                'coverage_updated': coverage_result.get('updated', 0),
+                'insufficient_coverage': coverage_result.get('insufficient', 0),
             }
 
         except Exception as e:

@@ -221,11 +221,11 @@ class Strategy(Base):
 
     # Backtest optimization results
     optimal_timeframe = Column(String(10))  # TF with best performance
-    backtest_pairs = Column(JSON)  # Audit trail: ["BTC", "ETH", ...]
     backtest_date = Column(DateTime)  # Date of backtest
 
-    # Pattern-specific coin selection (from pattern's coin_performance)
-    pattern_coins = Column(JSON)  # High-edge coins: ["ME", "RENDER", ...]
+    # Unified trading coins - populated by ALL generators at creation time
+    # Used by backtest and live execution (no fallback)
+    trading_coins = Column(JSON)  # Coins to trade: ["BTC", "ETH", ...]
 
     # Base code hash for batch processing and shuffle test caching
     # SHA256 of base code BEFORE parameter embedding (same for all variations)
@@ -233,6 +233,10 @@ class Strategy(Base):
 
     # Backtest score (from BacktestResult, cached for ranking)
     score_backtest = Column(Float)  # Composite score 0-100
+
+    # Robustness score (0-1, calculated from OOS/IS ratio, trades, simplicity)
+    # Final gate before pool entry - measures confidence edge is real
+    robustness_score = Column(Float, nullable=True)
 
     # Live performance metrics (calculated from Trade records)
     score_live = Column(Float)  # Composite score 0-100
@@ -573,6 +577,11 @@ class Coin(Base):
     # Market data (updated with pairs_updater)
     volume_24h = Column(Float)  # 24h trading volume in USD
     price = Column(Float)  # Current price
+
+    # Data coverage (updated by data_scheduler after download)
+    # Number of days of OHLCV data available in cache
+    # Used to filter coins with insufficient data BEFORE generation
+    data_coverage_days = Column(Integer, nullable=True)  # None = not calculated yet
 
     # Status
     is_active = Column(Boolean, default=True, index=True)

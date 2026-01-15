@@ -207,11 +207,27 @@ generation:
 
   # Strategy sources - enable/disable each type
   # Names match generation_mode values for consistency
+  #
+  # COIN/DIRECTION SELECTION:
+  # Each source can use market_regime for coin/direction selection:
+  # - market_regime.enabled: false (DEFAULT) = top N coins by volume + round-robin direction
+  # - market_regime.enabled: true = query market_regimes table for direction-aware selection
+  #
+  # SUPPORTED DIRECTIONS:
+  # Each source declares which directions it can generate (round-robin cycles through these)
+  # - [LONG, SHORT] = only unidirectional strategies
+  # - [LONG, SHORT, BIDI] = also bidirectional (entry signal + EMA determines direction)
   strategy_sources:
     pattern:
       enabled: false           # PatStrat_* from pattern-discovery API
+      supported_directions: [LONG, SHORT]  # Pattern-discovery API only provides long/short
+      # NOTE: Pattern uses pattern.get_high_edge_coins(), no market_regime support
+
     pattern_gen:
       enabled: true            # PGnStrat_*/PGgStrat_* - Internal pattern generator
+      market_regime:
+        enabled: false         # DEFAULT: top N volume + round-robin direction
+      supported_directions: [LONG, SHORT, BIDI]  # Full support including BIDI
       parametric_ratio: 0.50   # 50% single-block parametric variations
       template_ratio: 0.30     # 30% 2-3 block combinations (AND logic)
       innovative_ratio: 0.20   # 20% sequential/multi-lookback/volatility patterns
@@ -226,13 +242,25 @@ generation:
         tournament_size: 3       # Tournament selection size
         mutation_rate: 0.20      # 20% mutation probability
         crossover_rate: 0.80     # 80% crossover probability
+
     ai_free:
       enabled: false           # AIFStrat_* - AI chooses indicators freely
+      market_regime:
+        enabled: false         # DEFAULT: top N volume + round-robin direction
+      supported_directions: [LONG, SHORT]  # AI template uses different 'both' logic
+
     ai_assigned:
       enabled: false           # AIAStrat_* - AI uses IndicatorCombinator-assigned indicators
+      market_regime:
+        enabled: false         # DEFAULT: top N volume + round-robin direction
+      supported_directions: [LONG, SHORT]  # AI template uses different 'both' logic
+
     unger:
       enabled: true            # UngStrat_* - Regime-coherent strategies (Unger method)
-      min_regime_strength: 0.5 # Minimum regime strength to generate (uses regime.min_strength)
+      market_regime:
+        enabled: false         # DEFAULT: top N volume + round-robin direction
+      supported_directions: [LONG, SHORT, BIDI]  # Full support including BIDI
+      min_regime_strength: 0.5 # Minimum regime strength (used when market_regime.enabled=true)
 
       # Genetic evolution settings (UggStrat_*)
       genetic:
@@ -244,9 +272,13 @@ generation:
         tournament_size: 3       # Tournament selection size
         mutation_rate: 0.20      # 20% mutation probability
         crossover_rate: 0.80     # 80% crossover probability
+
     pandas_ta:
       enabled: true            # PtaStrat_* - Pandas-TA indicator combinations
-      min_regime_strength: 0.5 # Minimum regime strength to generate
+      market_regime:
+        enabled: false         # DEFAULT: top N volume + round-robin direction
+      supported_directions: [LONG, SHORT, BIDI]  # Full support including BIDI
+      min_regime_strength: 0.5 # Minimum regime strength (used when market_regime.enabled=true)
       indicator_ratios:        # Distribution of indicator counts per strategy
         single: 0.30           # 30% strategies with 1 indicator
         double: 0.50           # 50% strategies with 2 indicators
@@ -378,10 +410,20 @@ backtesting:
   min_coverage_pct: 0.80     # 80% minimum data coverage required for coins
 
   # Minimum trades per timeframe (parallel arrays with timeframes config)
+  # Based on logical trading frequency per TF:
+  # 15m: ~1.0 trades/day, 30m: ~0.67/day, 1h: ~0.42/day, 2h: ~0.25/day
   # timeframes: ['15m', '30m', '1h', '2h']
   min_trades:
-    in_sample:    [240, 180, 120, 60]  # For 120d IS period: 15m, 30m, 1h, 2h
-    out_of_sample: [60,  45,  30, 15]  # For 60d OOS period
+    in_sample:     [120, 80, 50, 30]   # For 120d IS period
+    out_of_sample: [60,  40, 25, 15]   # For 60d OOS period
+
+  # Statistical significance filter (Confidence Interval)
+  # CI = 1.96 × √(WR × (1-WR) / N)
+  # Strategies with CI > max_ci are rejected (too much uncertainty)
+  # Ratio IS/OOS ≈ 1.5 accounts for OOS having half the data
+  max_ci:
+    in_sample: 0.10      # 10% max CI for IS (requires N ≥ ~96 trades at WR=50%)
+    out_of_sample: 0.15  # 15% max CI for OOS (requires N ≥ ~43 trades at WR=50%)
 
   # Out-of-sample validation thresholds
   # Note: OOS uses same thresholds as IS (min_sharpe, min_win_rate, etc.)
@@ -431,6 +473,7 @@ trading:
   min_volume_24h: 1000000      # $1M min volume for live trading (liquidity filter)
   pairs_mode: strict           # strict, adaptive, intersection
   require_backtest: true       # Only trade pairs that were backtested
+  top_coins_limit: 30          # Default number of top coins by volume for trading_coins
 
 # ==============================================================================
 # SCORER (Score Calculation)
@@ -451,7 +494,7 @@ scorer:
 # ==============================================================================
 rotator:
   check_interval_minutes: 15     # Check every 15 min for deployment opportunities
-  max_live_strategies: 10        # Max strategies in LIVE at once
+  max_live_strategies: 5         # Max strategies in LIVE (= subaccounts.count)
   min_pool_size: 100             # Don't deploy until ACTIVE pool has >= 100 strategies
   # NOTE: min_score for LIVE eligibility uses active_pool.min_score (single threshold)
 

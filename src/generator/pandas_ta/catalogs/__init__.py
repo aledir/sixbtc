@@ -29,6 +29,7 @@ from .conditions import (
     get_conditions_for_category,
     get_thresholds_for_indicator,
     get_direction_for_condition,
+    get_opposite_threshold,
 )
 
 from .compatibility import (
@@ -67,6 +68,7 @@ __all__ = [
     "get_conditions_for_category",
     "get_thresholds_for_indicator",
     "get_direction_for_condition",
+    "get_opposite_threshold",
     # Compatibility
     "INCOMPATIBLE_PAIRS",
     "RECOMMENDED_COMBOS",

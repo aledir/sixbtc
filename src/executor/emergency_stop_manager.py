@@ -15,6 +15,10 @@ Manages emergency stops at four scopes:
 Actions:
 - halt_entries: Block new trades, let existing run to SL/TP
 - force_close: Close ALL positions immediately (panic button)
+
+Rule #4b: WebSocket First
+- When data_provider is set, data_stale check uses WebSocket timestamp
+- This is the real source of truth for data freshness
 """
 
 import logging
@@ -61,16 +65,20 @@ class EmergencyStopManager:
     RESET_24H = "24h"
     RESET_DATA_VALID = "data_valid"
 
-    def __init__(self, config: dict, hyperliquid_client=None):
+    def __init__(self, config: dict, hyperliquid_client=None, data_provider=None):
         """
         Initialize with config thresholds.
 
         Args:
             config: Full config dict with 'risk.emergency' section
             hyperliquid_client: Optional client for force_close action
+            data_provider: HyperliquidDataProvider for WebSocket health check (Rule #4b)
         """
         emergency = config['risk']['emergency']
         cooldowns = config['risk'].get('emergency_cooldowns', {})
+
+        # WebSocket data provider for staleness check (Rule #4b)
+        self.data_provider = data_provider
 
         # Thresholds
         self.max_portfolio_drawdown = emergency['max_portfolio_drawdown']
@@ -404,7 +412,13 @@ class EmergencyStopManager:
         return consecutive
 
     def _check_data_stale(self) -> Optional[Dict]:
-        """Check if balance data is stale (>2min old)."""
+        """
+        Check if data feed is stale (>2min old).
+
+        Rule #4b: WebSocket First
+        - When data_provider is set, check WebSocket timestamp (source of truth)
+        - Fall back to database timestamps if no data_provider
+        """
         with get_session() as session:
             # Check if already stopped
             existing = session.query(EmergencyStopState).filter(
@@ -415,16 +429,42 @@ class EmergencyStopManager:
             if existing:
                 return None
 
-            # Check last balance update across all subaccounts
+            now = datetime.now(UTC)
+            stale_threshold = timedelta(seconds=self.data_stale_seconds)
+
+            # Rule #4b: Check WebSocket timestamp first (source of truth)
+            if self.data_provider:
+                last_update = self.data_provider.last_webdata2_update
+                if last_update:
+                    # Ensure timezone-aware comparison
+                    if last_update.tzinfo is None:
+                        last_update = last_update.replace(tzinfo=UTC)
+                    age = now - last_update
+                    if age > stale_threshold:
+                        return {
+                            'scope': self.SCOPE_SYSTEM,
+                            'scope_id': 'data_feed',
+                            'reason': f"WebSocket data stale for {age.total_seconds():.0f}s > {self.data_stale_seconds}s",
+                            'action': self.ACTION_HALT_ENTRIES,
+                            'reset_trigger': self.RESET_DATA_VALID
+                        }
+                    # WebSocket data is fresh - no staleness issue
+                    return None
+                else:
+                    # WebSocket hasn't received webData2 yet - check if provider is running
+                    if self.data_provider.running:
+                        # Provider running but no data yet - give it time
+                        logger.debug("WebSocket running but no webData2 received yet")
+                        return None
+                    # Fall through to database check
+
+            # Fallback: Check database timestamps (when no data_provider)
             subaccounts = session.query(Subaccount).filter(
                 Subaccount.status == 'ACTIVE'
             ).all()
 
             if not subaccounts:
                 return None
-
-            now = datetime.now(UTC)
-            stale_threshold = timedelta(seconds=self.data_stale_seconds)
 
             for sa in subaccounts:
                 if sa.peak_balance_updated_at:
@@ -564,7 +604,7 @@ class EmergencyStopManager:
 
         try:
             # Close all positions via Hyperliquid client
-            self.client.emergency_close_all_positions(reason)
+            self.client.emergency_stop_all(reason)
             logger.info("Force close executed successfully")
         except Exception as e:
             logger.error(f"Force close failed: {e}")

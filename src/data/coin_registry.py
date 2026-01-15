@@ -42,6 +42,7 @@ class CoinInfo:
     price: float
     is_active: bool
     updated_at: datetime
+    data_coverage_days: Optional[int] = None  # Days of OHLCV data in cache
 
 
 class CoinNotFoundError(Exception):
@@ -138,7 +139,8 @@ class CoinRegistry:
                         volume_24h=coin.volume_24h or 0,
                         price=coin.price or 0,
                         is_active=coin.is_active,
-                        updated_at=coin.updated_at
+                        updated_at=coin.updated_at,
+                        data_coverage_days=coin.data_coverage_days
                     )
 
                 self._cache = new_cache
@@ -282,6 +284,97 @@ class CoinRegistry:
         min_vol = min_volume if min_volume is not None else self.MIN_VOLUME_DEFAULT
         return coin.volume_24h >= min_vol
 
+    def has_sufficient_data(self, symbol: str, required_days: Optional[int] = None) -> bool:
+        """
+        Check if coin has sufficient OHLCV data coverage.
+
+        Uses config defaults if required_days not specified:
+        required_days = (is_days + oos_days) * min_coverage_pct
+
+        Args:
+            symbol: Coin symbol
+            required_days: Minimum days required (optional, uses config default)
+
+        Returns:
+            True if sufficient data, False otherwise
+        """
+        self._ensure_cache()
+
+        coin = self._cache.get(symbol)
+        if coin is None or not coin.is_active:
+            return False
+
+        # Get required_days from config if not specified
+        if required_days is None:
+            required_days = self._get_required_coverage_days()
+
+        # If data_coverage_days not set, assume insufficient
+        if coin.data_coverage_days is None:
+            return False
+
+        return coin.data_coverage_days >= required_days
+
+    def _get_required_coverage_days(self) -> int:
+        """
+        Calculate required coverage days from config.
+
+        Returns:
+            Required days = (is_days + oos_days) * min_coverage_pct
+        """
+        from src.config.loader import load_config
+        config = load_config()
+
+        is_days = config.get('backtesting.is_days')
+        oos_days = config.get('backtesting.oos_days')
+        min_coverage_pct = config.get('backtesting.min_coverage_pct')
+
+        return int((is_days + oos_days) * min_coverage_pct)
+
+    def get_coins_with_sufficient_data(
+        self,
+        required_days: Optional[int] = None,
+        min_volume: Optional[float] = None,
+        limit: Optional[int] = None
+    ) -> List[str]:
+        """
+        Get active coins with sufficient data coverage.
+
+        Filters by: is_active, min_volume, data_coverage_days >= required_days.
+        Sorted by volume descending.
+
+        Args:
+            required_days: Minimum days of data required
+            min_volume: Minimum 24h volume in USD (default: $1M)
+            limit: Maximum number of coins to return
+
+        Returns:
+            List of symbol strings ordered by volume desc
+        """
+        self._ensure_cache()
+
+        if required_days is None:
+            required_days = self._get_required_coverage_days()
+
+        min_vol = min_volume if min_volume is not None else self.MIN_VOLUME_DEFAULT
+
+        coins = [
+            coin for coin in self._cache.values()
+            if coin.is_active
+            and coin.volume_24h >= min_vol
+            and coin.data_coverage_days is not None
+            and coin.data_coverage_days >= required_days
+        ]
+
+        # Sort by volume descending, then symbol for deterministic ordering
+        coins.sort(key=lambda c: (-c.volume_24h, c.symbol))
+
+        symbols = [c.symbol for c in coins]
+
+        if limit:
+            symbols = symbols[:limit]
+
+        return symbols
+
     def validate_coins(
         self,
         coins: List[str],
@@ -308,21 +401,34 @@ class CoinRegistry:
 
         return valid, invalid
 
+    def get_top_coins_by_volume(self, limit: int = 30) -> List[str]:
+        """
+        Get top N coins by 24h volume.
+
+        Used by pattern_gen and genetic generators to assign
+        trading_coins at generation time.
+
+        Args:
+            limit: Number of coins to return (default 30)
+
+        Returns:
+            List of symbol strings ordered by volume desc
+        """
+        return self.get_active_pairs(limit=limit)
+
     def get_tradable_for_strategy(
         self,
-        pattern_coins: Optional[List[str]] = None,
-        backtest_pairs: Optional[List[str]] = None,
+        trading_coins: Optional[List[str]] = None,
         min_volume: Optional[float] = None
     ) -> List[str]:
         """
-        Get tradable pairs for a strategy with priority:
-        1. pattern_coins (if provided and valid) - these have proven edge
-        2. backtest_pairs (fallback) - coins used during backtest
-        3. Filter to currently active/liquid coins
+        Get tradable pairs for a strategy.
+
+        Applies runtime liquidity filter to trading_coins.
+        No fallback - if trading_coins is None, returns empty list.
 
         Args:
-            pattern_coins: Coins from pattern (high edge, ordered by edge)
-            backtest_pairs: Coins used in backtest
+            trading_coins: Strategy's assigned coins (from generation)
             min_volume: Minimum volume
 
         Returns:
@@ -330,13 +436,11 @@ class CoinRegistry:
         """
         self._ensure_cache()
 
-        # Priority: pattern_coins > backtest_pairs
-        candidates = pattern_coins if pattern_coins else backtest_pairs
-        if not candidates:
+        if not trading_coins:
             return []
 
         # Filter to tradable only, preserving order
-        valid, invalid = self.validate_coins(candidates, min_volume)
+        valid, invalid = self.validate_coins(trading_coins, min_volume)
 
         if invalid:
             logger.debug(
@@ -454,3 +558,37 @@ def is_tradable(symbol: str) -> bool:
         CoinRegistry.instance().is_tradable(...)
     """
     return get_registry().is_tradable(symbol)
+
+
+def get_top_coins_by_volume(limit: int = 30) -> List[str]:
+    """
+    Get top N coins by 24h volume.
+
+    Convenience function - equivalent to:
+        CoinRegistry.instance().get_top_coins_by_volume(...)
+    """
+    return get_registry().get_top_coins_by_volume(limit)
+
+
+def has_sufficient_data(symbol: str, required_days: Optional[int] = None) -> bool:
+    """
+    Check if coin has sufficient data coverage.
+
+    Convenience function - equivalent to:
+        CoinRegistry.instance().has_sufficient_data(...)
+    """
+    return get_registry().has_sufficient_data(symbol, required_days)
+
+
+def get_coins_with_sufficient_data(
+    required_days: Optional[int] = None,
+    min_volume: Optional[float] = None,
+    limit: Optional[int] = None
+) -> List[str]:
+    """
+    Get coins with sufficient data coverage.
+
+    Convenience function - equivalent to:
+        CoinRegistry.instance().get_coins_with_sufficient_data(...)
+    """
+    return get_registry().get_coins_with_sufficient_data(required_days, min_volume, limit)

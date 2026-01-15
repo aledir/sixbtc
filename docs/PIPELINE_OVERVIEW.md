@@ -32,9 +32,11 @@ Questo documento mostra la pipeline completa ad alto livello. Per i dettagli di 
 │ 4. BACKTEST IN-SAMPLE (backtester - STEP 2)                     │
 ├─────────────────────────────────────────────────────────────────┤
 │ • Backtest 120 giorni con best params (BacktestEngine)          │
-│ • Filtra con 5 threshold (stessi di PARAMETRIC):                │
+│ • Filtra con 6 threshold (stessi di PARAMETRIC + CI):           │
 │   - sharpe >= 0.3, win_rate >= 35%, expectancy >= 0.002         │
 │   - max_drawdown <= 50%, trades >= min_trades_is[tf]            │
+│   - CI <= max_ci_is (10%) - significatività statistica          │
+│ • CI = 1.96 × √(WR × (1-WR) / N) - incertezza su win rate       │
 │ • Se fallisce qualsiasi threshold → REJECTED + DELETE           │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
@@ -42,9 +44,10 @@ Questo documento mostra la pipeline completa ad alto livello. Per i dettagli di 
 │ 5. BACKTEST OUT-OF-SAMPLE (backtester - STEP 3)                 │
 ├─────────────────────────────────────────────────────────────────┤
 │ • Backtest 60 giorni OOS con STESSI params                      │
-│ • Filtra con 5 threshold (stessi di IS):                        │
+│ • Filtra con 6 threshold (stessi di IS + CI):                   │
 │   - sharpe >= 0.3, win_rate >= 35%, expectancy >= 0.002         │
 │   - max_drawdown <= 50%, trades >= min_trades_oos[tf]           │
+│   - CI <= max_ci_oos (15%) - significatività statistica         │
 │ • Degradation check: (IS_sharpe - OOS_sharpe) / IS_sharpe ≤ 50% │
 │ • Se fallisce qualsiasi threshold → REJECTED + DELETE           │
 └─────────────────────────────────────────────────────────────────┘
@@ -77,6 +80,17 @@ Questo documento mostra la pipeline completa ad alto livello. Per i dettagli di 
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
+│ 8.5 ROBUSTNESS CHECK (backtester - STEP 6.5)                    │
+├─────────────────────────────────────────────────────────────────┤
+│ • Formula: 0.50*oos_ratio + 0.35*trade_score + 0.15*simplicity  │
+│ • oos_ratio = OOS_Sharpe / IS_Sharpe (generalization)           │
+│ • trade_score = total_trades / 150 (statistical significance)   │
+│ • simplicity = 1 / num_indicators (overfitting resistance)      │
+│ • Threshold: robustness >= 0.80                                 │
+│ • Se fallisce → resta VALIDATED, non entra in pool              │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
 │ 9. POOL ENTRY (backtester - STEP 7)                             │
 ├─────────────────────────────────────────────────────────────────┤
 │ • Pool max size: 300 strategie                                  │
@@ -106,6 +120,7 @@ Questo documento mostra la pipeline completa ad alto livello. Per i dettagli di 
 | [PIPELINE_06_SCORE.md](PIPELINE_06_SCORE.md) | Score calculation |
 | [PIPELINE_07_SHUFFLE.md](PIPELINE_07_SHUFFLE.md) | Shuffle test (lookahead detection) |
 | [PIPELINE_08_WFA.md](PIPELINE_08_WFA.md) | Walk-Forward Analysis |
+| [PIPELINE_08B_ROBUSTNESS.md](PIPELINE_08B_ROBUSTNESS.md) | Robustness Check (final gate) |
 | [PIPELINE_09_POOL.md](PIPELINE_09_POOL.md) | Pool entry (leaderboard) |
 | [PIPELINE_10_ROTATION.md](PIPELINE_10_ROTATION.md) | Rotation to LIVE |
 | [PIPELINE_AUX.md](PIPELINE_AUX.md) | Flussi ausiliari (data, retest, sync, etc.) |

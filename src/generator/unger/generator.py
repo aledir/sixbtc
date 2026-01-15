@@ -23,6 +23,7 @@ from typing import Optional
 from jinja2 import Environment, FileSystemLoader
 
 from src.database import get_session, MarketRegime, Coin
+from src.generator.coin_direction_selector import CoinDirectionSelector
 from src.utils import get_logger
 
 from .composer import StrategyBlueprint, StrategyComposer
@@ -111,9 +112,13 @@ class UngerGenerator:
         timeframes_config = trading_config.get('timeframes', {})
         self.timeframes = list(timeframes_config.values()) if timeframes_config else self.DEFAULT_TIMEFRAMES
 
+        # Initialize coin/direction selector
+        self.selector = CoinDirectionSelector(config, 'unger')
+
+        regime_mode = "regime-aware" if self.selector.use_regime else "volume-based"
         logger.info(
             f"UngerGenerator v2 initialized: {len(self.timeframes)} timeframes, "
-            f"~15-30M possible strategies"
+            f"coin selection: {regime_mode}, ~15-30M possible strategies"
         )
 
     def get_regime_coins(self, regime_type: str) -> list[str]:
@@ -198,8 +203,9 @@ class UngerGenerator:
         if not non_empty:
             # Fallback: no regime data available
             from src.data.coin_registry import get_top_coins_by_volume
-            logger.info("No regime direction data, falling back to top coins by volume")
-            return "LONG", get_top_coins_by_volume(30)
+            top_coins_limit = self.config['trading']['top_coins_limit']
+            logger.info(f"No regime direction data, falling back to top {top_coins_limit} coins by volume")
+            return "LONG", get_top_coins_by_volume(top_coins_limit)
 
         # Separate directional (LONG/SHORT) from neutral (BOTH)
         directional = {d: c for d, c in non_empty.items() if d in ('LONG', 'SHORT')}
@@ -243,8 +249,8 @@ class UngerGenerator:
 
         Args:
             timeframe: Target timeframe (None = random from config)
-            direction: 'LONG', 'SHORT', 'BIDI' (None = random)
-            regime_type: 'TREND' or 'REVERSAL' for coin selection (None = all coins)
+            direction: 'LONG', 'SHORT', 'BIDI' (None = selector-driven)
+            regime_type: 'TREND' or 'REVERSAL' for coin selection (only used when market_regime.enabled)
             count: Number of strategies to generate
             seed: Random seed for reproducibility
 
@@ -260,25 +266,9 @@ class UngerGenerator:
             # Select timeframe
             tf = timeframe or random.choice(self.timeframes)
 
-            # Select direction and coins
-            # If direction not specified, use regime-driven selection
-            if direction:
-                dir_ = direction
-                # Get coins based on regime_type or all
-                if regime_type:
-                    coins = self.get_regime_coins(regime_type)
-                    if not coins:
-                        fallback = 'REVERSAL' if regime_type == 'TREND' else 'TREND'
-                        coins = self.get_regime_coins(fallback)
-                else:
-                    trend_coins = self.get_regime_coins('TREND')
-                    reversal_coins = self.get_regime_coins('REVERSAL')
-                    coins = list(set(trend_coins + reversal_coins))
-                if not coins:
-                    coins = self.get_all_tradeable_coins()
-            else:
-                # Regime-driven: select direction based on dominant group
-                dir_, coins = self.select_direction_and_coins()
+            # Select direction and coins via selector
+            # Selector handles both volume-based and regime-based modes
+            dir_, coins = self.selector.select(direction_override=direction)
 
             if not coins:
                 logger.warning("No coins available for strategy generation")
@@ -428,6 +418,14 @@ class UngerGenerator:
         func_iloc_pattern = r'(\w+(?:\.\w+)*\([^)]*\))\.iloc\[-1\]'
         result = re.sub(func_iloc_pattern, r'\1', result)
 
+        # Convert min(df["col1"], df["col2"]) → df[["col1", "col2"]].min(axis=1)
+        # This handles cases where .iloc[-1] was removed from min(df["col"].iloc[-1], df["col2"].iloc[-1])
+        min_max_pattern = r'(min|max)\(df\["([^"]+)"\],\s*df\["([^"]+)"\]\)'
+        def replace_min_max(m):
+            func, col1, col2 = m.groups()
+            return f'df[["{col1}", "{col2}"]].{func}(axis=1)'
+        result = re.sub(min_max_pattern, replace_min_max, result)
+
         # Convert Python boolean operators to pandas bitwise operators
         # Use word boundaries to avoid replacing within identifiers like "random" or "pandas"
         result = re.sub(r'\band\b', '&', result)
@@ -459,6 +457,10 @@ class UngerGenerator:
         Returns:
             Python source code string
         """
+        # BIDI: render with dual entries
+        if bp.direction == 'BIDI' and bp.entry_condition_long:
+            return self._render_bidi_strategy(bp)
+
         # Pre-process logic templates with parameter substitution
         entry_logic = self._substitute_params(
             bp.entry_condition.logic_template,
@@ -516,6 +518,116 @@ class UngerGenerator:
             entry_logic=entry_logic,
             entry_logic_vectorized=entry_logic_vectorized,
             computed_lookback=final_lookback,  # Auto-computed from indicators
+            filters=processed_filters,
+            # Exit
+            exit_mechanism=bp.exit_mechanism,
+            sl_config=bp.sl_config,
+            sl_params=bp.sl_params,
+            tp_config=bp.tp_config,
+            tp_params=bp.tp_params,
+            exit_condition=bp.exit_condition,
+            exit_params=bp.exit_params,
+            exit_logic=exit_logic,
+            trailing=bp.trailing_config,
+            trailing_params=bp.trailing_params,
+            # Coins
+            trading_coins=bp.trading_coins,
+            # BIDI flag (for template)
+            is_bidi=False,
+        )
+
+    def _render_bidi_strategy(self, bp: StrategyBlueprint) -> str:
+        """
+        Render BIDI strategy with separate LONG/SHORT entries.
+
+        Args:
+            bp: StrategyBlueprint with entry_condition_long and entry_condition_short
+
+        Returns:
+            Python source code string
+        """
+        # Process LONG entry
+        entry_logic_long = self._substitute_params(
+            bp.entry_condition_long.logic_template,
+            bp.entry_params_long
+        )
+        entry_logic_long_vectorized = self._vectorize_logic(entry_logic_long)
+
+        # Process SHORT entry
+        entry_logic_short = self._substitute_params(
+            bp.entry_condition_short.logic_template,
+            bp.entry_params_short
+        )
+        entry_logic_short_vectorized = self._vectorize_logic(entry_logic_short)
+
+        # Pre-process filter logic templates (filters apply to both directions)
+        processed_filters = []
+        for flt, flt_params in bp.entry_filters:
+            processed_logic = self._substitute_params(
+                flt.logic_template,
+                flt_params
+            )
+            processed_logic_vectorized = self._vectorize_filter_logic(processed_logic)
+            processed_filters.append((flt, flt_params, processed_logic, processed_logic_vectorized))
+
+        # Pre-process exit condition logic
+        exit_logic = None
+        if bp.exit_condition and bp.exit_params:
+            exit_logic = self._substitute_params(
+                bp.exit_condition.logic_template,
+                bp.exit_params
+            )
+
+        # Compute lookback from both entries (use max)
+        try:
+            lookback_long = compute_lookback(
+                bp.entry_condition_long.indicators_used,
+                bp.entry_params_long
+            )
+            lookback_short = compute_lookback(
+                bp.entry_condition_short.indicators_used,
+                bp.entry_params_short
+            )
+            computed_lookback = max(lookback_long, lookback_short)
+        except ValueError as e:
+            logger.warning(f"Lookback computation failed: {e}")
+            computed_lookback = max(
+                bp.entry_condition_long.lookback_required,
+                bp.entry_condition_short.lookback_required
+            ) + 20
+
+        final_lookback = max(
+            computed_lookback,
+            bp.entry_condition_long.lookback_required,
+            bp.entry_condition_short.lookback_required
+        )
+
+        return self.template.render(
+            # Meta
+            strategy_id=bp.strategy_id,
+            class_name=bp.get_class_name(),
+            strategy_type=bp.get_strategy_type(),
+            timeframe=bp.timeframe,
+            direction=bp.direction,
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            # BIDI flag
+            is_bidi=True,
+            # LONG entry
+            entry_long=bp.entry_condition_long,
+            entry_params_long=bp.entry_params_long,
+            entry_logic_long=entry_logic_long,
+            entry_logic_long_vectorized=entry_logic_long_vectorized,
+            # SHORT entry
+            entry_short=bp.entry_condition_short,
+            entry_params_short=bp.entry_params_short,
+            entry_logic_short=entry_logic_short,
+            entry_logic_short_vectorized=entry_logic_short_vectorized,
+            # Keep entry for backward compat (used by some template sections)
+            entry=bp.entry_condition_long,
+            entry_params=bp.entry_params_long,
+            entry_logic=entry_logic_long,
+            entry_logic_vectorized=entry_logic_long_vectorized,
+            computed_lookback=final_lookback,
             filters=processed_filters,
             # Exit
             exit_mechanism=bp.exit_mechanism,

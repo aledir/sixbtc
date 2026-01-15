@@ -212,7 +212,7 @@ class StrategySelector:
                         'direction': direction,
                         'score': strategy.score_backtest,
                         'code': strategy.code,
-                        'backtest_pairs': strategy.backtest_pairs,
+                        'trading_coins': strategy.trading_coins,
                         'relaxation_level': level_name,
                     })
 

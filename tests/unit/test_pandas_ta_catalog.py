@@ -73,3 +73,45 @@ class TestPandasTaCatalogValidation:
         """Ensure all indicators have a pandas_ta_func defined."""
         missing = [ind.id for ind in ALL_INDICATORS if not ind.pandas_ta_func]
         assert not missing, f"Indicators missing pandas_ta_func: {missing}"
+
+    def test_all_categories_have_strategy_type_mapping(self):
+        """
+        Ensure all indicator categories have a mapping in composer.py.
+
+        This prevents runtime errors like:
+        'Unknown indicator category: XXX'
+        """
+        # Category map from composer.py (must stay in sync)
+        category_map = {
+            "momentum": "MOM",
+            "trend": "TRD",
+            "crossover": "TRD",
+            "volatility": "REV",
+            "volume": "VOL",
+            "statistics": "REV",
+            "candle": "CDL",
+            "cycle": "REV",
+        }
+
+        # Collect all unique categories from all indicators
+        all_categories = set()
+        for ind in ALL_INDICATORS:
+            if ind.category:
+                all_categories.add(ind.category)
+
+        # Check which are missing
+        missing = []
+        for category in sorted(all_categories):
+            if category not in category_map:
+                # Find which indicators use this category
+                using_indicators = [
+                    ind.id for ind in ALL_INDICATORS
+                    if ind.category == category
+                ]
+                missing.append(f"{category} (used by: {', '.join(using_indicators[:3])}{'...' if len(using_indicators) > 3 else ''})")
+
+        assert not missing, (
+            f"\n{len(missing)} categories missing in composer.py category_map:\n"
+            + "\n".join(f"  - {m}" for m in missing)
+            + "\n\nAdd mappings to category_map in src/generator/pandas_ta/composer.py"
+        )

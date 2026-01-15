@@ -494,7 +494,7 @@ class TestActionExecution:
         manager._execute_force_close("Test emergency")
 
         # Verify client was asked to close positions
-        mock_client.emergency_close_all_positions.assert_called_with("Test emergency")
+        mock_client.emergency_stop_all.assert_called_with("Test emergency")
 
         # Should update all active subaccounts to STOPPED
         mock_ctx.query.return_value.filter.return_value.update.assert_called()

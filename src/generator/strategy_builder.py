@@ -41,6 +41,8 @@ from src.generator.helper_fetcher import HelperFetcher
 from src.generator.indicator_combinator import IndicatorCombinator
 from src.database.models import StrategyTemplate, UsedIndicatorCombination
 from src.database import get_session
+from src.data.coin_registry import get_top_coins_by_volume
+from src.generator.coin_direction_selector import CoinDirectionSelector
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +66,7 @@ class GeneratedStrategy:
     template_id: Optional[str] = None  # Template UUID if template-based
     parameters: Optional[dict] = None  # Parameters used if template-based
     parameter_hash: Optional[str] = None  # Hash for deduplication
-    pattern_coins: Optional[list[str]] = None  # High-edge coins from pattern
+    trading_coins: Optional[list[str]] = None  # High-edge coins from pattern
     base_code_hash: Optional[str] = None  # SHA256 of base code BEFORE parameter embedding
 
 
@@ -134,6 +136,14 @@ class StrategyBuilder:
 
         # Initialize indicator combinator for AI strategy variety (Phase 3)
         self.indicator_combinator = IndicatorCombinator()
+
+        # Initialize coin/direction selectors for AI generators
+        if config:
+            self.ai_free_selector = CoinDirectionSelector(config, 'ai_free')
+            self.ai_assigned_selector = CoinDirectionSelector(config, 'ai_assigned')
+        else:
+            self.ai_free_selector = None
+            self.ai_assigned_selector = None
 
         # Cache strategy sources config (names match generation_mode values)
         self._strategy_sources = self.config.get('generation', {}).get('strategy_sources', {
@@ -240,7 +250,7 @@ class StrategyBuilder:
         leverage = self._get_random_leverage()
 
         # Extract high-edge coins from pattern's coin_performance
-        pattern_coins = None
+        trading_coins = None
         if pattern.coin_performance:
             coin_config = self.config.get('pattern_discovery', {}).get('coin_selection', {})
             min_edge = coin_config.get('min_edge', 0.10)
@@ -248,15 +258,15 @@ class StrategyBuilder:
             # Liquidity threshold from trading config (no artificial coin limit)
             min_volume = self.config.get('trading', {}).get('min_volume_24h', 1_000_000)
 
-            pattern_coins = pattern.get_high_edge_coins(
+            trading_coins = pattern.get_high_edge_coins(
                 min_edge=min_edge,
                 min_signals=min_signals,
                 min_volume=min_volume
             )
-            if pattern_coins:
+            if trading_coins:
                 logger.info(
-                    f"Pattern {pattern.name}: {len(pattern_coins)} coins with edge >= {min_edge:.0%} "
-                    f"(top: {pattern_coins[:5]})"
+                    f"Pattern {pattern.name}: {len(trading_coins)} coins with edge >= {min_edge:.0%} "
+                    f"(top: {trading_coins[:5]})"
                 )
 
         # Mode A: Direct embedding (preferred when formula_source available)
@@ -282,7 +292,7 @@ class StrategyBuilder:
                     leverage=result.leverage,
                     pattern_id=result.pattern_id,
                     generation_mode="pattern",  # From pattern-discovery API
-                    pattern_coins=pattern_coins,
+                    trading_coins=trading_coins,
                     base_code_hash=base_code_hash
                 )
             elif mode == "direct":
@@ -300,13 +310,13 @@ class StrategyBuilder:
                 )
 
         # Mode B: AI wrapping (uses provided code in prompt)
-        return self._generate_pattern_ai(pattern, leverage, pattern_coins)
+        return self._generate_pattern_ai(pattern, leverage, trading_coins)
 
     def _generate_pattern_ai(
         self,
         pattern: Pattern,
         leverage: int,
-        pattern_coins: Optional[list[str]] = None
+        trading_coins: Optional[list[str]] = None
     ) -> Optional[GeneratedStrategy]:
         """
         Generate strategy using AI (Mode B) with provided code
@@ -396,7 +406,7 @@ class StrategyBuilder:
                 leverage=leverage,
                 pattern_id=pattern.id,
                 generation_mode="pattern",  # From pattern-discovery API (AI-wrapped)
-                pattern_coins=pattern_coins,
+                trading_coins=trading_coins,
                 base_code_hash=base_code_hash
             )
 
@@ -576,7 +586,15 @@ class StrategyBuilder:
 
         strategies = self.parametric_generator.generate_strategies(template, max_strategies=1)
         if strategies and strategies[0].validation_passed:
-            return [self._convert_parametric_strategy(strategies[0], template)]
+            # Get trading_coins via selector (handles volume-based and regime-based)
+            if self.ai_free_selector:
+                _, trading_coins = self.ai_free_selector.select()
+            else:
+                top_coins_limit = self.config['trading']['top_coins_limit']
+                trading_coins = get_top_coins_by_volume(top_coins_limit)
+            return [self._convert_parametric_strategy(
+                strategies[0], template, "ai_free", trading_coins
+            )]
         return []
 
     def _generate_ai_assigned(
@@ -634,7 +652,15 @@ class StrategyBuilder:
             self._mark_combination_used(
                 strategy_type, timeframe, main_indicators, filter_indicators
             )
-            return [self._convert_parametric_strategy(strategies[0], template, "ai_assigned")]
+            # Get trading_coins via selector (handles volume-based and regime-based)
+            if self.ai_assigned_selector:
+                _, trading_coins = self.ai_assigned_selector.select()
+            else:
+                top_coins_limit = self.config['trading']['top_coins_limit']
+                trading_coins = get_top_coins_by_volume(top_coins_limit)
+            return [self._convert_parametric_strategy(
+                strategies[0], template, "ai_assigned", trading_coins
+            )]
 
         return []
 
@@ -673,7 +699,7 @@ class StrategyBuilder:
             template_id=None,  # No template for pattern-based strategies
             parameters=parametric_result.parameters,
             parameter_hash=parametric_result.parameter_hash,
-            pattern_coins=parametric_result.pattern_coins,
+            trading_coins=parametric_result.trading_coins,
             base_code_hash=parametric_result.base_code_hash
         )
 
@@ -870,7 +896,8 @@ class StrategyBuilder:
         self,
         ps: ParametricStrategy,
         template: StrategyTemplate,
-        generation_mode: str = "ai_free"
+        generation_mode: str = "ai_free",
+        trading_coins: Optional[list[str]] = None
     ) -> GeneratedStrategy:
         """Convert ParametricStrategy to GeneratedStrategy format"""
         return GeneratedStrategy(
@@ -888,6 +915,7 @@ class StrategyBuilder:
             template_id=ps.template_id,
             parameters=ps.parameters,
             parameter_hash=ps.parameter_hash,
+            trading_coins=trading_coins,
             base_code_hash=ps.base_code_hash
         )
 

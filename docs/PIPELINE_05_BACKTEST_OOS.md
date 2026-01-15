@@ -47,15 +47,28 @@ Se oos_data ha < 5 simboli validi → `oos_result = None`
 
 ---
 
-## _validate_oos(): 5 Threshold + Degradation Check
+## _validate_oos(): 6 Threshold + Degradation Check
 
-OOS applica gli **STESSI 5 threshold di IS**:
+OOS applica gli **STESSI 5 threshold di IS + CI filter**:
 
 1. `oos_trades >= min_trades_oos[timeframe]`
 2. `oos_sharpe >= 0.3` (stesso di IS, non 0.0)
 3. `oos_win_rate >= 35%`
 4. `oos_expectancy >= 0.002`
 5. `oos_max_drawdown <= 50%`
+6. `CI <= max_ci_oos (15%)` - significatività statistica
+
+### CI Filter (Confidence Interval)
+
+```
+CI = 1.96 × √(WR × (1-WR) / N)
+```
+
+Il CI misura l'incertezza sul win rate. OOS ha soglia più alta (15% vs 10% IS) perché ha meno dati (60 vs 120 giorni).
+
+**Esempio**:
+- N=50, WR=55% → CI = 13.8% ✓ passa
+- N=30, WR=50% → CI = 17.9% ✗ troppa incertezza
 
 ### Degradation Check (anti-overfitting)
 
@@ -78,26 +91,28 @@ degrad = ───────────────────────�
 
 ## Min Trades per Timeframe (da config)
 
-| Timeframe | min_is | min_oos |
-|-----------|--------|---------|
-| 5m | 500 | 50 |
-| 15m | 300 | 30 |
-| 30m | 200 | 20 |
-| 1h | 100 | 10 |
-| 2h | 50 | 5 |
+| Timeframe | min_is | min_oos | CI at min (WR=50%) |
+|-----------|--------|---------|-------------------|
+| 15m | 120 | 60 | IS: 8.9%, OOS: 12.6% |
+| 30m | 80 | 40 | IS: 11.0%, OOS: 15.5% |
+| 1h | 50 | 25 | IS: 13.9%, OOS: 19.6% |
+| 2h | 30 | 15 | IS: 17.9%, OOS: 25.3% |
 
-Timeframe alti = meno opportunità = soglie più basse
+**Nota**: Con max_ci_is=10% e max_ci_oos=15%, strategie 1h/2h devono avere più trades del minimo OPPURE WR più alto per passare il CI filter.
+
+Timeframe alti = meno opportunità = soglie più basse, ma CI filter garantisce significatività statistica
 
 ---
 
 ## Motivi di Reject
 
 **OOS threshold failures**:
-- `[X] "OOS trades insufficient: 8 < 30 (for 15m)"`
+- `[X] "OOS trades insufficient: 8 < 60 (for 15m)"`
 - `[X] "OOS sharpe too low: 0.15 < 0.3"`
 - `[X] "OOS win_rate too low: 30.0% < 35.0%"`
 - `[X] "OOS expectancy too low: 0.0010 < 0.002"`
 - `[X] "OOS drawdown too high: 55.0% > 50%"`
+- `[X] "OOS CI too high: 18.5% > 15.0%"` (troppa incertezza statistica)
 - `[X] "Overfitted: OOS 65% worse than IS"`
 
 **REJECT → DELETE strategy**

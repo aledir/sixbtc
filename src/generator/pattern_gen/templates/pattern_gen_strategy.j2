@@ -21,7 +21,7 @@ class {{ class_name }}(StrategyCore):
     Execution: {{ execution_type }}
     """
 
-    # Direction (always 'long' or 'short', never 'bidi')
+    # Direction ('long', 'short', or 'bidi')
     direction = '{{ direction | lower }}'
 
     # Timeframe (for Sharpe annualization)
@@ -34,7 +34,13 @@ class {{ class_name }}(StrategyCore):
     signal_column = 'entry_signal'
 
     # Indicator columns for lookahead test
+    {% if is_bidi %}
+    indicator_columns = [{% for ind in indicators %}'{{ ind | lower }}', {% endfor %}'long_entry', 'short_entry', 'long_signal', 'short_signal', 'entry_signal']
+    {% elif direction | lower == 'bidi' %}
+    indicator_columns = [{% for ind in indicators %}'{{ ind | lower }}', {% endfor %}'ema_20', 'long_signal', 'short_signal', 'entry_signal']
+    {% else %}
     indicator_columns = [{% for ind in indicators %}'{{ ind | lower }}', {% endfor %}'entry_signal']
+    {% endif %}
 
     # Lookback required
     LOOKBACK = {{ lookback }}
@@ -61,6 +67,35 @@ class {{ class_name }}(StrategyCore):
         df = df.copy()
 
         # === INDICATOR CALCULATIONS ===
+        {% if is_bidi %}
+        # === BIDI: Separate LONG and SHORT entry conditions ===
+        {{ indicator_code | indent(8) }}
+
+        # === ENTRY SIGNAL (BIDI - already generates long_signal/short_signal) ===
+        {{ entry_signal_code | indent(8) }}
+
+        # Ensure signals are boolean
+        df['long_signal'] = df['long_signal'].fillna(False).astype(bool)
+        df['short_signal'] = df['short_signal'].fillna(False).astype(bool)
+        df['entry_signal'] = df['entry_signal'].fillna(False).astype(bool)
+        {% elif direction | lower == 'bidi' %}
+        # Legacy BIDI: Single entry + EMA-20 direction filter
+        {{ indicator_code | indent(8) }}
+
+        # EMA-20 for BIDI direction determination
+        df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
+
+        # === ENTRY SIGNAL ===
+        {{ entry_signal_code | indent(8) }}
+
+        # Ensure entry_signal is boolean
+        df['entry_signal'] = df['entry_signal'].fillna(False).astype(bool)
+
+        # BIDI: Split entry_signal into long/short based on price vs EMA-20
+        df['long_signal'] = (df['entry_signal'] & (df['close'] > df['ema_20'])).astype(bool)
+        df['short_signal'] = (df['entry_signal'] & (df['close'] <= df['ema_20'])).astype(bool)
+        {% else %}
+        # Unidirectional: LONG or SHORT
         {{ indicator_code | indent(8) }}
 
         # === ENTRY SIGNAL ===
@@ -68,6 +103,7 @@ class {{ class_name }}(StrategyCore):
 
         # Ensure entry_signal is boolean
         df['entry_signal'] = df['entry_signal'].fillna(False).astype(bool)
+        {% endif %}
 
         return df
 
@@ -84,9 +120,21 @@ class {{ class_name }}(StrategyCore):
         if not df['entry_signal'].iloc[-1]:
             return None
 
+        {% if is_bidi or direction | lower == 'bidi' %}
+        # BIDI: Determine direction from which signal fired
+        if df['long_signal'].iloc[-1]:
+            signal_direction = 'long'
+        elif df['short_signal'].iloc[-1]:
+            signal_direction = 'short'
+        else:
+            return None  # Should not happen if entry_signal is True
+        {% else %}
+        signal_direction = self.direction
+        {% endif %}
+
         # Build signal
         return Signal(
-            direction=self.direction,
+            direction=signal_direction,
             leverage=self.LEVERAGE,
             sl_type=StopLossType.PERCENTAGE,
             sl_pct=self.SL_PCT,

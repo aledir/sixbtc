@@ -18,11 +18,14 @@ individual metrics with clear descriptions. Sections:
 - [LIVE]: Strategies currently trading real money
 """
 
+import os
 import time
 import logging
 from datetime import datetime, timedelta, UTC, date
 from typing import Dict, List, Optional, Any, Tuple
 
+from hyperliquid.info import Info
+from hyperliquid.utils import constants
 from sqlalchemy import select, func, and_, or_, desc, cast, Integer, text
 
 from src.config import load_config
@@ -91,6 +94,13 @@ class MetricsCollector:
                 if genetic_cfg.get('enabled', False):
                     self.enabled_sources.add(f'{source_name}_genetic')
 
+        # Hyperliquid Info client for balance queries (read-only)
+        hl_config = self.config.get('hyperliquid', {})
+        testnet = hl_config.get('testnet', False)
+        api_url = constants.TESTNET_API_URL if testnet else constants.MAINNET_API_URL
+        self._hl_info = Info(api_url, skip_ws=True)
+        self._hl_master_address = os.getenv('HL_MASTER_ADDRESS')
+
         logger.info(f"MetricsCollector initialized (interval: {self.interval_seconds}s)")
 
     def collect_snapshot(self) -> None:
@@ -123,6 +133,8 @@ class MetricsCollector:
                 oos_stats = self._get_oos_stats_24h(session, window_24h)
                 score_stats = self._get_score_stats_24h(session, window_24h)
                 retest_stats = self._get_retest_stats_24h(session, window_24h)
+                robustness_stats = self._get_robustness_stats_24h(session, window_24h)
+                pool_robustness = self._get_pool_robustness_stats(session)
                 live_stats = self._get_live_rotation_stats(session, window_24h)
                 combo_stats = self._get_combo_stats_24h(session, window_24h)
                 scheduler_stats = self._get_scheduler_stats(session)
@@ -160,6 +172,8 @@ class MetricsCollector:
                     pool_avg_score_by_source=pool_avg_score_by_source,
                     pool_added_by_source=pool_added_by_source,
                     retest_stats=retest_stats,
+                    robustness_stats=robustness_stats,
+                    pool_robustness=pool_robustness,
                     live_stats=live_stats,
                     combo_stats=combo_stats,
                     scheduler_stats=scheduler_stats,
@@ -225,7 +239,7 @@ class MetricsCollector:
             Dict with:
             - total: Total strategies generated
             - by_source: Count by generation_mode (pattern, ai_free, ai_assigned)
-            - by_type: Count by strategy_type (MOM, REV, TRN, etc.)
+            - by_type: Current strategy_type distribution (TRD, MOM, REV, VOL, CDL)
             - by_direction: Count by direction (LONG, SHORT, BIDIR)
             - by_timeframe: Count by timeframe (15m, 30m, 1h, 4h, 1d)
             - timing_by_source: Average generation time (ms) by source
@@ -262,13 +276,13 @@ class MetricsCollector:
                     FROM base
                     GROUP BY 1
                 ),
-                -- By type
+                -- By type (from strategies table - current state, not historical events)
                 by_type AS (
                     SELECT
-                        event_data->>'strategy_type' as stype,
+                        s.strategy_type as stype,
                         COUNT(*) as cnt
-                    FROM base
-                    WHERE event_data->>'strategy_type' IS NOT NULL
+                    FROM strategies s
+                    WHERE s.strategy_type IS NOT NULL
                     GROUP BY 1
                 ),
                 -- By direction
@@ -1718,14 +1732,71 @@ class MetricsCollector:
 
         reason_counts = {r[0]: r[1] for r in retired_by_reason if r[0] is not None}
 
+        # Count robustness failures (all robustness_below_threshold:* reasons)
+        robustness_failed = sum(
+            count for reason, count in reason_counts.items()
+            if reason and reason.startswith('robustness_below_threshold')
+        )
+
         return {
             'tested': retested,
             'passed': passed,
             'failed': reason_counts.get('retest_failed', 0),
             'evicted': reason_counts.get('evicted', 0),
             'score_below_min': reason_counts.get('score_below_min', 0),
+            'pool_rejected': reason_counts.get('pool_rejected', 0),
+            'robustness_failed': robustness_failed,
             # Legacy: total retired (for backwards compatibility)
             'retired': sum(r[1] for r in retired_by_reason),
+        }
+
+    def _get_robustness_stats_24h(self, session, since: datetime) -> Dict[str, Any]:
+        """Get robustness check statistics for last 24h."""
+        # Query robustness_check events
+        events = session.query(StrategyEvent).filter(
+            StrategyEvent.timestamp >= since,
+            StrategyEvent.stage == 'robustness_check',
+        ).all()
+
+        passed = [e for e in events if e.status == 'passed']
+        failed = [e for e in events if e.status == 'failed']
+
+        passed_robustness = [
+            e.event_data.get('robustness', 0)
+            for e in passed
+            if e.event_data and 'robustness' in e.event_data
+        ]
+        failed_robustness = [
+            e.event_data.get('robustness', 0)
+            for e in failed
+            if e.event_data and 'robustness' in e.event_data
+        ]
+
+        return {
+            'passed': len(passed),
+            'failed': len(failed),
+            'total': len(events),
+            'pass_rate': len(passed) / len(events) if events else 0,
+            'passed_avg': sum(passed_robustness) / len(passed_robustness) if passed_robustness else 0,
+            'failed_avg': sum(failed_robustness) / len(failed_robustness) if failed_robustness else 0,
+        }
+
+    def _get_pool_robustness_stats(self, session) -> Dict[str, Any]:
+        """Get robustness stats for current ACTIVE pool."""
+        strategies = session.query(Strategy).filter(
+            Strategy.status == 'ACTIVE',
+            Strategy.robustness_score.isnot(None),
+        ).all()
+
+        if not strategies:
+            return {'min': 0, 'max': 0, 'avg': 0, 'count': 0}
+
+        scores = [s.robustness_score for s in strategies]
+        return {
+            'min': min(scores),
+            'max': max(scores),
+            'avg': sum(scores) / len(scores),
+            'count': len(scores),
         }
 
     def _get_live_rotation_stats(self, session, since: datetime) -> Dict[str, Any]:
@@ -1844,12 +1915,29 @@ class MetricsCollector:
 
         code_lower = code.lower()
 
-        # Check for explicit BIDI/BIDIR
-        if "direction='bidi'" in code_lower or 'direction="bidi"' in code_lower:
+        # Check for explicit BIDI/BIDIR (with and without spaces)
+        has_bidi = (
+            "direction='bidi'" in code_lower or
+            'direction="bidi"' in code_lower or
+            "direction = 'bidi'" in code_lower or
+            'direction = "bidi"' in code_lower
+        )
+        if has_bidi:
             return "BIDIR"
 
-        has_long = "direction='long'" in code_lower or 'direction="long"' in code_lower
-        has_short = "direction='short'" in code_lower or 'direction="short"' in code_lower
+        # Check for long/short (with and without spaces around =)
+        has_long = (
+            "direction='long'" in code_lower or
+            'direction="long"' in code_lower or
+            "direction = 'long'" in code_lower or
+            'direction = "long"' in code_lower
+        )
+        has_short = (
+            "direction='short'" in code_lower or
+            'direction="short"' in code_lower or
+            "direction = 'short'" in code_lower or
+            'direction = "short"' in code_lower
+        )
 
         if has_long and has_short:
             return "BIDIR"
@@ -1888,10 +1976,19 @@ class MetricsCollector:
                     live_since = live_since.replace(tzinfo=UTC)
                 uptime_days = (now - live_since).total_seconds() / 86400
 
+            # Get strategy details
+            timeframe = strategy.timeframe if strategy else None
+            direction = self._detect_direction(strategy.code) if strategy and strategy.code else None
+            coins = strategy.trading_coins if strategy else None
+            coins_count = len(coins) if coins else 0
+
             result.append({
                 'id': sub.id,
                 'balance': sub.current_balance or 0,
                 'strategy_name': strategy.name if strategy else None,
+                'timeframe': timeframe,
+                'direction': direction,
+                'coins_count': coins_count,
                 'uptime_days': uptime_days,
                 'rpnl': total_pnl,
                 'rpnl_pct': rpnl_pct,
@@ -1902,6 +1999,25 @@ class MetricsCollector:
             })
 
         return result
+
+    def _get_main_account_balance(self) -> float:
+        """
+        Get main account balance from Hyperliquid.
+
+        Returns:
+            Account equity in USD, or 0.0 if unavailable
+        """
+        if not self._hl_master_address:
+            return 0.0
+
+        try:
+            state = self._hl_info.user_state(self._hl_master_address)
+            if state and 'marginSummary' in state:
+                return float(state['marginSummary'].get('accountValue', 0))
+            return 0.0
+        except Exception as e:
+            logger.warning(f"Failed to get main account balance: {e}")
+            return 0.0
 
     def _get_scheduler_stats(self, session) -> Dict[str, Any]:
         """
@@ -2247,6 +2363,8 @@ class MetricsCollector:
         pool_avg_score_by_source: Dict[str, Optional[float]],
         pool_added_by_source: Dict[str, int],
         retest_stats: Dict[str, Any],
+        robustness_stats: Dict[str, Any],
+        pool_robustness: Dict[str, Any],
         live_stats: Dict[str, Any],
         combo_stats: Dict[str, Any],
         scheduler_stats: Dict[str, Any],
@@ -2609,6 +2727,28 @@ class MetricsCollector:
         logger.info(f'[8/10 WFA] timing: {fmt_time(timing.get("multiwindow"))} | failed: {mw_failed} (params not stable across time windows)')
 
         # =====================================================================
+        # [8.5/10 ROBUSTNESS] - Final gate before pool entry
+        # =====================================================================
+        robustness_config = self.config.get('backtesting', {}).get('robustness', {})
+        min_robustness = robustness_config.get('min_threshold', 0.80)
+
+        if robustness_stats['total'] > 0:
+            logger.info(
+                f"[8.5/10 ROBUSTNESS] 24h: {robustness_stats['passed']}/{robustness_stats['total']} "
+                f"passed ({fmt_pct(int(robustness_stats['pass_rate'] * 100))})"
+            )
+            logger.info(
+                f"[8.5/10 ROBUSTNESS] passed_avg: {robustness_stats['passed_avg']:.2f} | "
+                f"failed_avg: {robustness_stats['failed_avg']:.2f} | threshold: {min_robustness}"
+            )
+
+        if pool_robustness['count'] > 0:
+            logger.info(
+                f"[8.5/10 ROBUSTNESS] pool: {pool_robustness['min']:.2f} to {pool_robustness['max']:.2f} "
+                f"(avg {pool_robustness['avg']:.2f})"
+            )
+
+        # =====================================================================
         # [9/10 POOL]
         # =====================================================================
         pool_size = pool_stats["size"]
@@ -2616,6 +2756,11 @@ class MetricsCollector:
         pool_entered = funnel["pool"]
 
         logger.info(f'[9/10 POOL] size: {pool_size}/{pool_limit} | 24h_added: {pool_entered}, 24h_retired: {retest_stats["retired"]}')
+        logger.info(
+            f'[9/10 POOL] 24h_retired: score<min={retest_stats["score_below_min"]}, '
+            f'wfa_failed={retest_stats["pool_rejected"]}, robustness={retest_stats["robustness_failed"]}, '
+            f'retest={retest_stats["failed"]}, evicted={retest_stats["evicted"]}'
+        )
         logger.info(f'[9/10 POOL] 24h_added: {fmt_sources(pool_added_by_source)}')
         logger.info(f'[9/10 POOL] sources: {fmt_sources(pool_by_source)}')
 
@@ -2638,7 +2783,8 @@ class MetricsCollector:
 
         logger.info(f'[9/10 POOL] avg_score: {fmt_sources(pool_avg_score_by_source, formatter=fmt_avg_score)}')
 
-        logger.info(f'[9/10 POOL] scores: {fmt_float(pool_stats["score_min"])} to {fmt_float(pool_stats["score_max"])} (avg {fmt_float(pool_stats["score_avg"])})')
+        robustness_avg_str = f'{pool_robustness["avg"]:.2f}' if pool_robustness['count'] > 0 else '--'
+        logger.info(f'[9/10 POOL] scores: {fmt_float(pool_stats["score_min"])} to {fmt_float(pool_stats["score_max"])} (avg {fmt_float(pool_stats["score_avg"])}) | robustness: {robustness_avg_str}')
 
         expectancy_str = f'{pool_quality["expectancy_avg"]*100:.1f}%' if pool_quality["expectancy_avg"] else "--"
         logger.info(f'[9/10 POOL] quality: sharpe={fmt_float(pool_quality["sharpe_avg"])}, wr={fmt_pct_float(pool_quality["winrate_avg"])}, exp={expectancy_str}, dd={fmt_pct_float(pool_quality["dd_avg"])}')
@@ -2705,6 +2851,16 @@ class MetricsCollector:
             f'[LIVE] diversity: {n_types} types, {tf_str}, {dir_str}'
         )
 
+        # Capital summary: main + subaccounts
+        main_balance = self._get_main_account_balance()
+        subs_balance = sum(sub['balance'] for sub in subaccount_stats)
+        total_balance = main_balance + subs_balance
+
+        logger.info(
+            f'[LIVE] total_capital: ${total_balance:.0f} | '
+            f'main_account: ${main_balance:.0f} | sub_accounts: ${subs_balance:.0f}'
+        )
+
         # =====================================================================
         # [SUB x] - Per-subaccount stats
         # =====================================================================
@@ -2712,6 +2868,9 @@ class MetricsCollector:
             sub_id = sub['id']
             balance = sub['balance']
             strategy = sub['strategy_name'] or '--'
+            timeframe = sub.get('timeframe') or '--'
+            direction = sub.get('direction') or '--'
+            coins_count = sub.get('coins_count') or 0
             uptime_days = sub.get('uptime_days')
             rpnl = sub['rpnl']
             rpnl_pct = sub['rpnl_pct']
@@ -2723,16 +2882,25 @@ class MetricsCollector:
             # Format uptime
             uptime_str = f'{uptime_days:.1f}d' if uptime_days is not None else '--'
 
+            # Format direction short (LONG->L, SHORT->S, BIDIR->B)
+            dir_short = direction[0] if direction != '--' else '--'
+
+            # Format coins (show count or -- if not populated)
+            coins_str = f'{coins_count}c' if coins_count > 0 else '--'
+
+            # Format strategy info: tf/dir/coins
+            strat_info = f'{timeframe}/{dir_short}/{coins_str}'
+
             # Format with signs
             rpnl_sign = '+' if rpnl >= 0 else ''
             rpnl_pct_sign = '+' if rpnl_pct >= 0 else ''
             upnl_sign = '+' if upnl >= 0 else ''
 
             logger.info(
-                f'[SUB {sub_id}] ${balance:.2f} | {strategy} | up={uptime_str} | '
+                f'[SUB {sub_id}] {strategy} | {strat_info} | '
                 f'rpnl={rpnl_sign}${rpnl:.2f} ({rpnl_pct_sign}{rpnl_pct:.0f}%) | '
-                f'upnl={upnl_sign}${upnl:.2f} | pos={positions} | '
-                f'dd={dd_pct:.0f}% | wr={wr_pct:.0f}%'
+                f'dd={dd_pct:.0f}% | pos={positions} | upnl={upnl_sign}${upnl:.2f} | '
+                f'${balance:.0f} | wr={wr_pct:.0f}% | up={uptime_str}'
             )
 
         # =====================================================================

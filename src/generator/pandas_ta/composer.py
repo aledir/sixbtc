@@ -27,6 +27,7 @@ from .catalogs import (
     get_conditions_for_category,
     get_thresholds_for_indicator,
     get_direction_for_condition,
+    get_opposite_threshold,
     # Compatibility
     are_compatible,
     are_all_compatible,
@@ -65,6 +66,7 @@ class PtaEntryCondition:
     - The condition type (threshold_below, crossed_above, etc.)
     - Resolved parameter values
     - The threshold value for the condition
+    - The opposite threshold for BIDI strategies
     """
 
     indicator: PtaIndicator
@@ -72,6 +74,7 @@ class PtaEntryCondition:
     indicator_params: dict         # Resolved indicator parameters (e.g., {"length": 14})
     threshold: float               # Threshold value for condition (e.g., 30 for RSI < 30)
     threshold_high: Optional[float] = None  # For BETWEEN conditions
+    threshold_opposite: Optional[float] = None  # For BIDI: opposite threshold (e.g., 70 for RSI)
 
 
 @dataclass
@@ -115,7 +118,11 @@ class PtaBlueprint:
     trailing_params: Optional[dict] = None
 
     # Coins from market regime
-    pattern_coins: list[str] = field(default_factory=list)
+    trading_coins: list[str] = field(default_factory=list)
+
+    # BIDI support: separate LONG/SHORT conditions (only used when direction='BIDI')
+    entry_conditions_long: list[PtaEntryCondition] = field(default_factory=list)
+    entry_conditions_short: list[PtaEntryCondition] = field(default_factory=list)
 
     def compute_hash(self) -> str:
         """
@@ -161,22 +168,35 @@ class PtaBlueprint:
         """
         Determine strategy type prefix from first indicator's category.
 
+        Uses unified 5-type system: TRD, MOM, REV, VOL, CDL
+
         Returns:
-            MOM (momentum), TRN (trend), CRS (crossover),
-            VOL (volatility), VLM (volume)
+            One of: TRD, MOM, REV, VOL, CDL
+
+        Raises:
+            ValueError: If category is unknown (no fallback - fail fast)
         """
         if not self.entry_conditions:
-            return "PTA"
+            raise ValueError("No entry conditions - cannot determine strategy type")
 
         first_cat = self.entry_conditions[0].indicator.category
+        # Unified 5-type mapping
         category_map = {
             "momentum": "MOM",
-            "trend": "TRN",
-            "crossover": "CRS",
-            "volatility": "VOL",
-            "volume": "VLM",
+            "trend": "TRD",
+            "crossover": "TRD",  # Crossovers are trend-following
+            "volatility": "REV",  # Volatility bands = mean reversion
+            "volume": "VOL",
+            "statistics": "REV",  # Statistical indicators = mean reversion
+            "candle": "CDL",  # Candlestick patterns
+            "cycle": "REV",  # Cycle indicators = mean reversion
         }
-        return category_map.get(first_cat, "PTA")
+        if first_cat not in category_map:
+            raise ValueError(
+                f"Unknown indicator category: '{first_cat}'. "
+                f"Add mapping in pandas_ta/composer.py"
+            )
+        return category_map[first_cat]
 
     def get_class_name(self) -> str:
         """Generate strategy class name."""
@@ -252,6 +272,10 @@ class PtaComposer:
         Returns:
             Complete PtaBlueprint ready for code generation
         """
+        # BIDI: use separate composition with dual condition sets
+        if direction == 'BIDI':
+            return self._compose_bidi(timeframe, regime_type, coins, num_indicators)
+
         # 1. Determine number of indicators
         if num_indicators is None:
             num_indicators = self._rng.choices([1, 2, 3], weights=self._num_indicator_weights)[0]
@@ -318,7 +342,7 @@ class PtaComposer:
             exit_params=exit_params,
             trailing_config=trailing,
             trailing_params=trailing_params,
-            pattern_coins=list(set(coins)),
+            trading_coins=list(set(coins)),
         )
 
     def _get_available_indicators(
@@ -425,12 +449,17 @@ class PtaComposer:
             threshold = self._rng.choice(low_vals) if low_vals else 30
             threshold_high = self._rng.choice(high_vals) if high_vals else 70
 
+        # Calculate opposite threshold for BIDI strategies
+        # e.g., RSI < 30 (long) → RSI > 70 (short)
+        threshold_opposite = get_opposite_threshold(indicator.id, threshold, condition_type)
+
         return PtaEntryCondition(
             indicator=indicator,
             condition_type=condition_type,
             indicator_params=indicator_params,
             threshold=threshold,
             threshold_high=threshold_high,
+            threshold_opposite=threshold_opposite,
         )
 
     def _resolve_params(self, params: dict) -> dict:
@@ -446,6 +475,237 @@ class PtaComposer:
         if not params:
             return {}
         return {k: self._rng.choice(v) for k, v in params.items()}
+
+    def _compose_bidi(
+        self,
+        timeframe: str,
+        regime_type: str,
+        coins: list[str],
+        num_indicators: Optional[int] = None,
+    ) -> PtaBlueprint:
+        """
+        Compose a BIDI strategy with separate LONG and SHORT entry conditions.
+
+        BIDI strategies have two independent entry logics:
+        - LONG conditions (e.g., RSI < 30, price crossed above MA)
+        - SHORT conditions (e.g., RSI > 70, price crossed below MA)
+
+        The strategy generates long_signal and short_signal separately,
+        and entry_signal = long_signal | short_signal.
+
+        Args:
+            timeframe: Target timeframe
+            regime_type: 'TREND', 'REVERSAL', or 'MIXED'
+            coins: List of coins for this strategy
+            num_indicators: Number of indicators (1-3), None for random
+
+        Returns:
+            PtaBlueprint with populated entry_conditions_long and entry_conditions_short
+        """
+        # 1. Determine number of indicators
+        if num_indicators is None:
+            num_indicators = self._rng.choices([1, 2, 3], weights=self._num_indicator_weights)[0]
+        num_indicators = min(max(1, num_indicators), 3)
+
+        # 2. Get available indicators for regime (BIDI accepts all directions)
+        if regime_type in ("TREND", "REVERSAL"):
+            available = get_indicators_by_regime(regime_type)
+        else:
+            available = list(INDICATORS)
+
+        if not available:
+            available = list(INDICATORS)
+
+        # 3. Build LONG entry conditions (favoring LONG-compatible thresholds)
+        entry_conditions_long = self._build_directional_conditions(
+            available, num_indicators, 'LONG'
+        )
+
+        # 4. Build SHORT entry conditions (favoring SHORT-compatible thresholds)
+        entry_conditions_short = self._build_directional_conditions(
+            available, num_indicators, 'SHORT'
+        )
+
+        # 5. Select Exit Mechanism
+        exit_mech = self._rng.choice(EXIT_MECHANISMS)
+
+        # 6. Select SL (always required)
+        sl_config = self._rng.choice(SL_CONFIGS)
+        sl_params = self._resolve_params(sl_config.params)
+
+        # 7. Select TP (if used by mechanism)
+        tp_config = None
+        tp_params = None
+        if exit_mech.uses_tp:
+            tp_config = self._rng.choice(TP_CONFIGS)
+            tp_params = self._resolve_params(tp_config.params)
+
+        # 8. Select Exit Condition (if used by mechanism)
+        # For BIDI, use LONG exit conditions (will check direction at runtime)
+        exit_cond = None
+        exit_params = None
+        if exit_mech.uses_ec:
+            valid_exits = get_exits_by_direction('LONG')
+            if valid_exits:
+                exit_cond = self._rng.choice(valid_exits)
+                exit_params = self._resolve_params(exit_cond.params)
+
+        # 9. Select Trailing Stop (if used by mechanism)
+        trailing = None
+        trailing_params = None
+        if exit_mech.uses_ts:
+            trailing = self._rng.choice(TRAILING_CONFIGS)
+            trailing_params = self._resolve_params(
+                {**trailing.activation_params, **trailing.trail_params}
+            )
+
+        # 10. Generate unique ID
+        strategy_id = uuid.uuid4().hex[:8]
+
+        return PtaBlueprint(
+            strategy_id=strategy_id,
+            timeframe=timeframe,
+            direction='BIDI',
+            regime_type=regime_type,
+            # Use LONG as primary for get_strategy_type()
+            entry_conditions=entry_conditions_long,
+            entry_conditions_long=entry_conditions_long,
+            entry_conditions_short=entry_conditions_short,
+            exit_mechanism=exit_mech,
+            sl_config=sl_config,
+            sl_params=sl_params,
+            tp_config=tp_config,
+            tp_params=tp_params,
+            exit_condition=exit_cond,
+            exit_params=exit_params,
+            trailing_config=trailing,
+            trailing_params=trailing_params,
+            trading_coins=list(set(coins)),
+        )
+
+    def _build_directional_conditions(
+        self,
+        available: list[PtaIndicator],
+        count: int,
+        direction: str,
+    ) -> list[PtaEntryCondition]:
+        """
+        Build entry conditions specifically for a direction.
+
+        For LONG: prefers threshold_below, crossed_above (oversold conditions)
+        For SHORT: prefers threshold_above, crossed_below (overbought conditions)
+
+        Args:
+            available: List of available indicators
+            count: Number of conditions to build
+            direction: 'LONG' or 'SHORT'
+
+        Returns:
+            List of PtaEntryCondition tuned for the specified direction
+        """
+        conditions = []
+        selected_ids = []
+
+        # Shuffle for randomness
+        shuffled = available.copy()
+        self._rng.shuffle(shuffled)
+
+        for _ in range(count):
+            # Find a compatible indicator
+            candidate = None
+            for ind in shuffled:
+                if ind.id in selected_ids:
+                    continue
+                # Check compatibility with already selected
+                if selected_ids:
+                    compatible = all(
+                        are_compatible(ind.id, sel_id)
+                        for sel_id in selected_ids
+                    )
+                    if not compatible:
+                        continue
+                candidate = ind
+                break
+
+            if candidate is None:
+                break
+
+            # Create directional entry condition
+            condition = self._create_directional_condition(candidate, direction)
+            conditions.append(condition)
+            selected_ids.append(candidate.id)
+
+        return conditions
+
+    def _create_directional_condition(
+        self,
+        indicator: PtaIndicator,
+        direction: str,
+    ) -> PtaEntryCondition:
+        """
+        Create an entry condition specifically tuned for a direction.
+
+        Args:
+            indicator: The indicator to use
+            direction: 'LONG' or 'SHORT'
+
+        Returns:
+            PtaEntryCondition with direction-appropriate condition and threshold
+        """
+        # Get valid condition types for this indicator's category
+        valid_conditions = get_conditions_for_category(indicator.category)
+        if not valid_conditions:
+            valid_conditions = [ConditionType.THRESHOLD_BELOW, ConditionType.THRESHOLD_ABOVE]
+
+        # Filter conditions to match direction
+        # LONG: prefers threshold_below, crossed_above (buy low)
+        # SHORT: prefers threshold_above, crossed_below (sell high)
+        long_conditions = [
+            ConditionType.THRESHOLD_BELOW,
+            ConditionType.CROSSED_ABOVE,
+            ConditionType.SLOPE_UP,
+        ]
+        short_conditions = [
+            ConditionType.THRESHOLD_ABOVE,
+            ConditionType.CROSSED_BELOW,
+            ConditionType.SLOPE_DOWN,
+        ]
+
+        if direction == 'LONG':
+            directional = [c for c in valid_conditions if c in long_conditions]
+        else:
+            directional = [c for c in valid_conditions if c in short_conditions]
+
+        # Use directional conditions if available, otherwise use any valid
+        if directional:
+            condition_type = self._rng.choice(directional)
+        else:
+            condition_type = self._rng.choice(valid_conditions)
+
+        # Resolve indicator parameters
+        indicator_params = self._resolve_params(indicator.params)
+
+        # Get threshold appropriate for direction
+        thresholds = get_thresholds_for_indicator(indicator.id, condition_type)
+        threshold = self._rng.choice(thresholds) if thresholds else 0
+
+        # For BETWEEN, need two thresholds
+        threshold_high = None
+        if condition_type == ConditionType.BETWEEN:
+            ind_thresholds = INDICATOR_THRESHOLDS.get(indicator.id, {})
+            low_vals = ind_thresholds.get("neutral_low", ind_thresholds.get("oversold", [30]))
+            high_vals = ind_thresholds.get("neutral_high", ind_thresholds.get("overbought", [70]))
+            threshold = self._rng.choice(low_vals) if low_vals else 30
+            threshold_high = self._rng.choice(high_vals) if high_vals else 70
+
+        return PtaEntryCondition(
+            indicator=indicator,
+            condition_type=condition_type,
+            indicator_params=indicator_params,
+            threshold=threshold,
+            threshold_high=threshold_high,
+            threshold_opposite=None,  # Not needed for BIDI (we have separate conditions)
+        )
 
     def compose_with_recommended_combo(
         self,
@@ -529,5 +789,5 @@ class PtaComposer:
             exit_params=exit_params,
             trailing_config=trailing,
             trailing_params=trailing_params,
-            pattern_coins=list(set(coins)),
+            trading_coins=list(set(coins)),
         )
