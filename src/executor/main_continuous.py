@@ -135,6 +135,25 @@ class ContinuousExecutorProcess:
         """Main continuous execution loop"""
         logger.info("Starting continuous execution loop")
 
+        # Collect symbols and timeframes from LIVE strategies for WebSocket subscriptions
+        symbols_set = set()
+        timeframes_set = set()
+        with get_session() as session:
+            live_strategies = session.query(Strategy).filter(Strategy.status == 'LIVE').all()
+            for strat in live_strategies:
+                if strat.timeframe:
+                    timeframes_set.add(strat.timeframe)
+                if strat.trading_coins:
+                    symbols_set.update(strat.trading_coins)
+
+        # Set symbols and timeframes for WebSocket candle subscriptions
+        self.data_provider.symbols = list(symbols_set)
+        self.data_provider.timeframes = list(timeframes_set)
+        logger.info(
+            f"WebSocket will subscribe to {len(symbols_set)} symbols x "
+            f"{len(timeframes_set)} timeframes from LIVE strategies"
+        )
+
         # Rule #4b: Start WebSocket data provider FIRST
         # This provides real-time prices and user data
         logger.info("Starting WebSocket data provider (Rule #4b: WebSocket First)...")
