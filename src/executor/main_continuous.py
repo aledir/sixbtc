@@ -349,6 +349,8 @@ class ContinuousExecutorProcess:
            b. Subscribe to new WebSocket candle streams
         """
         try:
+            logger.info("Checking for new streams to bootstrap...")
+
             # Get current coins/timeframes from LIVE strategies
             current_symbols: set = set()
             current_timeframes: set = set()
@@ -368,8 +370,15 @@ class ContinuousExecutorProcess:
             new_symbols = current_symbols - self._bootstrapped_symbols
             new_timeframes = current_timeframes - self._bootstrapped_timeframes
 
+            logger.info(
+                f"Bootstrap check: current={len(current_symbols)} symbols, "
+                f"bootstrapped={len(self._bootstrapped_symbols)}, "
+                f"new={len(new_symbols)} ({sorted(new_symbols)[:5]}...)"
+            )
+
             if not new_symbols and not new_timeframes:
-                return  # Nothing new to bootstrap
+                logger.info("No new streams to bootstrap")
+                return
 
             # Calculate what needs bootstrapping
             # New symbols need all existing timeframes + new timeframes
@@ -853,7 +862,7 @@ class ContinuousExecutorProcess:
             actual_leverage = min(strategy_leverage, coin_max_leverage)
 
             # Dynamic cap: each trade uses at most 1/max_positions of equity
-            max_positions = self.config['risk']['limits']['max_open_positions_per_subaccount']
+            max_positions = self.config.get_required('risk.limits.max_open_positions_per_subaccount')
             account_balance = subaccount['allocated_capital']
             notional = size * current_price
             margin_needed = notional / actual_leverage
