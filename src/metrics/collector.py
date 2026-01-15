@@ -32,6 +32,11 @@ from src.config import load_config
 from src.database import get_session, PipelineMetricsSnapshot, Strategy
 from src.database.models import StrategyEvent, BacktestResult, ScheduledTaskExecution, Subaccount
 
+# TYPE_CHECKING imports to avoid circular dependencies
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.executor.statistics_service import StatisticsService
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,15 +50,23 @@ class MetricsCollector:
     - Timing information from event durations
     """
 
-    def __init__(self, config: Optional[Dict] = None):
+    def __init__(
+        self,
+        config: Optional[Dict] = None,
+        statistics_service: Optional['StatisticsService'] = None
+    ):
         """
         Initialize metrics collector.
 
         Args:
             config: Configuration dict (if None, loads from file)
+            statistics_service: Optional StatisticsService for true P&L stats from Hyperliquid
         """
         if config is None:
             config = load_config()
+
+        # Statistics service for true P&L calculation (Hyperliquid as source of truth)
+        self.statistics_service = statistics_service
 
         self.config = config._raw_config if hasattr(config, '_raw_config') else config
 
@@ -1950,6 +1963,7 @@ class MetricsCollector:
         Get statistics for each active subaccount.
 
         Returns list of dicts with subaccount metrics for logging.
+        Optionally includes true P&L from Hyperliquid if statistics_service is available.
         """
         # Query subaccounts with their assigned strategies
         subaccounts = (
@@ -1960,10 +1974,19 @@ class MetricsCollector:
             .all()
         )
 
+        # Pre-fetch true P&L stats from Hyperliquid if statistics_service available
+        true_pnl_stats = {}
+        if self.statistics_service:
+            try:
+                subaccount_ids = [sub.id for sub, _ in subaccounts]
+                true_pnl_stats = self.statistics_service.get_all_subaccounts_stats(subaccount_ids)
+            except Exception as e:
+                logger.warning(f"Failed to fetch true P&L stats from Hyperliquid: {e}")
+
         result = []
         now = datetime.now(UTC)
         for sub, strategy in subaccounts:
-            # Calculate rpnl percentage
+            # Calculate rpnl percentage (DB-based)
             allocated = sub.allocated_capital or 0
             total_pnl = sub.total_pnl or 0
             rpnl_pct = (total_pnl / allocated * 100) if allocated > 0 else 0
@@ -1982,7 +2005,7 @@ class MetricsCollector:
             coins = strategy.trading_coins if strategy else None
             coins_count = len(coins) if coins else 0
 
-            result.append({
+            stats = {
                 'id': sub.id,
                 'balance': sub.current_balance or 0,
                 'strategy_name': strategy.name if strategy else None,
@@ -1996,7 +2019,18 @@ class MetricsCollector:
                 'positions': sub.open_positions_count or 0,
                 'dd_pct': (sub.current_drawdown or 0) * 100,
                 'wr_pct': (sub.win_rate or 0) * 100,
-            })
+            }
+
+            # Add true P&L from Hyperliquid if available
+            # These are immune to manual deposits/withdrawals
+            if sub.id in true_pnl_stats:
+                hl_stats = true_pnl_stats[sub.id]
+                stats['hl_balance'] = hl_stats.get('current_balance', 0)
+                stats['hl_net_deposits'] = hl_stats.get('net_deposits', 0)
+                stats['hl_true_pnl'] = hl_stats.get('true_pnl', 0)
+                stats['hl_true_pnl_pct'] = hl_stats.get('true_pnl_pct', 0)
+
+            result.append(stats)
 
         return result
 

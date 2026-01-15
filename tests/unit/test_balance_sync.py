@@ -43,10 +43,11 @@ class TestBalanceSyncService:
 
             result = service.sync_all_subaccounts()
 
-            # Verify allocated_capital was set
+            # Verify allocated_capital and current_balance were set
             assert mock_subaccount.allocated_capital == 100.0
             assert mock_subaccount.current_balance == 100.0
-            assert mock_subaccount.peak_balance == 100.0
+            # Note: peak_balance is NOT set by balance_sync (set by deployer)
+            # This is by design to prevent false emergency stops
             assert 1 in result
             assert result[1] == 100.0
 
@@ -133,15 +134,22 @@ class TestBalanceSyncService:
             # Should return empty (subaccount not configured)
             assert result == {}
 
-    def test_sync_initializes_peak_balance_when_none(self, service, mock_client):
-        """Test that peak_balance is initialized when None."""
+    def test_sync_does_not_initialize_peak_balance(self, service, mock_client):
+        """Test that peak_balance is NOT initialized by balance_sync.
+
+        This is intentional: peak_balance must be set by deployer (from allocated_capital)
+        to prevent false emergency stops. Balance_sync only updates timestamp when
+        peak_balance is already set.
+
+        See: Root cause analysis of EmergencyStopState bug.
+        """
         mock_client.get_account_balance.return_value = 100.0
 
         mock_subaccount = Mock()
         mock_subaccount.id = 1
         mock_subaccount.allocated_capital = 100.0
         mock_subaccount.current_balance = 90.0
-        mock_subaccount.peak_balance = None
+        mock_subaccount.peak_balance = None  # Not set yet
         mock_subaccount.peak_balance_updated_at = None
 
         with patch('src.executor.balance_sync.get_session') as mock_session:
@@ -151,9 +159,10 @@ class TestBalanceSyncService:
 
             service.sync_all_subaccounts()
 
-            # peak_balance should be initialized
-            assert mock_subaccount.peak_balance == 100.0
-            assert mock_subaccount.peak_balance_updated_at is not None
+            # peak_balance should NOT be initialized by balance_sync
+            # It must be set by deployer when assigning strategy
+            assert mock_subaccount.peak_balance is None
+            assert mock_subaccount.peak_balance_updated_at is None
 
     def test_sync_multiple_subaccounts(self, service, mock_client):
         """Test syncing multiple subaccounts."""

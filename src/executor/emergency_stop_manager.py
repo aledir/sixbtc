@@ -37,6 +37,11 @@ from src.database.models import (
     Trade,
 )
 
+# TYPE_CHECKING imports to avoid circular dependencies
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.executor.statistics_service import StatisticsService
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,7 +70,13 @@ class EmergencyStopManager:
     RESET_24H = "24h"
     RESET_DATA_VALID = "data_valid"
 
-    def __init__(self, config: dict, hyperliquid_client=None, data_provider=None):
+    def __init__(
+        self,
+        config: dict,
+        hyperliquid_client=None,
+        data_provider=None,
+        statistics_service: Optional['StatisticsService'] = None
+    ):
         """
         Initialize with config thresholds.
 
@@ -73,12 +84,16 @@ class EmergencyStopManager:
             config: Full config dict with 'risk.emergency' section
             hyperliquid_client: Optional client for force_close action
             data_provider: HyperliquidDataProvider for WebSocket health check (Rule #4b)
+            statistics_service: Optional StatisticsService for true P&L stats
         """
         emergency = config['risk']['emergency']
         cooldowns = config['risk'].get('emergency_cooldowns', {})
 
         # WebSocket data provider for staleness check (Rule #4b)
         self.data_provider = data_provider
+
+        # Statistics service for true P&L calculation (Hyperliquid as source of truth)
+        self.statistics_service = statistics_service
 
         # Thresholds
         self.max_portfolio_drawdown = emergency['max_portfolio_drawdown']
@@ -926,3 +941,75 @@ class EmergencyStopManager:
         """
         with get_session() as session:
             return self._check_portfolio_dd_rotation_ready(session)
+
+    # =========================================================================
+    # TRUE P&L STATISTICS (Hyperliquid as source of truth)
+    # =========================================================================
+
+    def get_true_pnl_stats(self, subaccount_id: int) -> Optional[Dict]:
+        """
+        Get true P&L statistics for a subaccount using Hyperliquid as source of truth.
+
+        Formula: True P&L = Current Balance - Net Deposits
+
+        This is immune to manual deposits/withdrawals corrupting statistics.
+        Requires statistics_service to be initialized.
+
+        Args:
+            subaccount_id: Subaccount number
+
+        Returns:
+            Dict with true_pnl, true_pnl_pct, net_deposits, current_balance
+            or None if statistics_service not available
+        """
+        if self.statistics_service is None:
+            logger.debug("StatisticsService not available - cannot calculate true P&L")
+            return None
+
+        try:
+            return self.statistics_service.get_true_pnl(subaccount_id)
+        except Exception as e:
+            logger.error(f"Failed to get true P&L for subaccount {subaccount_id}: {e}")
+            return None
+
+    def get_true_drawdown_stats(self, subaccount_id: int) -> Optional[Dict]:
+        """
+        Get true drawdown statistics for a subaccount using Hyperliquid.
+
+        True drawdown = loss from invested capital (net_deposits), not from peak.
+        This is immune to manual deposits/withdrawals corrupting statistics.
+
+        Args:
+            subaccount_id: Subaccount number
+
+        Returns:
+            Dict with drawdown, drawdown_pct, is_in_drawdown
+            or None if statistics_service not available
+        """
+        if self.statistics_service is None:
+            logger.debug("StatisticsService not available - cannot calculate true drawdown")
+            return None
+
+        try:
+            return self.statistics_service.get_true_drawdown(subaccount_id)
+        except Exception as e:
+            logger.error(f"Failed to get true drawdown for subaccount {subaccount_id}: {e}")
+            return None
+
+    def get_all_subaccounts_true_stats(self) -> Dict[int, Dict]:
+        """
+        Get true P&L statistics for all active subaccounts.
+
+        Returns:
+            Dict mapping subaccount_id to stats
+        """
+        if self.statistics_service is None:
+            return {}
+
+        with get_session() as session:
+            subaccounts = session.query(Subaccount).filter(
+                Subaccount.status.in_(['ACTIVE', 'PAUSED'])
+            ).all()
+            subaccount_ids = [sa.id for sa in subaccounts]
+
+        return self.statistics_service.get_all_subaccounts_stats(subaccount_ids)

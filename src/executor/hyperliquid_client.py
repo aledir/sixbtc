@@ -1509,6 +1509,142 @@ class HyperliquidClient:
 
         logger.critical("Emergency stop completed")
 
+    def get_ledger_updates(
+        self,
+        subaccount_id: int,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get non-funding ledger updates (deposits, withdrawals, transfers) for a subaccount.
+
+        Essential for accurate P&L calculation when user deposits/withdraws funds.
+
+        Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
+            start_time: Start timestamp in milliseconds (default: 90 days ago)
+            end_time: End timestamp in milliseconds (default: now)
+
+        Returns:
+            List of ledger update records with type, amount, direction
+        """
+        try:
+            address = self._get_subaccount_address(subaccount_id)
+        except ValueError as e:
+            logger.error(str(e))
+            return []
+
+        try:
+            # Default time range: last 90 days
+            now_ms = int(time.time() * 1000)
+            if end_time is None:
+                end_time = now_ms
+            if start_time is None:
+                start_time = now_ms - (90 * 24 * 60 * 60 * 1000)  # 90 days
+
+            # Call userNonFundingLedgerUpdates API
+            self._wait_rate_limit()
+            response = self.info.post("/info", {
+                "type": "userNonFundingLedgerUpdates",
+                "user": address,
+                "startTime": start_time,
+                "endTime": end_time
+            })
+
+            records = []
+            for update in response:
+                # Each update has a 'delta' field with the type-specific data
+                delta = update.get("delta", {})
+                delta_type = delta.get("type", "unknown")
+                time_ms = update.get("time", 0)
+
+                record = {
+                    "timestamp": time_ms,
+                    "datetime": datetime.fromtimestamp(time_ms / 1000, tz=UTC).isoformat() if time_ms else None,
+                    "type": delta_type,
+                    "hash": update.get("hash", ""),
+                }
+
+                # Extract amount based on type
+                if delta_type == "deposit":
+                    record["amount"] = float(delta.get("usdc", 0))
+                    record["direction"] = "in"
+                elif delta_type == "withdraw":
+                    record["amount"] = float(delta.get("usdc", 0))
+                    record["direction"] = "out"
+                elif delta_type == "internalTransfer":
+                    record["amount"] = float(delta.get("usdc", 0))
+                    record["direction"] = "in" if delta.get("isDeposit", False) else "out"
+                    record["destination"] = delta.get("destination", "")
+                elif delta_type == "subAccountTransfer":
+                    record["amount"] = float(delta.get("usdc", 0))
+                    record["direction"] = "in" if delta.get("isDeposit", False) else "out"
+                elif delta_type == "spotTransfer":
+                    record["amount"] = float(delta.get("usdc", 0))
+                    record["token"] = delta.get("token", "USDC")
+                    record["direction"] = "in" if delta.get("isDeposit", False) else "out"
+                elif delta_type == "accountClassTransfer":
+                    record["amount"] = float(delta.get("usdc", 0))
+                    record["direction"] = "in" if delta.get("isDeposit", False) else "out"
+                elif delta_type == "liquidation":
+                    record["amount"] = float(delta.get("usdc", 0))
+                    record["direction"] = "out"  # Liquidation is always a loss
+                    record["liquidated_positions"] = delta.get("leverageType", "")
+                else:
+                    # Unknown type, try to extract usdc
+                    record["amount"] = float(delta.get("usdc", 0)) if "usdc" in delta else 0
+                    record["direction"] = "unknown"
+
+                records.append(record)
+
+            # Sort by timestamp
+            records.sort(key=lambda x: x["timestamp"])
+
+            # Log summary
+            deposits = sum(r["amount"] for r in records if r.get("direction") == "in")
+            withdrawals = sum(r["amount"] for r in records if r.get("direction") == "out")
+            logger.debug(
+                f"Subaccount {subaccount_id} ledger: {len(records)} records, "
+                f"deposits=${deposits:.2f}, withdrawals=${withdrawals:.2f}"
+            )
+
+            return records
+
+        except Exception as e:
+            logger.error(f"Failed to get ledger updates for subaccount {subaccount_id}: {e}")
+            return []
+
+    def get_net_deposits(
+        self,
+        subaccount_id: int,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None
+    ) -> Dict[str, float]:
+        """
+        Calculate net deposits (deposits - withdrawals) for accurate P&L.
+
+        Formula: True P&L = Current Account Value - Net Deposits
+
+        Args:
+            subaccount_id: Subaccount number (1, 2, 3, ...)
+            start_time: Start timestamp in milliseconds (default: 90 days ago)
+            end_time: End timestamp in milliseconds (default: now)
+
+        Returns:
+            Dict with total_deposits, total_withdrawals, net_deposits, transaction_count
+        """
+        ledger = self.get_ledger_updates(subaccount_id, start_time, end_time)
+
+        total_deposits = sum(r["amount"] for r in ledger if r.get("direction") == "in")
+        total_withdrawals = sum(r["amount"] for r in ledger if r.get("direction") == "out")
+
+        return {
+            "total_deposits": total_deposits,
+            "total_withdrawals": total_withdrawals,
+            "net_deposits": total_deposits - total_withdrawals,
+            "transaction_count": len(ledger),
+        }
+
     def __str__(self) -> str:
         mode = "DRY RUN" if self.dry_run else "LIVE"
         return f"HyperliquidClient(mode={mode}, subaccounts={self.subaccount_count})"

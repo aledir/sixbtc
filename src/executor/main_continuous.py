@@ -24,6 +24,7 @@ from src.executor.risk_manager import RiskManager
 from src.executor.trailing_service import TrailingService
 from src.executor.emergency_stop_manager import EmergencyStopManager
 from src.executor.balance_sync import BalanceSyncService
+from src.executor.statistics_service import StatisticsService
 from src.data.hyperliquid_websocket import get_data_provider, HyperliquidDataProvider
 from src.data.coin_registry import get_registry, get_active_pairs, CoinNotFoundError
 from src.strategies.base import StrategyCore, Signal, StopLossType, ExitType
@@ -82,11 +83,18 @@ class ContinuousExecutorProcess:
         )
         self.risk_manager = risk_manager or RiskManager(self.config._raw_config)
         self.trailing_service = trailing_service or TrailingService(self.client, self.config._raw_config)
-        # Pass data_provider to emergency manager for WebSocket health check
+
+        # Statistics service for true P&L calculation (Hyperliquid as source of truth)
+        # Formula: True P&L = Current Balance - Net Deposits
+        # This is immune to manual deposits/withdrawals corrupting statistics
+        self.statistics_service = StatisticsService(self.client, self.data_provider)
+
+        # Pass data_provider and statistics_service to emergency manager
         self.emergency_manager = EmergencyStopManager(
             self.config._raw_config,
             self.client,
-            data_provider=self.data_provider
+            data_provider=self.data_provider,
+            statistics_service=self.statistics_service
         )
 
         # Load trading pairs (multi-coin support)
