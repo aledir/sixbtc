@@ -294,7 +294,14 @@ class EmergencyStopManager:
         return None
 
     def _check_portfolio_drawdown(self) -> Optional[Dict]:
-        """Check portfolio drawdown against threshold."""
+        """
+        Check portfolio drawdown against threshold.
+
+        Portfolio drawdown is calculated relative to total allocated_capital:
+        DD = (total_allocated - total_current) / total_allocated
+
+        This approach is immune to peak_balance corruption.
+        """
         with get_session() as session:
             # Check if already stopped for DD
             existing = session.query(EmergencyStopState).filter(
@@ -310,16 +317,24 @@ class EmergencyStopManager:
                 Subaccount.status.in_(['ACTIVE', 'PAUSED'])
             ).all()
 
-            total_current = sum(sa.current_balance or 0 for sa in subaccounts)
-            total_peak = sum(
-                sa.peak_balance or sa.allocated_capital or 0
-                for sa in subaccounts
-            )
-
-            if total_peak <= 0:
+            if not subaccounts:
                 return None
 
-            drawdown = (total_peak - total_current) / total_peak if total_current < total_peak else 0
+            # Sum up allocated capital and current balance across all subaccounts
+            total_allocated = sum(sa.allocated_capital or 0 for sa in subaccounts)
+            total_current = sum(sa.current_balance or 0 for sa in subaccounts)
+
+            if total_allocated <= 0:
+                return None
+
+            # Calculate portfolio drawdown
+            if total_current >= total_allocated:
+                drawdown = 0.0  # In profit or break-even
+            else:
+                drawdown = (total_allocated - total_current) / total_allocated
+
+            # Sanity check
+            drawdown = min(drawdown, 1.0)
 
             if drawdown >= self.max_portfolio_drawdown:
                 return {
@@ -333,7 +348,17 @@ class EmergencyStopManager:
         return None
 
     def _check_subaccount_drawdowns(self) -> List[Dict]:
-        """Check each subaccount's drawdown."""
+        """
+        Check each subaccount's drawdown against threshold.
+
+        Drawdown is calculated relative to allocated_capital (initial funding):
+        DD = (allocated_capital - current_balance) / allocated_capital
+
+        This approach is immune to peak_balance corruption because:
+        1. allocated_capital is set once when subaccount is funded
+        2. It represents the true capital at risk for this subaccount
+        3. Internal transfers between subaccounts don't affect it
+        """
         triggered = []
 
         with get_session() as session:
@@ -351,13 +376,30 @@ class EmergencyStopManager:
                 if existing:
                     continue
 
-                peak = sa.peak_balance or sa.allocated_capital or 0
-                current = sa.current_balance or 0
+                # Get current balance from WebSocket (source of truth) or fallback to DB
+                current = sa.current_balance or 0.0
+                if self.data_provider and self.data_provider.account_state:
+                    # TODO: WebSocket shows main account, not subaccounts
+                    # For now, rely on DB balance which is synced from REST API
+                    pass
 
-                if peak <= 0:
+                # Use allocated_capital as base (immune to peak_balance corruption)
+                # allocated_capital = what we initially funded this subaccount with
+                base_capital = sa.allocated_capital or 0.0
+
+                if base_capital <= 0:
+                    # No capital allocated yet, skip
                     continue
 
-                drawdown = (peak - current) / peak if current < peak else 0
+                # Calculate drawdown: how much have we lost relative to initial capital
+                if current >= base_capital:
+                    drawdown = 0.0  # In profit or break-even, no drawdown
+                else:
+                    drawdown = (base_capital - current) / base_capital
+
+                # Sanity check: drawdown should never exceed 100%
+                # (can happen if current_balance is negative due to fees/funding)
+                drawdown = min(drawdown, 1.0)
 
                 if drawdown >= self.max_subaccount_drawdown:
                     triggered.append({

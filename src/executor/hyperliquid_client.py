@@ -1590,9 +1590,27 @@ class HyperliquidClient:
                     record["amount"] = float(delta.get("usdc", 0))
                     record["direction"] = "out"  # Liquidation is always a loss
                     record["liquidated_positions"] = delta.get("leverageType", "")
+                elif delta_type == "send":
+                    # "send" type for inter-account transfers
+                    # Direction determined by comparing user/destination with subaccount address
+                    # Amount is in "amount" or "usdcValue" field
+                    amount = float(delta.get("amount", 0) or delta.get("usdcValue", 0) or 0)
+                    record["amount"] = amount
+                    destination = delta.get("destination", "").lower()
+                    user = delta.get("user", "").lower()
+                    subaccount_addr = address.lower()
+
+                    if destination == subaccount_addr:
+                        record["direction"] = "in"  # Money coming INTO this subaccount
+                    elif user == subaccount_addr:
+                        record["direction"] = "out"  # Money leaving this subaccount
+                    else:
+                        record["direction"] = "unknown"  # Neither, shouldn't happen
                 else:
-                    # Unknown type, try to extract usdc
-                    record["amount"] = float(delta.get("usdc", 0)) if "usdc" in delta else 0
+                    # Unknown type, try to extract usdc or amount
+                    record["amount"] = float(
+                        delta.get("usdc", 0) or delta.get("amount", 0) or delta.get("usdcValue", 0) or 0
+                    )
                     record["direction"] = "unknown"
 
                 records.append(record)

@@ -188,8 +188,14 @@ class ContinuousExecutorProcess:
         # Start trailing service
         await self.trailing_service.start()
 
+        # Heartbeat tracking (log every 60s using WebSocket data)
+        last_heartbeat = datetime.now(UTC)
+        heartbeat_interval = 60  # seconds
+
         while not self.shutdown_event.is_set() and not self.force_exit:
             try:
+                loop_start = datetime.now(UTC)
+
                 # Check emergency conditions (throttled internally to every 60s)
                 triggered_stops = self.emergency_manager.check_all_conditions()
                 for stop in triggered_stops:
@@ -204,19 +210,23 @@ class ContinuousExecutorProcess:
                 # Get active subaccounts with LIVE strategies
                 active_subaccounts = self._get_active_subaccounts()
 
-                if not active_subaccounts:
-                    await asyncio.sleep(self.check_interval_seconds)
-                    continue
+                if active_subaccounts:
+                    # Update trailing stops with current prices
+                    await self._update_trailing_prices()
 
-                # Update trailing stops with current prices
-                await self._update_trailing_prices()
+                    # Check TIME_BASED exits
+                    await self._check_time_based_exits(active_subaccounts)
 
-                # Check TIME_BASED exits
-                await self._check_time_based_exits(active_subaccounts)
+                    # Process each subaccount
+                    for subaccount in active_subaccounts:
+                        await self._process_subaccount(subaccount)
 
-                # Process each subaccount
-                for subaccount in active_subaccounts:
-                    await self._process_subaccount(subaccount)
+                # Heartbeat log (every 60s) - ALWAYS runs (Rule #4b: WebSocket data)
+                now = datetime.now(UTC)
+                loop_duration = (now - loop_start).total_seconds()
+                if (now - last_heartbeat).total_seconds() >= heartbeat_interval:
+                    last_heartbeat = now
+                    self._log_heartbeat(len(active_subaccounts), loop_duration)
 
             except Exception as e:
                 logger.error(f"Execution cycle error: {e}", exc_info=True)
@@ -287,6 +297,56 @@ class ContinuousExecutorProcess:
                     )
 
             session.commit()
+
+    def _log_heartbeat(self, active_subaccounts_count: int, loop_duration: float = 0.0) -> None:
+        """
+        Log heartbeat with WebSocket data (Rule #4b: WebSocket First).
+
+        Shows real-time data from Hyperliquid WebSocket:
+        - Account balance and positions from webData2
+        - Price feed status from allMids
+        - Data freshness from last update timestamp
+        """
+        try:
+            # Get WebSocket data (from account_state object)
+            mid_prices_count = len(self.data_provider.mid_prices)
+            account_state = self.data_provider.account_state
+
+            if account_state:
+                positions = account_state.positions or []
+                account_value = account_state.account_value or 0.0
+                # Sum unrealized P&L from all positions
+                unrealized_pnl = sum(p.unrealized_pnl for p in positions)
+            else:
+                positions = []
+                account_value = 0.0
+                unrealized_pnl = 0.0
+
+            # Check data freshness
+            last_update = self.data_provider.last_webdata2_update
+            if last_update:
+                if last_update.tzinfo is None:
+                    last_update = last_update.replace(tzinfo=UTC)
+                data_age = (datetime.now(UTC) - last_update).total_seconds()
+                freshness = "FRESH" if data_age < 30 else f"STALE({data_age:.0f}s)"
+            else:
+                freshness = "NO_DATA"
+
+            # Format positions summary
+            pos_count = len(positions)
+            pos_summary = f"{pos_count} pos"
+            if pos_count > 0:
+                symbols = [p.coin for p in positions[:3]]
+                pos_summary = f"{pos_count} pos ({','.join(symbols)}{'...' if pos_count > 3 else ''})"
+
+            logger.info(
+                f"[HEARTBEAT] {active_subaccounts_count} subs | "
+                f"${account_value:.2f} ({'+' if unrealized_pnl >= 0 else ''}{unrealized_pnl:.2f} uPnL) | "
+                f"{pos_summary} | {mid_prices_count} prices | WS:{freshness} | loop:{loop_duration:.1f}s"
+            )
+
+        except Exception as e:
+            logger.warning(f"[HEARTBEAT] Error getting WebSocket data: {e}")
 
     def _get_active_subaccounts(self) -> List[Dict]:
         """Get all active subaccounts with their strategies"""

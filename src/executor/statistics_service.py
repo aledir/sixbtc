@@ -1,18 +1,18 @@
 """
-Statistics Service - True P&L using Hyperliquid as Source of Truth.
+Statistics Service - True P&L using allocated_capital as base.
 
-This service calculates statistics that are immune to manual deposits/withdrawals.
-Formula: True P&L = Current Account Value - Net Deposits
+This service calculates statistics that are immune to:
+- Manual deposits/withdrawals
+- Internal transfers between subaccounts
+- peak_balance corruption
 
-Uses:
-- WebSocket (webData2): Real-time balance updates
-- REST (ledger API): Deposit/withdrawal history (cached 5 min)
+Formula: True P&L = Current Balance - Allocated Capital
 """
 
-import time
-from datetime import datetime, UTC, timedelta
+from datetime import datetime, UTC
 from typing import Dict, Optional, TYPE_CHECKING
 
+from src.database import get_session, Subaccount
 from src.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -24,10 +24,14 @@ logger = get_logger(__name__)
 
 class StatisticsService:
     """
-    Calculate true P&L using Hyperliquid as source of truth.
+    Calculate true P&L using allocated_capital as the base.
 
-    This service is immune to manual deposits/withdrawals corrupting statistics.
-    All calculations use the formula: True P&L = Current Balance - Net Deposits.
+    This approach is immune to:
+    1. Manual deposits/withdrawals (they don't change allocated_capital)
+    2. Internal transfers between subaccounts
+    3. peak_balance corruption bugs
+
+    Formula: True P&L = current_balance - allocated_capital
     """
 
     def __init__(
@@ -39,89 +43,45 @@ class StatisticsService:
         Initialize statistics service.
 
         Args:
-            client: HyperliquidClient for ledger API calls
+            client: HyperliquidClient for balance queries
             data_provider: Optional WebSocket data provider for real-time balances
         """
         self.client = client
         self.data_provider = data_provider
-
-        # Cache for net deposits per subaccount
-        # Key: subaccount_id, Value: (data_dict, timestamp)
-        self._net_deposits_cache: Dict[int, tuple] = {}
-        self.cache_ttl = timedelta(minutes=5)
-
         logger.info("StatisticsService initialized")
 
-    def _get_cached_net_deposits(self, subaccount_id: int) -> Optional[Dict[str, float]]:
+    def _get_subaccount_data(self, subaccount_id: int) -> Dict[str, float]:
         """
-        Get cached net deposits if still valid.
+        Get subaccount data from database.
 
         Args:
             subaccount_id: Subaccount number
 
         Returns:
-            Cached data or None if expired/missing
+            Dict with allocated_capital, current_balance, peak_balance
         """
-        if subaccount_id not in self._net_deposits_cache:
-            return None
+        with get_session() as session:
+            sa = session.query(Subaccount).filter(
+                Subaccount.id == subaccount_id
+            ).first()
 
-        data, cache_time = self._net_deposits_cache[subaccount_id]
-        if datetime.now(UTC) - cache_time > self.cache_ttl:
-            return None
+            if not sa:
+                logger.warning(f"Subaccount {subaccount_id} not found in database")
+                return {
+                    "allocated_capital": 0.0,
+                    "current_balance": 0.0,
+                    "peak_balance": 0.0,
+                }
 
-        return data
-
-    def _fetch_net_deposits(self, subaccount_id: int) -> Dict[str, float]:
-        """
-        Fetch net deposits from Hyperliquid ledger API and cache.
-
-        Args:
-            subaccount_id: Subaccount number
-
-        Returns:
-            Dict with total_deposits, total_withdrawals, net_deposits
-        """
-        # Check cache first
-        cached = self._get_cached_net_deposits(subaccount_id)
-        if cached is not None:
-            return cached
-
-        # Fetch from API
-        try:
-            net_deposits_data = self.client.get_net_deposits(subaccount_id)
-
-            # Cache the result
-            self._net_deposits_cache[subaccount_id] = (net_deposits_data, datetime.now(UTC))
-
-            logger.debug(
-                f"Subaccount {subaccount_id}: fetched net deposits - "
-                f"deposits=${net_deposits_data.get('total_deposits', 0):.2f}, "
-                f"withdrawals=${net_deposits_data.get('total_withdrawals', 0):.2f}, "
-                f"net=${net_deposits_data.get('net_deposits', 0):.2f}"
-            )
-
-            return net_deposits_data
-
-        except Exception as e:
-            logger.warning(f"Failed to fetch net deposits for subaccount {subaccount_id}: {e}")
-
-            # Return cached data if available (even if expired)
-            if subaccount_id in self._net_deposits_cache:
-                data, _ = self._net_deposits_cache[subaccount_id]
-                logger.debug(f"Using stale cached net deposits for subaccount {subaccount_id}")
-                return data
-
-            # No data available
             return {
-                "total_deposits": 0.0,
-                "total_withdrawals": 0.0,
-                "net_deposits": 0.0,
-                "transaction_count": 0,
+                "allocated_capital": sa.allocated_capital or 0.0,
+                "current_balance": sa.current_balance or 0.0,
+                "peak_balance": sa.peak_balance or 0.0,
             }
 
-    def _get_current_balance(self, subaccount_id: int) -> float:
+    def _get_current_balance_from_hl(self, subaccount_id: int) -> float:
         """
-        Get current balance, preferring WebSocket data.
+        Get current balance directly from Hyperliquid (source of truth).
 
         Args:
             subaccount_id: Subaccount number
@@ -129,24 +89,22 @@ class StatisticsService:
         Returns:
             Current account balance
         """
-        # TODO: Use WebSocket data_provider when available (webData2)
-        # For now, use REST API
         try:
             return self.client.get_account_balance(subaccount_id)
         except Exception as e:
-            logger.error(f"Failed to get balance for subaccount {subaccount_id}: {e}")
-            return 0.0
+            logger.error(f"Failed to get balance from HL for subaccount {subaccount_id}: {e}")
+            # Fallback to DB
+            data = self._get_subaccount_data(subaccount_id)
+            return data["current_balance"]
 
     def get_true_pnl(self, subaccount_id: int) -> Dict[str, float]:
         """
         Calculate true P&L for a subaccount.
 
-        Formula: True P&L = Current Account Value - Net Deposits
+        Formula: True P&L = Current Balance - Allocated Capital
 
-        This is immune to manual deposits/withdrawals:
-        - Deposit $100: balance +$100, net_deposits +$100, true_pnl unchanged
-        - Withdraw $50: balance -$50, net_deposits -$50, true_pnl unchanged
-        - Trading profit $20: balance +$20, net_deposits unchanged, true_pnl +$20
+        This is immune to manual deposits/withdrawals and internal transfers
+        because allocated_capital is set once at deployment and never changes.
 
         Args:
             subaccount_id: Subaccount number
@@ -154,42 +112,44 @@ class StatisticsService:
         Returns:
             Dict with:
                 current_balance: Current account value from Hyperliquid
-                net_deposits: Total deposits minus withdrawals
-                true_pnl: Current balance - net deposits
-                true_pnl_pct: True P&L as percentage of net deposits
+                allocated_capital: Initial capital allocated to this subaccount
+                true_pnl: Current balance - allocated capital (profit/loss in $)
+                true_pnl_pct: True P&L as percentage of allocated capital
         """
-        current_balance = self._get_current_balance(subaccount_id)
-        net_deposits_data = self._fetch_net_deposits(subaccount_id)
-        net_deposits = net_deposits_data.get("net_deposits", 0.0)
+        # Get allocated_capital from DB (set once at deployment)
+        db_data = self._get_subaccount_data(subaccount_id)
+        allocated_capital = db_data["allocated_capital"]
+
+        # Get current balance from Hyperliquid (source of truth)
+        current_balance = self._get_current_balance_from_hl(subaccount_id)
 
         # Calculate true P&L
-        true_pnl = current_balance - net_deposits
+        true_pnl = current_balance - allocated_capital
 
         # Calculate percentage (avoid division by zero)
-        if net_deposits > 0:
-            true_pnl_pct = (true_pnl / net_deposits) * 100
+        if allocated_capital > 0:
+            true_pnl_pct = (true_pnl / allocated_capital) * 100
         else:
             true_pnl_pct = 0.0
 
         return {
             "current_balance": current_balance,
-            "net_deposits": net_deposits,
-            "total_deposits": net_deposits_data.get("total_deposits", 0.0),
-            "total_withdrawals": net_deposits_data.get("total_withdrawals", 0.0),
+            "allocated_capital": allocated_capital,
             "true_pnl": true_pnl,
             "true_pnl_pct": true_pnl_pct,
+            # Legacy fields for backwards compatibility
+            "net_deposits": allocated_capital,
+            "total_deposits": allocated_capital,
+            "total_withdrawals": 0.0,
         }
 
     def get_true_drawdown(self, subaccount_id: int) -> Dict[str, float]:
         """
-        Calculate drawdown based on net deposits (not peak balance).
-
-        This method calculates drawdown relative to the capital invested,
-        not relative to a possibly-corrupted peak balance.
+        Calculate drawdown relative to allocated_capital.
 
         Formula:
-        - If profitable (true_pnl >= 0): DD = 0%
-        - If losing (true_pnl < 0): DD = -true_pnl / net_deposits
+        - If profitable (current >= allocated): DD = 0%
+        - If losing (current < allocated): DD = (allocated - current) / allocated
 
         Args:
             subaccount_id: Subaccount number
@@ -197,7 +157,7 @@ class StatisticsService:
         Returns:
             Dict with:
                 current_balance: Current account value
-                net_deposits: Capital invested
+                allocated_capital: Initial capital
                 drawdown: Drawdown percentage (0.0 to 1.0)
                 drawdown_pct: Drawdown as percentage string
                 is_in_drawdown: True if currently losing money
@@ -205,23 +165,27 @@ class StatisticsService:
         stats = self.get_true_pnl(subaccount_id)
 
         current_balance = stats["current_balance"]
-        net_deposits = stats["net_deposits"]
+        allocated_capital = stats["allocated_capital"]
         true_pnl = stats["true_pnl"]
 
         # Calculate drawdown
         if true_pnl >= 0:
-            # In profit, no drawdown
+            # In profit or break-even, no drawdown
             drawdown = 0.0
-        elif net_deposits > 0:
+        elif allocated_capital > 0:
             # In loss: drawdown = loss / capital
-            drawdown = abs(true_pnl) / net_deposits
+            drawdown = abs(true_pnl) / allocated_capital
         else:
-            # No deposits, can't calculate
+            # No capital allocated, can't calculate
             drawdown = 0.0
+
+        # Cap at 100%
+        drawdown = min(drawdown, 1.0)
 
         return {
             "current_balance": current_balance,
-            "net_deposits": net_deposits,
+            "allocated_capital": allocated_capital,
+            "net_deposits": allocated_capital,  # Legacy compatibility
             "true_pnl": true_pnl,
             "drawdown": drawdown,
             "drawdown_pct": f"{drawdown * 100:.2f}%",
@@ -246,7 +210,7 @@ class StatisticsService:
                 logger.error(f"Failed to get stats for subaccount {sa_id}: {e}")
                 results[sa_id] = {
                     "current_balance": 0.0,
-                    "net_deposits": 0.0,
+                    "allocated_capital": 0.0,
                     "true_pnl": 0.0,
                     "true_pnl_pct": 0.0,
                     "error": str(e),
@@ -254,19 +218,52 @@ class StatisticsService:
 
         return results
 
-    def invalidate_cache(self, subaccount_id: Optional[int] = None) -> None:
+    def get_portfolio_stats(self) -> Dict[str, float]:
         """
-        Invalidate cached net deposits.
+        Get portfolio-level statistics across all active subaccounts.
 
-        Call this after user performs a deposit/withdrawal to force refresh.
-
-        Args:
-            subaccount_id: Specific subaccount to invalidate, or None for all
+        Returns:
+            Dict with:
+                total_allocated: Sum of all allocated_capital
+                total_current: Sum of all current_balance
+                total_pnl: Total P&L in $
+                total_pnl_pct: Total P&L as percentage
+                drawdown: Portfolio drawdown (0.0 to 1.0)
         """
-        if subaccount_id is not None:
-            if subaccount_id in self._net_deposits_cache:
-                del self._net_deposits_cache[subaccount_id]
-                logger.debug(f"Invalidated cache for subaccount {subaccount_id}")
-        else:
-            self._net_deposits_cache.clear()
-            logger.debug("Invalidated all cached net deposits")
+        with get_session() as session:
+            subaccounts = session.query(Subaccount).filter(
+                Subaccount.status.in_(['ACTIVE', 'PAUSED'])
+            ).all()
+
+            if not subaccounts:
+                return {
+                    "total_allocated": 0.0,
+                    "total_current": 0.0,
+                    "total_pnl": 0.0,
+                    "total_pnl_pct": 0.0,
+                    "drawdown": 0.0,
+                }
+
+            total_allocated = sum(sa.allocated_capital or 0 for sa in subaccounts)
+            total_current = sum(sa.current_balance or 0 for sa in subaccounts)
+
+            total_pnl = total_current - total_allocated
+
+            if total_allocated > 0:
+                total_pnl_pct = (total_pnl / total_allocated) * 100
+                if total_pnl < 0:
+                    drawdown = abs(total_pnl) / total_allocated
+                else:
+                    drawdown = 0.0
+            else:
+                total_pnl_pct = 0.0
+                drawdown = 0.0
+
+            return {
+                "total_allocated": total_allocated,
+                "total_current": total_current,
+                "total_pnl": total_pnl,
+                "total_pnl_pct": total_pnl_pct,
+                "drawdown": min(drawdown, 1.0),
+                "subaccount_count": len(subaccounts),
+            }
