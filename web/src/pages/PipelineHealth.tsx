@@ -1,48 +1,63 @@
 import { useState } from 'react';
 import {
-  usePipelineHealth,
-  useQualityDistribution,
+  useMetricsSnapshot,
   useMetricsAlerts,
-  useMetricsAggregated,
   useMetricsTimeseries,
 } from '../hooks/useApi';
-import { useTheme } from '../contexts/ThemeContext';
 import type {
-  PipelineStageHealth,
-  QualityDistributionResponse,
   MetricAlert,
-  MetricsAggregatedResponse,
   MetricsPeriod,
   MetricsType,
+  MetricsSnapshotResponse,
   QueueDepthsDataPoint,
   ThroughputDataPoint,
-  QualityDataPoint,
-  UtilizationDataPoint,
-  SuccessRatesDataPoint
 } from '../types';
-import { Activity, AlertTriangle, ArrowRight, Bell, Clock, TrendingUp, Gauge, BarChart3, Zap, CheckCircle } from 'lucide-react';
 import {
-  BarChart, Bar, LineChart, Line, AreaChart, Area,
-  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend
+  Activity,
+  AlertTriangle,
+  ArrowDown,
+  Bell,
+  Clock,
+  TrendingUp,
+  BarChart3,
+  Zap,
+  CheckCircle,
+  XCircle,
+  Filter,
+  Shuffle,
+  TestTube,
+  Database,
+  Play,
+} from 'lucide-react';
+import {
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  CartesianGrid,
+  Legend,
+  Cell,
 } from 'recharts';
 
 // === Utility Functions ===
 
-function getStatusColor(status: string): string {
-  const colors: Record<string, string> = {
-    'healthy': 'bg-[var(--color-profit)]',
-    'backpressure': 'bg-[var(--color-warning)]',
-    'stalled': 'bg-[var(--color-loss)]',
-    'error': 'bg-[var(--color-loss)]',
-    'degraded': 'bg-[var(--color-warning)]',
-    'critical': 'bg-[var(--color-loss)]',
-  };
-  return colors[status] || 'bg-[var(--color-text-tertiary)]';
-}
-
-
 function formatTimestamp(ts: string): string {
   return new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+}
+
+function formatNumber(n: number | null | undefined): string {
+  if (n === null || n === undefined) return '-';
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return n.toFixed(n < 10 ? 1 : 0);
+}
+
+function formatPct(n: number | null | undefined): string {
+  if (n === null || n === undefined) return '-';
+  return `${(n * 100).toFixed(1)}%`;
 }
 
 // === Components ===
@@ -124,89 +139,293 @@ function PeriodSelector({ value, onChange }: { value: MetricsPeriod; onChange: (
   );
 }
 
-function MetricTypeSelector({ value, onChange }: { value: MetricsType; onChange: (metric: MetricsType) => void }) {
-  const metrics: { key: MetricsType; label: string; icon: React.ReactNode }[] = [
-    { key: 'queue_depths', label: 'Queues', icon: <BarChart3 className="w-4 h-4" /> },
-    { key: 'throughput', label: 'Throughput', icon: <TrendingUp className="w-4 h-4" /> },
-    { key: 'quality', label: 'Quality', icon: <Zap className="w-4 h-4" /> },
-    { key: 'utilization', label: 'Utilization', icon: <Gauge className="w-4 h-4" /> },
-    { key: 'success_rates', label: 'Success', icon: <CheckCircle className="w-4 h-4" /> },
+// Full 10-step pipeline funnel
+function PipelineFunnel({ snapshot }: { snapshot: MetricsSnapshotResponse }) {
+  const { funnel, failures } = snapshot;
+
+  // Define all 10 pipeline stages
+  const stages = [
+    { key: 'generated', label: 'Generated', value: funnel.generated, icon: Zap, color: '#6b7280' },
+    { key: 'validated', label: 'Validated', value: funnel.validated, failed: funnel.validation_failed, icon: CheckCircle, color: '#3b82f6' },
+    { key: 'combinations', label: 'Parametric', value: funnel.combinations_tested, icon: BarChart3, color: '#8b5cf6' },
+    { key: 'is_passed', label: 'IS Backtest', value: funnel.is_passed, icon: TrendingUp, color: '#06b6d4' },
+    { key: 'oos_passed', label: 'OOS Backtest', value: funnel.oos_passed, icon: TrendingUp, color: '#0891b2' },
+    { key: 'score_passed', label: 'Score Filter', value: funnel.score_passed, failed: failures.score_reject, icon: Filter, color: '#f59e0b' },
+    { key: 'shuffle_passed', label: 'Shuffle Test', value: funnel.shuffle_passed, failed: failures.shuffle_fail, icon: Shuffle, color: '#10b981' },
+    { key: 'mw_passed', label: 'Multi-Window', value: funnel.multi_window_passed, failed: failures.mw_fail, icon: TestTube, color: '#14b8a6' },
+    { key: 'robustness', label: 'Robustness', value: funnel.robustness_passed, icon: Database, color: '#22c55e' },
+    { key: 'live', label: 'LIVE', value: funnel.live, icon: Play, color: '#10b981' },
   ];
 
+  // Calculate conversion rates
+  const maxValue = Math.max(...stages.map(s => s.value), 1);
+
   return (
-    <div className="flex flex-wrap gap-2">
-      {metrics.map(m => (
-        <button
-          key={m.key}
-          onClick={() => onChange(m.key)}
-          className={`btn ${value === m.key ? 'btn-primary' : 'btn-ghost'} text-xs px-2 py-1`}
-        >
-          {m.icon}
-          <span className="hide-mobile">{m.label}</span>
-        </button>
-      ))}
+    <div className="space-y-2">
+      {stages.map((stage, i) => {
+        const Icon = stage.icon;
+        const widthPct = Math.max((stage.value / maxValue) * 100, 5);
+        const prevValue = i > 0 ? stages[i - 1].value : stage.value;
+        const conversionRate = prevValue > 0 ? (stage.value / prevValue) * 100 : 100;
+        const isLast = i === stages.length - 1;
+
+        return (
+          <div key={stage.key}>
+            <div className="flex items-center gap-3">
+              <div className="w-24 flex items-center gap-2 text-sm">
+                <Icon className="w-4 h-4" style={{ color: stage.color }} />
+                <span className="text-[var(--color-text-secondary)] truncate">{stage.label}</span>
+              </div>
+              <div className="flex-1">
+                <div className="h-8 bg-[var(--color-bg-secondary)] rounded-lg overflow-hidden relative">
+                  <div
+                    className="h-full rounded-lg transition-all duration-500"
+                    style={{ width: `${widthPct}%`, backgroundColor: stage.color }}
+                  />
+                  <div className="absolute inset-0 flex items-center justify-between px-3">
+                    <span className="text-sm font-mono font-medium text-white drop-shadow-sm">
+                      {formatNumber(stage.value)}
+                    </span>
+                    {stage.failed !== undefined && stage.failed > 0 && (
+                      <span className="text-xs text-[var(--color-loss)] bg-[var(--color-bg-primary)]/80 px-1 rounded">
+                        -{stage.failed}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="w-16 text-right">
+                {i > 0 && (
+                  <span className={`text-xs font-mono ${
+                    conversionRate >= 80 ? 'text-[var(--color-profit)]' :
+                    conversionRate >= 50 ? 'text-[var(--color-warning)]' :
+                    'text-[var(--color-loss)]'
+                  }`}>
+                    {conversionRate.toFixed(0)}%
+                  </span>
+                )}
+              </div>
+            </div>
+            {!isLast && (
+              <div className="flex justify-center py-1">
+                <ArrowDown className="w-4 h-4 text-[var(--color-text-tertiary)]" />
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-function AggregatedKPICards({ data }: { data: MetricsAggregatedResponse }) {
+// Real-time KPI cards from snapshot
+function RealtimeKPIs({ snapshot }: { snapshot: MetricsSnapshotResponse }) {
+  const { throughput, timing, pool, live } = snapshot;
+
   const kpis = [
     {
-      label: 'Avg Queue',
-      value: Math.round(data.queue_depths.avg_generated + data.queue_depths.avg_validated + data.queue_depths.avg_active),
-      detail: `G:${data.queue_depths.avg_generated.toFixed(0)} V:${data.queue_depths.avg_validated.toFixed(0)}`,
+      label: 'Generated/24h',
+      value: throughput.generated,
+      icon: Zap,
     },
     {
-      label: 'Max Util',
-      value: `${(Math.max(data.utilization.max_generated, data.utilization.max_validated, data.utilization.max_active) * 100).toFixed(0)}%`,
-      warning: Math.max(data.utilization.max_generated, data.utilization.max_validated, data.utilization.max_active) > 0.9,
+      label: 'Validated/24h',
+      value: throughput.validated,
+      icon: CheckCircle,
     },
     {
-      label: 'Avg Sharpe',
-      value: data.quality.avg_sharpe?.toFixed(2) ?? '-',
-      profit: data.quality.avg_sharpe && data.quality.avg_sharpe >= 1.0,
+      label: 'Backtested/24h',
+      value: throughput.backtested,
+      icon: TrendingUp,
     },
     {
-      label: 'Win Rate',
-      value: data.quality.avg_win_rate ? `${(data.quality.avg_win_rate * 100).toFixed(1)}%` : '-',
-      profit: data.quality.avg_win_rate && data.quality.avg_win_rate >= 0.55,
+      label: 'Pool Size',
+      value: `${pool.size}/${pool.limit}`,
+      icon: Database,
+      warning: pool.size >= pool.limit * 0.9,
+    },
+    {
+      label: 'Live Strategies',
+      value: live.count,
+      icon: Play,
+      profit: live.count > 0,
+    },
+    {
+      label: 'Avg BT Time',
+      value: timing.backtesting ? `${(timing.backtesting / 1000).toFixed(1)}s` : '-',
+      icon: Clock,
+    },
+  ];
+
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+      {kpis.map((kpi, i) => {
+        const Icon = kpi.icon;
+        return (
+          <div key={i} className="card p-3">
+            <div className="flex items-center gap-2 mb-1">
+              <Icon className="w-4 h-4 text-[var(--color-text-tertiary)]" />
+              <span className="text-xs text-[var(--color-text-tertiary)]">{kpi.label}</span>
+            </div>
+            <div className={`text-lg font-mono font-semibold ${
+              kpi.warning ? 'text-[var(--color-warning)]' :
+              kpi.profit ? 'text-[var(--color-profit)]' :
+              'text-[var(--color-text-primary)]'
+            }`}>
+              {typeof kpi.value === 'number' ? formatNumber(kpi.value) : kpi.value}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Queue depths visualization
+function QueueDepths({ snapshot }: { snapshot: MetricsSnapshotResponse }) {
+  const { queue_depths, backpressure } = snapshot;
+
+  const queues = [
+    { name: 'Generated', value: queue_depths.generated ?? 0, limit: backpressure.gen_limit, color: '#6b7280' },
+    { name: 'Validated', value: queue_depths.validated ?? 0, limit: backpressure.val_limit, color: '#3b82f6' },
+    { name: 'BT Waiting', value: backpressure.bt_waiting, limit: 100, color: '#8b5cf6' },
+    { name: 'BT Running', value: backpressure.bt_processing, limit: 10, color: '#06b6d4' },
+    { name: 'Active', value: queue_depths.active ?? 0, limit: 300, color: '#10b981' },
+    { name: 'Live', value: queue_depths.live ?? 0, limit: 30, color: '#22c55e' },
+  ];
+
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+      {queues.map(q => {
+        const pct = q.limit > 0 ? (q.value / q.limit) * 100 : 0;
+        const isFull = pct >= 90;
+        return (
+          <div key={q.name} className="card p-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs text-[var(--color-text-tertiary)]">{q.name}</span>
+              <span className={`text-xs font-mono ${isFull ? 'text-[var(--color-warning)]' : 'text-[var(--color-text-secondary)]'}`}>
+                {q.value}/{q.limit}
+              </span>
+            </div>
+            <div className="h-2 bg-[var(--color-bg-secondary)] rounded-full overflow-hidden">
+              <div
+                className="h-full rounded-full transition-all"
+                style={{ width: `${Math.min(pct, 100)}%`, backgroundColor: isFull ? 'var(--color-warning)' : q.color }}
+              />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Failure analysis
+function FailureAnalysis({ snapshot }: { snapshot: MetricsSnapshotResponse }) {
+  const { failures, is_backtest, oos_backtest, robustness } = snapshot;
+
+  // Combine all failure reasons
+  const failureData = [
+    { stage: 'Validation', count: failures.validation, color: '#ef4444' },
+    { stage: 'IS Sharpe', count: is_backtest.fail_reasons?.sharpe ?? 0, color: '#f97316' },
+    { stage: 'IS WinRate', count: is_backtest.fail_reasons?.wr ?? 0, color: '#f59e0b' },
+    { stage: 'IS Trades', count: is_backtest.fail_reasons?.trades ?? 0, color: '#eab308' },
+    { stage: 'OOS Sharpe', count: oos_backtest.fail_reasons?.sharpe ?? 0, color: '#84cc16' },
+    { stage: 'Score', count: failures.score_reject, color: '#22c55e' },
+    { stage: 'Shuffle', count: failures.shuffle_fail, color: '#14b8a6' },
+    { stage: 'Multi-Win', count: failures.mw_fail, color: '#06b6d4' },
+    { stage: 'Robustness', count: robustness.failed, color: '#3b82f6' },
+  ].filter(f => f.count > 0);
+
+  if (failureData.length === 0) {
+    return (
+      <div className="text-center py-8 text-[var(--color-text-tertiary)]">
+        No failures recorded in current period
+      </div>
+    );
+  }
+
+  return (
+    <ResponsiveContainer width="100%" height={250}>
+      <BarChart data={failureData} layout="vertical">
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+        <XAxis type="number" stroke="var(--color-text-tertiary)" fontSize={11} />
+        <YAxis type="category" dataKey="stage" stroke="var(--color-text-tertiary)" fontSize={11} width={80} />
+        <Tooltip
+          contentStyle={{
+            backgroundColor: 'var(--color-bg-secondary)',
+            border: '1px solid var(--color-border)',
+            borderRadius: '8px',
+            fontSize: '12px'
+          }}
+        />
+        <Bar dataKey="count" name="Failures">
+          {failureData.map((entry, index) => (
+            <Cell key={`cell-${index}`} fill={entry.color} />
+          ))}
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+// Backtest quality stats
+function BacktestQuality({ snapshot }: { snapshot: MetricsSnapshotResponse }) {
+  const { is_backtest, oos_backtest, score, pool, robustness } = snapshot;
+
+  const stats = [
+    {
+      label: 'IS Pass Rate',
+      value: is_backtest.count > 0 ? formatPct(is_backtest.passed / is_backtest.count) : '-',
+      detail: `${is_backtest.passed}/${is_backtest.count}`,
+    },
+    {
+      label: 'IS Avg Sharpe',
+      value: is_backtest.passed_avg?.sharpe?.toFixed(2) ?? '-',
+      profit: (is_backtest.passed_avg?.sharpe ?? 0) >= 1.5,
+    },
+    {
+      label: 'OOS Pass Rate',
+      value: oos_backtest.count > 0 ? formatPct(oos_backtest.passed / oos_backtest.count) : '-',
+      detail: `${oos_backtest.passed}/${oos_backtest.count}`,
+    },
+    {
+      label: 'OOS Avg Sharpe',
+      value: oos_backtest.passed_avg?.sharpe?.toFixed(2) ?? '-',
+      profit: (oos_backtest.passed_avg?.sharpe ?? 0) >= 1.0,
+    },
+    {
+      label: 'Score Threshold',
+      value: score.min_score_threshold.toFixed(1),
+    },
+    {
+      label: 'Avg Pool Score',
+      value: pool.score_avg?.toFixed(1) ?? '-',
+    },
+    {
+      label: 'Robustness Avg',
+      value: robustness.pool.avg_robustness?.toFixed(2) ?? '-',
+      profit: (robustness.pool.avg_robustness ?? 0) >= 0.8,
+    },
+    {
+      label: 'Pool Win Rate',
+      value: pool.quality.winrate_avg ? formatPct(pool.quality.winrate_avg) : '-',
+      profit: (pool.quality.winrate_avg ?? 0) >= 0.55,
     },
   ];
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-      {kpis.map((kpi, i) => (
-        <div key={i} className="card">
-          <div className="metric-label">{kpi.label}</div>
-          <div className={`metric-value ${
-            kpi.warning ? 'text-[var(--color-warning)]' : kpi.profit ? 'text-[var(--color-profit)]' : ''
+      {stats.map((stat, i) => (
+        <div key={i} className="text-center">
+          <div className="text-xs text-[var(--color-text-tertiary)] mb-1">{stat.label}</div>
+          <div className={`text-lg font-mono font-semibold ${
+            stat.profit ? 'text-[var(--color-profit)]' : 'text-[var(--color-text-primary)]'
           }`}>
-            {kpi.value}
+            {stat.value}
           </div>
-          {kpi.detail && <div className="text-xs text-[var(--color-text-tertiary)] mt-1">{kpi.detail}</div>}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function PipelineFlowDiagram({ stages }: { stages: PipelineStageHealth[] }) {
-  return (
-    <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
-      {stages.map((stage, i) => (
-        <div key={stage.stage} className="flex flex-col md:flex-row items-center gap-2 md:gap-4 flex-1">
-          <div className="w-full card">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm font-semibold capitalize text-[var(--color-text-primary)]">{stage.stage}</span>
-              <div className={`w-3 h-3 rounded-full ${getStatusColor(stage.status)}`} />
-            </div>
-            <div className="text-xs text-[var(--color-text-tertiary)] space-y-1">
-              <div>Queue: {stage.queue_depth} / {stage.queue_limit}</div>
-              <div>Rate: {stage.processing_rate.toFixed(1)}/h</div>
-            </div>
-          </div>
-          {i < stages.length - 1 && (
-            <ArrowRight className="w-5 h-5 text-[var(--color-text-tertiary)] flex-shrink-0 rotate-90 md:rotate-0" />
+          {stat.detail && (
+            <div className="text-xs text-[var(--color-text-tertiary)]">{stat.detail}</div>
           )}
         </div>
       ))}
@@ -214,64 +433,77 @@ function PipelineFlowDiagram({ stages }: { stages: PipelineStageHealth[] }) {
   );
 }
 
-function StageDetailCard({ stage }: { stage: PipelineStageHealth }) {
+// Source distribution
+function SourceDistribution({ snapshot }: { snapshot: MetricsSnapshotResponse }) {
+  const { generator, pool } = snapshot;
+
+  // Combine generator and pool data by source
+  const sources = Object.keys({ ...generator.by_source, ...pool.by_source });
+  const data = sources.map(source => ({
+    source: source.replace('pattern_gen', 'pgn').replace('pattern', 'pat'),
+    generated: generator.by_source[source] ?? 0,
+    inPool: pool.by_source[source] ?? 0,
+    avgScore: pool.avg_score_by_source[source] ?? null,
+  })).filter(d => d.generated > 0 || d.inPool > 0);
+
+  if (data.length === 0) {
+    return (
+      <div className="text-center py-8 text-[var(--color-text-tertiary)]">
+        No source data available
+      </div>
+    );
+  }
+
   return (
-    <div className="card">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="font-semibold capitalize text-[var(--color-text-primary)]">{stage.stage}</h3>
-        <span className={`badge ${
-          stage.status === 'healthy' ? 'badge-profit' :
-          stage.status === 'backpressure' ? 'badge-warning' : 'badge-loss'
-        }`}>{stage.status}</span>
-      </div>
-      <div className="mb-4">
-        <div className="flex justify-between text-xs mb-1">
-          <span className="text-[var(--color-text-tertiary)]">Queue Utilization</span>
-          <span className="text-[var(--color-text-secondary)]">{stage.queue_depth} / {stage.queue_limit}</span>
-        </div>
-        <div className="h-2 bg-[var(--color-bg-secondary)] rounded-full overflow-hidden">
-          <div
-            className={`h-full ${getStatusColor(stage.status)}`}
-            style={{ width: `${Math.min(stage.utilization_pct, 100)}%` }}
-          />
-        </div>
-        <div className="text-xs text-[var(--color-text-tertiary)] mt-1 text-right">
-          {stage.utilization_pct.toFixed(1)}%
-        </div>
-      </div>
-      <div className="grid grid-cols-2 gap-3 text-sm">
-        <div>
-          <div className="text-xs text-[var(--color-text-tertiary)]">Rate</div>
-          <div className="font-mono text-[var(--color-text-primary)]">{stage.processing_rate.toFixed(1)}/h</div>
-        </div>
-        <div>
-          <div className="text-xs text-[var(--color-text-tertiary)]">Success</div>
-          <div className="font-mono text-[var(--color-text-primary)]">{stage.success_rate.toFixed(1)}%</div>
-        </div>
-        <div>
-          <div className="text-xs text-[var(--color-text-tertiary)]">Last Hour</div>
-          <div className="font-mono text-[var(--color-text-primary)]">{stage.processed_last_hour}</div>
-        </div>
-        <div>
-          <div className="text-xs text-[var(--color-text-tertiary)]">Workers</div>
-          <div className="font-mono text-[var(--color-text-primary)]">{stage.active_workers}/{stage.max_workers}</div>
-        </div>
-      </div>
+    <ResponsiveContainer width="100%" height={250}>
+      <BarChart data={data}>
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+        <XAxis dataKey="source" stroke="var(--color-text-tertiary)" fontSize={11} />
+        <YAxis stroke="var(--color-text-tertiary)" fontSize={11} />
+        <Tooltip
+          contentStyle={{
+            backgroundColor: 'var(--color-bg-secondary)',
+            border: '1px solid var(--color-border)',
+            borderRadius: '8px',
+            fontSize: '12px'
+          }}
+        />
+        <Legend />
+        <Bar dataKey="generated" name="Generated (24h)" fill="#6b7280" />
+        <Bar dataKey="inPool" name="In Pool" fill="#10b981" />
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+// Historical chart selector
+function MetricTypeSelector({ value, onChange }: { value: MetricsType; onChange: (metric: MetricsType) => void }) {
+  const metrics: { key: MetricsType; label: string }[] = [
+    { key: 'queue_depths', label: 'Queues' },
+    { key: 'throughput', label: 'Throughput' },
+  ];
+
+  return (
+    <div className="flex gap-1 bg-[var(--color-bg-secondary)] rounded-lg p-1">
+      {metrics.map(m => (
+        <button
+          key={m.key}
+          onClick={() => onChange(m.key)}
+          className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+            value === m.key
+              ? 'bg-[var(--color-accent-muted)] text-[var(--color-accent)] font-medium'
+              : 'text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]'
+          }`}
+        >
+          {m.label}
+        </button>
+      ))}
     </div>
   );
 }
 
-// Chart components use theme-aware colors
-function TimeseriesChart({ data, type, theme }: { data: any[]; type: MetricsType; theme: string }) {
-  const chartColors = {
-    grid: theme === 'dark' ? '#334155' : '#e2e8f0',
-    axis: theme === 'dark' ? '#64748b' : '#94a3b8',
-    tooltip: {
-      bg: theme === 'dark' ? '#1e293b' : '#ffffff',
-      border: theme === 'dark' ? '#334155' : '#e2e8f0',
-    },
-  };
-
+// Historical timeseries chart
+function TimeseriesChart({ data, type }: { data: any[]; type: MetricsType }) {
   if (type === 'queue_depths') {
     const chartData = data.map((d: QueueDepthsDataPoint) => ({
       time: formatTimestamp(d.timestamp),
@@ -282,12 +514,19 @@ function TimeseriesChart({ data, type, theme }: { data: any[]; type: MetricsType
     }));
 
     return (
-      <ResponsiveContainer width="100%" height={300}>
+      <ResponsiveContainer width="100%" height={250}>
         <LineChart data={chartData}>
-          <CartesianGrid strokeDasharray="3 3" stroke={chartColors.grid} />
-          <XAxis dataKey="time" stroke={chartColors.axis} fontSize={11} />
-          <YAxis stroke={chartColors.axis} fontSize={11} />
-          <Tooltip contentStyle={{ backgroundColor: chartColors.tooltip.bg, border: `1px solid ${chartColors.tooltip.border}`, borderRadius: '8px', fontSize: '12px' }} />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+          <XAxis dataKey="time" stroke="var(--color-text-tertiary)" fontSize={11} />
+          <YAxis stroke="var(--color-text-tertiary)" fontSize={11} />
+          <Tooltip
+            contentStyle={{
+              backgroundColor: 'var(--color-bg-secondary)',
+              border: '1px solid var(--color-border)',
+              borderRadius: '8px',
+              fontSize: '12px'
+            }}
+          />
           <Legend />
           <Line type="monotone" dataKey="Generated" stroke="#6b7280" strokeWidth={2} dot={false} />
           <Line type="monotone" dataKey="Validated" stroke="#3b82f6" strokeWidth={2} dot={false} />
@@ -307,83 +546,21 @@ function TimeseriesChart({ data, type, theme }: { data: any[]; type: MetricsType
     }));
 
     return (
-      <ResponsiveContainer width="100%" height={300}>
+      <ResponsiveContainer width="100%" height={250}>
         <LineChart data={chartData}>
-          <CartesianGrid strokeDasharray="3 3" stroke={chartColors.grid} />
-          <XAxis dataKey="time" stroke={chartColors.axis} fontSize={11} />
-          <YAxis stroke={chartColors.axis} fontSize={11} />
-          <Tooltip contentStyle={{ backgroundColor: chartColors.tooltip.bg, border: `1px solid ${chartColors.tooltip.border}`, borderRadius: '8px', fontSize: '12px' }} />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+          <XAxis dataKey="time" stroke="var(--color-text-tertiary)" fontSize={11} />
+          <YAxis stroke="var(--color-text-tertiary)" fontSize={11} />
+          <Tooltip
+            contentStyle={{
+              backgroundColor: 'var(--color-bg-secondary)',
+              border: '1px solid var(--color-border)',
+              borderRadius: '8px',
+              fontSize: '12px'
+            }}
+          />
           <Legend />
           <Line type="monotone" dataKey="Generation" stroke="#6b7280" strokeWidth={2} dot={false} />
-          <Line type="monotone" dataKey="Validation" stroke="#3b82f6" strokeWidth={2} dot={false} />
-          <Line type="monotone" dataKey="Backtesting" stroke="#10b981" strokeWidth={2} dot={false} />
-        </LineChart>
-      </ResponsiveContainer>
-    );
-  }
-
-  if (type === 'quality') {
-    const chartData = data.map((d: QualityDataPoint) => ({
-      time: formatTimestamp(d.timestamp),
-      Sharpe: d.avg_sharpe ?? 0,
-      'Win Rate': d.avg_win_rate ? d.avg_win_rate * 100 : 0,
-    }));
-
-    return (
-      <ResponsiveContainer width="100%" height={300}>
-        <LineChart data={chartData}>
-          <CartesianGrid strokeDasharray="3 3" stroke={chartColors.grid} />
-          <XAxis dataKey="time" stroke={chartColors.axis} fontSize={11} />
-          <YAxis yAxisId="left" stroke={chartColors.axis} fontSize={11} />
-          <YAxis yAxisId="right" orientation="right" stroke={chartColors.axis} fontSize={11} unit="%" />
-          <Tooltip contentStyle={{ backgroundColor: chartColors.tooltip.bg, border: `1px solid ${chartColors.tooltip.border}`, borderRadius: '8px', fontSize: '12px' }} />
-          <Legend />
-          <Line yAxisId="left" type="monotone" dataKey="Sharpe" stroke="#10b981" strokeWidth={2} dot={false} />
-          <Line yAxisId="right" type="monotone" dataKey="Win Rate" stroke="#3b82f6" strokeWidth={2} dot={false} />
-        </LineChart>
-      </ResponsiveContainer>
-    );
-  }
-
-  if (type === 'utilization') {
-    const chartData = data.map((d: UtilizationDataPoint) => ({
-      time: formatTimestamp(d.timestamp),
-      Generated: (d.generated ?? 0) * 100,
-      Validated: (d.validated ?? 0) * 100,
-      Active: (d.active ?? 0) * 100,
-    }));
-
-    return (
-      <ResponsiveContainer width="100%" height={300}>
-        <AreaChart data={chartData}>
-          <CartesianGrid strokeDasharray="3 3" stroke={chartColors.grid} />
-          <XAxis dataKey="time" stroke={chartColors.axis} fontSize={11} />
-          <YAxis stroke={chartColors.axis} fontSize={11} unit="%" domain={[0, 100]} />
-          <Tooltip contentStyle={{ backgroundColor: chartColors.tooltip.bg, border: `1px solid ${chartColors.tooltip.border}`, borderRadius: '8px', fontSize: '12px' }} formatter={(value) => typeof value === 'number' ? `${value.toFixed(1)}%` : value} />
-          <Legend />
-          <Area type="monotone" dataKey="Generated" stroke="#6b7280" fill="#6b7280" fillOpacity={0.3} />
-          <Area type="monotone" dataKey="Validated" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.3} />
-          <Area type="monotone" dataKey="Active" stroke="#a855f7" fill="#a855f7" fillOpacity={0.3} />
-        </AreaChart>
-      </ResponsiveContainer>
-    );
-  }
-
-  if (type === 'success_rates') {
-    const chartData = data.map((d: SuccessRatesDataPoint) => ({
-      time: formatTimestamp(d.timestamp),
-      Validation: d.validation ? d.validation * 100 : 0,
-      Backtesting: d.backtesting ? d.backtesting * 100 : 0,
-    }));
-
-    return (
-      <ResponsiveContainer width="100%" height={300}>
-        <LineChart data={chartData}>
-          <CartesianGrid strokeDasharray="3 3" stroke={chartColors.grid} />
-          <XAxis dataKey="time" stroke={chartColors.axis} fontSize={11} />
-          <YAxis stroke={chartColors.axis} fontSize={11} unit="%" domain={[0, 100]} />
-          <Tooltip contentStyle={{ backgroundColor: chartColors.tooltip.bg, border: `1px solid ${chartColors.tooltip.border}`, borderRadius: '8px', fontSize: '12px' }} formatter={(value) => typeof value === 'number' ? `${value.toFixed(1)}%` : value} />
-          <Legend />
           <Line type="monotone" dataKey="Validation" stroke="#3b82f6" strokeWidth={2} dot={false} />
           <Line type="monotone" dataKey="Backtesting" stroke="#10b981" strokeWidth={2} dot={false} />
         </LineChart>
@@ -394,51 +571,17 @@ function TimeseriesChart({ data, type, theme }: { data: any[]; type: MetricsType
   return null;
 }
 
-function QualityDistributionChart({ data, theme }: { data: QualityDistributionResponse; theme: string }) {
-  const chartColors = {
-    grid: theme === 'dark' ? '#334155' : '#e2e8f0',
-    axis: theme === 'dark' ? '#64748b' : '#94a3b8',
-    tooltip: { bg: theme === 'dark' ? '#1e293b' : '#ffffff', border: theme === 'dark' ? '#334155' : '#e2e8f0' },
-  };
-
-  const chartData = data.distributions.map(dist => {
-    const bucketData: any = { stage: dist.stage };
-    dist.buckets.forEach(bucket => { bucketData[bucket.range] = bucket.count; });
-    return bucketData;
-  });
-
-  return (
-    <ResponsiveContainer width="100%" height={250}>
-      <BarChart data={chartData}>
-        <CartesianGrid strokeDasharray="3 3" stroke={chartColors.grid} />
-        <XAxis dataKey="stage" stroke={chartColors.axis} fontSize={11} />
-        <YAxis stroke={chartColors.axis} fontSize={11} />
-        <Tooltip contentStyle={{ backgroundColor: chartColors.tooltip.bg, border: `1px solid ${chartColors.tooltip.border}`, borderRadius: '8px', fontSize: '12px' }} />
-        <Legend />
-        <Bar dataKey="0-20" stackId="a" fill="#ef4444" />
-        <Bar dataKey="20-40" stackId="a" fill="#f97316" />
-        <Bar dataKey="40-60" stackId="a" fill="#eab308" />
-        <Bar dataKey="60-80" stackId="a" fill="#84cc16" />
-        <Bar dataKey="80-100" stackId="a" fill="#22c55e" />
-      </BarChart>
-    </ResponsiveContainer>
-  );
-}
-
 // === Main Page ===
 
 export default function PipelineHealth() {
-  const { theme } = useTheme();
   const [period, setPeriod] = useState<MetricsPeriod>('24h');
   const [activeMetric, setActiveMetric] = useState<MetricsType>('throughput');
 
-  const { data: health, isLoading: healthLoading, error: healthError } = usePipelineHealth();
-  const { data: quality } = useQualityDistribution();
+  const { data: snapshot, isLoading: snapshotLoading, error: snapshotError } = useMetricsSnapshot();
   const { data: alerts } = useMetricsAlerts();
-  const { data: aggregated } = useMetricsAggregated({ period });
   const { data: timeseries } = useMetricsTimeseries({ period, metric: activeMetric });
 
-  if (healthLoading) {
+  if (snapshotLoading) {
     return (
       <div className="flex items-center justify-center h-64">
         <Activity className="w-8 h-8 animate-spin text-[var(--color-text-tertiary)]" />
@@ -446,27 +589,39 @@ export default function PipelineHealth() {
     );
   }
 
-  if (healthError) {
+  if (snapshotError || !snapshot) {
     return (
       <div className="card border-[var(--color-loss)]/20 bg-[var(--color-loss-bg)]">
         <div className="text-center py-8">
-          <p className="text-[var(--color-loss)] font-medium">Failed to load pipeline health</p>
+          <XCircle className="w-12 h-12 text-[var(--color-loss)] mx-auto mb-3" />
+          <p className="text-[var(--color-loss)] font-medium">Failed to load pipeline metrics</p>
           <p className="text-sm text-[var(--color-text-tertiary)] mt-2">Check if the backend is running</p>
         </div>
       </div>
     );
   }
 
-  if (!health) return null;
-
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Pipeline Health</h1>
-        <p className="text-sm text-[var(--color-text-secondary)] mt-1">
-          Real-time monitoring of strategy pipeline
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Pipeline Health</h1>
+          <p className="text-sm text-[var(--color-text-secondary)] mt-1">
+            10-step strategy validation funnel
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className={`badge ${
+            snapshot.status === 'OK' ? 'badge-profit' :
+            snapshot.status === 'WARNING' ? 'badge-warning' : 'badge-loss'
+          }`}>
+            {snapshot.status}
+          </span>
+          <span className={`badge ${snapshot.trading_mode === 'LIVE' ? 'badge-profit' : 'badge-warning'}`}>
+            {snapshot.trading_mode}
+          </span>
+        </div>
       </div>
 
       {/* Alerts */}
@@ -474,91 +629,71 @@ export default function PipelineHealth() {
         <MetricsAlertBanner alerts={alerts.alerts} />
       )}
 
-      {/* Overall Status */}
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="text-sm text-[var(--color-text-tertiary)]">Status:</span>
-        <span className={`badge ${
-          health.overall_status === 'healthy' ? 'badge-profit' :
-          health.overall_status === 'degraded' ? 'badge-warning' : 'badge-loss'
-        }`}>
-          {health.overall_status}
-        </span>
-        {health.bottleneck && (
-          <span className="text-sm text-[var(--color-warning)]">
-            Bottleneck: <span className="font-medium capitalize">{health.bottleneck}</span>
-          </span>
-        )}
-      </div>
-
-      {/* Period Selector + KPIs */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <PeriodSelector value={period} onChange={setPeriod} />
-        {aggregated && (
-          <span className="text-xs text-[var(--color-text-tertiary)]">
-            {aggregated.snapshots_analyzed} snapshots
-          </span>
-        )}
-      </div>
-
-      {aggregated && <AggregatedKPICards data={aggregated} />}
-
-      {/* Critical Issues */}
-      {health.critical_issues.length > 0 && (
-        <div className="card border-[var(--color-loss)] bg-[var(--color-loss-bg)]">
-          <div className="flex items-start gap-3">
-            <AlertTriangle className="w-5 h-5 text-[var(--color-loss)] flex-shrink-0 mt-0.5" />
-            <div>
-              <h3 className="text-sm font-semibold text-[var(--color-loss)] mb-2">
-                Critical Issues ({health.critical_issues.length})
-              </h3>
-              <ul className="space-y-1">
-                {health.critical_issues.map((issue, i) => (
-                  <li key={i} className="text-sm text-[var(--color-loss)]">{issue}</li>
-                ))}
-              </ul>
-            </div>
+      {/* Issue Banner */}
+      {snapshot.issue && (
+        <div className="card border-[var(--color-warning)] bg-[var(--color-warning-bg)] p-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-[var(--color-warning)]" />
+            <span className="text-sm text-[var(--color-warning)]">{snapshot.issue}</span>
           </div>
         </div>
       )}
 
-      {/* Pipeline Flow */}
+      {/* Real-time KPIs */}
+      <RealtimeKPIs snapshot={snapshot} />
+
+      {/* Queue Depths */}
       <div className="card">
-        <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4">Pipeline Flow</h2>
-        <PipelineFlowDiagram stages={health.stages} />
+        <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4">Queue Depths</h2>
+        <QueueDepths snapshot={snapshot} />
       </div>
 
-      {/* Stage Details */}
-      <div>
-        <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4">Stage Details</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {health.stages.map(stage => (
-            <StageDetailCard key={stage.stage} stage={stage} />
-          ))}
+      {/* Pipeline Funnel */}
+      <div className="card">
+        <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4">
+          Pipeline Funnel (24h)
+        </h2>
+        <PipelineFunnel snapshot={snapshot} />
+      </div>
+
+      {/* Backtest Quality Stats */}
+      <div className="card">
+        <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4">Backtest Quality</h2>
+        <BacktestQuality snapshot={snapshot} />
+      </div>
+
+      {/* Two column layout for charts */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Failure Analysis */}
+        <div className="card">
+          <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4">Failure Analysis</h2>
+          <FailureAnalysis snapshot={snapshot} />
+        </div>
+
+        {/* Source Distribution */}
+        <div className="card">
+          <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4">Source Distribution</h2>
+          <SourceDistribution snapshot={snapshot} />
         </div>
       </div>
 
       {/* Historical Metrics */}
       <div className="card">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-          <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">Historical Metrics</h2>
-          <MetricTypeSelector value={activeMetric} onChange={setActiveMetric} />
+          <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">Historical Trends</h2>
+          <div className="flex items-center gap-3">
+            <PeriodSelector value={period} onChange={setPeriod} />
+            <MetricTypeSelector value={activeMetric} onChange={setActiveMetric} />
+          </div>
         </div>
         {timeseries && timeseries.data.length > 0 ? (
-          <TimeseriesChart data={timeseries.data} type={activeMetric} theme={theme} />
+          <TimeseriesChart data={timeseries.data} type={activeMetric} />
         ) : (
           <div className="h-64 flex items-center justify-center text-[var(--color-text-tertiary)]">
             No historical data available
           </div>
         )}
       </div>
-
-      {/* Quality Distribution */}
-      {quality && quality.distributions.some(d => d.buckets.length > 0) && (
-        <div className="card">
-          <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4">Quality Distribution</h2>
-          <QualityDistributionChart data={quality} theme={theme} />
-        </div>
-      )}
     </div>
   );
 }

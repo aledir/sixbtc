@@ -845,6 +845,7 @@ class ContinuousExecutorProcess:
             symbol: Trading pair (e.g., 'BTC', 'ETH')
         """
         try:
+            logger.info(f"[EXECUTE] Processing {signal.direction} signal for {symbol} (sub {subaccount['id']})")
             current_price = data['close'].iloc[-1]
 
             # Calculate position size using risk manager
@@ -856,7 +857,7 @@ class ContinuousExecutorProcess:
             )
 
             if size <= 0:
-                logger.debug(f"Position size too small for {symbol}, skipping signal")
+                logger.info(f"[SKIP] Position size too small for {symbol}, skipping signal")
                 return
 
             # Adjust stops for short positions
@@ -892,9 +893,9 @@ class ContinuousExecutorProcess:
 
             # Check minimum notional (Hyperliquid requirement)
             if notional < self.min_notional:
-                logger.debug(
-                    f"Order too small for {symbol}: notional ${notional:.2f} < "
-                    f"min ${self.min_notional:.2f}, skipping"
+                logger.info(
+                    f"[SKIP] Order too small for {symbol}: notional ${notional:.2f} < "
+                    f"min ${self.min_notional:.2f}"
                 )
                 return
 
