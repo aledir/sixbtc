@@ -41,7 +41,7 @@ def sanitize_config(config: Dict[str, Any], depth: int = 0) -> Dict[str, Any]:
     sanitized = {}
 
     for key, value in config.items():
-        key_lower = key.lower()
+        key_lower = str(key).lower()
 
         # Check if key contains sensitive words
         is_sensitive = any(redacted in key_lower for redacted in REDACTED_KEYS)
@@ -89,24 +89,25 @@ async def get_thresholds():
     try:
         config = load_config()._raw_config
 
-        # Extract key thresholds
-        backtest = config.get("backtest", {})
+        # Extract key thresholds from correct paths
+        backtesting = config.get("backtesting", {})
+        backtest_thresholds = backtesting.get("thresholds", {})
         risk = config.get("risk", {})
         trading = config.get("trading", {})
 
         return {
             "backtest": {
-                "min_sharpe": backtest.get("min_sharpe"),
-                "min_win_rate": backtest.get("min_win_rate"),
-                "max_drawdown": backtest.get("max_drawdown"),
-                "min_trades": backtest.get("min_trades"),
-                "lookback_days": backtest.get("lookback_days"),
+                "min_sharpe": backtest_thresholds.get("min_sharpe"),
+                "min_win_rate": backtest_thresholds.get("min_win_rate"),
+                "max_drawdown": backtest_thresholds.get("max_drawdown"),
+                "min_trades": backtest_thresholds.get("min_total_trades"),
+                "lookback_days": backtesting.get("is_days"),  # In-sample days
             },
             "risk": {
                 "risk_per_trade_pct": risk.get("fixed_fractional", {}).get("risk_per_trade_pct"),
                 "max_position_size_pct": risk.get("fixed_fractional", {}).get("max_position_size_pct"),
-                "max_open_positions": risk.get("limits", {}).get("max_open_positions_total"),
-                "max_leverage": risk.get("limits", {}).get("max_leverage"),
+                "max_open_positions": risk.get("limits", {}).get("max_open_positions_per_subaccount"),
+                "max_leverage": None,  # Not configured in config.yaml
             },
             "emergency": {
                 "max_portfolio_drawdown": risk.get("emergency", {}).get("max_portfolio_drawdown"),
@@ -114,7 +115,7 @@ async def get_thresholds():
                 "max_daily_loss": risk.get("emergency", {}).get("max_daily_loss"),
             },
             "trading": {
-                "timeframes": trading.get("timeframes"),
+                "timeframes": config.get("timeframes"),  # Top-level, not under trading
                 "strategy_types": trading.get("strategy_types"),
             },
         }

@@ -140,6 +140,8 @@ async def get_backtest_ranking(
                     'name': s.name,
                     'strategy_type': s.strategy_type,
                     'timeframe': s.timeframe,
+                    'status': s.status,
+                    'ranking_type': 'backtest',
                     'score': s.score_backtest,
                     'sharpe': backtest.sharpe_ratio if backtest else None,
                     'win_rate': backtest.win_rate if backtest else None,
@@ -197,12 +199,14 @@ async def get_live_ranking(
                     'name': s.name,
                     'strategy_type': s.strategy_type,
                     'timeframe': s.timeframe,
+                    'status': s.status,
+                    'ranking_type': 'live',
                     'score': s.score_live,
                     'sharpe': s.sharpe_live,
                     'win_rate': s.win_rate_live,
                     'total_pnl': s.total_pnl_live,
                     'total_trades': s.total_trades_live,
-                    'live_since': s.live_since.isoformat() if s.live_since else None,
+                    'last_update': s.last_live_update.isoformat() if s.last_live_update else None,
                 })
 
             # Calculate averages
