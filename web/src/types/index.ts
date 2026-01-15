@@ -754,14 +754,24 @@ export interface SnapshotRetest {
 }
 
 export interface SnapshotLive {
-  count: number;
+  live: number;
+  limit: number;
+  slots_free: number;
+  active_count: number;
+  min_pool_size: number;
+  pool_ready: boolean;
+  deployed_24h: number;
+  retired_24h: number;
   avg_age_days: number | null;
   avg_score: number | null;
+  diversity: {
+    types: { unique: number; max: number };
+    timeframes: { unique: number; max: number };
+    directions: { unique: number; max: number };
+  };
   type_distribution: Record<string, number>;
   timeframe_distribution: Record<string, number>;
   direction_distribution: Record<string, number>;
-  rotations_24h: number;
-  retirements_24h: number;
 }
 
 export interface SnapshotSubaccount {

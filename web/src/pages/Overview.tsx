@@ -518,7 +518,7 @@ export default function Overview() {
         />
         <MetricCard
           label="Live Strategies"
-          value={`${snapshot?.live.count || status.pipeline.LIVE || 0}`}
+          value={`${snapshot?.live.live || status.pipeline.LIVE || 0}`}
           subValue={`${snapshot?.pool.size || status.pipeline.ACTIVE || 0} in pool`}
           icon={Zap}
           trend="neutral"
