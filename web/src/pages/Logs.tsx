@@ -18,11 +18,11 @@ const LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR'];
 
 // Log level colors
 const LEVEL_COLORS: Record<string, string> = {
-  DEBUG: 'text-gray-500',
-  INFO: 'text-profit',
-  WARNING: 'text-warning',
-  ERROR: 'text-loss',
-  CRITICAL: 'text-loss',
+  DEBUG: 'text-[var(--color-text-tertiary)]',
+  INFO: 'text-[var(--color-profit)]',
+  WARNING: 'text-[var(--color-warning)]',
+  ERROR: 'text-[var(--color-loss)]',
+  CRITICAL: 'text-[var(--color-loss)]',
 };
 
 function formatTimestamp(dateStr: string): string {
@@ -36,16 +36,16 @@ function formatTimestamp(dateStr: string): string {
 
 // Log Line Component
 function LogLineRow({ line }: { line: LogLine }) {
-  const levelColor = LEVEL_COLORS[line.level] || 'text-muted';
+  const levelColor = LEVEL_COLORS[line.level] || 'text-[var(--color-text-tertiary)]';
 
   return (
-    <div className="flex gap-3 py-1 hover:bg-white/5 font-mono text-xs">
-      <span className="text-muted w-20 flex-shrink-0">
+    <div className="flex gap-3 py-1 hover:bg-[var(--color-bg-secondary)] font-mono text-xs">
+      <span className="text-[var(--color-text-tertiary)] w-16 sm:w-20 flex-shrink-0">
         {formatTimestamp(line.timestamp)}
       </span>
-      <span className={`w-16 flex-shrink-0 ${levelColor}`}>{line.level}</span>
-      <span className="text-muted flex-shrink-0 w-32 truncate">{line.logger}</span>
-      <span className="flex-1 break-all">{line.message}</span>
+      <span className={`w-14 sm:w-16 flex-shrink-0 ${levelColor}`}>{line.level}</span>
+      <span className="text-[var(--color-text-tertiary)] flex-shrink-0 w-24 sm:w-32 truncate hide-mobile">{line.logger}</span>
+      <span className="flex-1 break-all text-[var(--color-text-secondary)]">{line.message}</span>
     </div>
   );
 }
@@ -98,25 +98,23 @@ export default function Logs() {
   };
 
   return (
-    <div className="space-y-6 h-full flex flex-col">
+    <div className="space-y-4 sm:space-y-6 h-full flex flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Logs</h1>
-          <p className="text-sm text-muted mt-1">Real-time log viewer</p>
-        </div>
+      <div>
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Logs</h1>
+        <p className="text-sm text-[var(--color-text-secondary)] mt-1">Real-time log viewer</p>
       </div>
 
-      {/* Service Tabs */}
-      <div className="flex items-center gap-2 border-b border-border pb-3">
+      {/* Service Tabs - Scrollable on mobile */}
+      <div className="flex items-center gap-2 border-b border-[var(--color-border-primary)] pb-3 overflow-x-auto">
         {SERVICES.map((service) => (
           <button
             key={service}
             onClick={() => setSelectedService(service)}
-            className={`px-3 py-1.5 rounded text-sm transition-colors ${
+            className={`px-3 py-1.5 rounded text-sm transition-colors whitespace-nowrap ${
               selectedService === service
-                ? 'bg-profit/20 text-profit'
-                : 'text-muted hover:text-foreground hover:bg-white/5'
+                ? 'bg-[var(--color-accent)]/20 text-[var(--color-accent)]'
+                : 'text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]'
             }`}
           >
             {service}
@@ -124,65 +122,66 @@ export default function Logs() {
         ))}
       </div>
 
-      {/* Filters */}
-      <div className="flex items-center gap-4">
-        {/* Level Filter */}
-        <select
-          value={logLevel}
-          onChange={(e) => setLogLevel(e.target.value)}
-          className="px-3 py-2 bg-card border border-border rounded text-sm focus:outline-none focus:border-profit"
-        >
-          <option value="">All Levels</option>
-          {LOG_LEVELS.map((level) => (
-            <option key={level} value={level}>
-              {level}
-            </option>
-          ))}
-        </select>
+      {/* Filters - Stack on mobile */}
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+        <div className="flex gap-3">
+          {/* Level Filter */}
+          <select
+            value={logLevel}
+            onChange={(e) => setLogLevel(e.target.value)}
+            className="input flex-1 sm:flex-none sm:w-auto"
+          >
+            <option value="">All Levels</option>
+            {LOG_LEVELS.map((level) => (
+              <option key={level} value={level}>
+                {level}
+              </option>
+            ))}
+          </select>
 
-        {/* Search */}
-        <div className="relative flex-1 max-w-xs">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
-          <input
-            type="text"
-            placeholder="Search logs..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 bg-card border border-border rounded text-sm focus:outline-none focus:border-profit"
-          />
+          {/* Search */}
+          <div className="relative flex-1 sm:max-w-xs">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-text-tertiary)]" />
+            <input
+              type="text"
+              placeholder="Search logs..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="input pl-10"
+            />
+          </div>
         </div>
 
-        <div className="flex-1" />
+        <div className="flex-1 hide-mobile" />
 
-        {/* Auto-scroll toggle */}
-        <button
-          onClick={() => setAutoScroll(!autoScroll)}
-          className={`flex items-center gap-2 px-3 py-2 rounded text-sm ${
-            autoScroll
-              ? 'bg-profit/20 text-profit'
-              : 'bg-card text-muted hover:text-foreground'
-          }`}
-        >
-          <RefreshCw className={`w-4 h-4 ${autoScroll ? 'animate-spin' : ''}`} />
-          Auto-scroll
-        </button>
+        {/* Action Buttons */}
+        <div className="flex gap-2">
+          {/* Auto-scroll toggle */}
+          <button
+            onClick={() => setAutoScroll(!autoScroll)}
+            className={`btn ${autoScroll ? 'btn-primary' : 'btn-ghost'} flex items-center gap-2`}
+          >
+            <RefreshCw className={`w-4 h-4 ${autoScroll ? 'animate-spin' : ''}`} />
+            <span className="hide-mobile">Auto-scroll</span>
+          </button>
 
-        {/* Download */}
-        <button
-          onClick={handleDownload}
-          className="flex items-center gap-2 px-3 py-2 bg-card border border-border rounded text-sm hover:bg-white/5"
-        >
-          <Download className="w-4 h-4" />
-          Export
-        </button>
+          {/* Download */}
+          <button
+            onClick={handleDownload}
+            className="btn btn-ghost flex items-center gap-2"
+          >
+            <Download className="w-4 h-4" />
+            <span className="hide-mobile">Export</span>
+          </button>
 
-        {/* Refresh */}
-        <button
-          onClick={() => refetch()}
-          className="flex items-center gap-2 px-3 py-2 bg-card border border-border rounded text-sm hover:bg-white/5"
-        >
-          <RefreshCw className="w-4 h-4" />
-        </button>
+          {/* Refresh */}
+          <button
+            onClick={() => refetch()}
+            className="btn btn-ghost"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        </div>
       </div>
 
       {/* Log Viewer */}
@@ -190,14 +189,14 @@ export default function Logs() {
         <div
           ref={scrollRef}
           onScroll={handleScroll}
-          className="h-[600px] bg-card border border-border rounded-lg p-4 overflow-auto"
+          className="h-[400px] sm:h-[600px] card p-4 overflow-auto"
         >
           {isLoading ? (
             <div className="flex items-center justify-center h-full">
-              <Activity className="w-6 h-6 animate-spin text-muted" />
+              <Activity className="w-6 h-6 animate-spin text-[var(--color-text-tertiary)]" />
             </div>
           ) : error ? (
-            <div className="text-loss text-center py-4">
+            <div className="text-[var(--color-loss)] text-center py-4">
               Error loading logs: {(error as Error).message}
             </div>
           ) : data?.lines && data.lines.length > 0 ? (
@@ -207,7 +206,7 @@ export default function Logs() {
               ))}
             </div>
           ) : (
-            <div className="text-muted text-center py-4">
+            <div className="text-[var(--color-text-tertiary)] text-center py-4">
               No logs available for {selectedService}
             </div>
           )}
@@ -215,7 +214,7 @@ export default function Logs() {
       </div>
 
       {/* Footer info */}
-      <div className="text-xs text-muted">
+      <div className="text-xs text-[var(--color-text-tertiary)]">
         Showing {data?.total_lines || 0} log lines from {selectedService}
       </div>
     </div>

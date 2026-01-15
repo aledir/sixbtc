@@ -3,14 +3,14 @@ import { useStrategies, useStrategy } from '../hooks/useApi';
 import type { StrategyListItem } from '../types';
 import { X, Search, Code, BarChart2, Activity } from 'lucide-react';
 
-// Status badge colors
-const STATUS_COLORS: Record<string, string> = {
-  GENERATED: 'bg-gray-500/20 text-gray-400',
-  VALIDATED: 'bg-blue-500/20 text-blue-400',
-  ACTIVE: 'bg-purple-500/20 text-purple-400',
-  LIVE: 'bg-profit/20 text-profit',
-  RETIRED: 'bg-gray-500/20 text-gray-500',
-  FAILED: 'bg-loss/20 text-loss',
+// Status badge styles
+const STATUS_STYLES: Record<string, string> = {
+  GENERATED: 'badge-neutral',
+  VALIDATED: 'badge-accent',
+  ACTIVE: 'bg-violet-500/20 text-violet-500',
+  LIVE: 'badge-profit',
+  RETIRED: 'badge-neutral',
+  FAILED: 'badge-loss',
 };
 
 // Format values
@@ -24,7 +24,7 @@ function formatPct(value: number | null): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-// Strategy Row
+// Strategy Row Component
 function StrategyRow({
   strategy,
   onClick,
@@ -32,38 +32,54 @@ function StrategyRow({
   strategy: StrategyListItem;
   onClick: () => void;
 }) {
-  const pnlColor = (strategy.total_pnl || 0) >= 0 ? 'text-profit' : 'text-loss';
+  const pnlColor = (strategy.total_pnl || 0) >= 0 ? 'text-[var(--color-profit)]' : 'text-[var(--color-loss)]';
 
   return (
     <tr
-      className="border-b border-terminal hover:bg-white/5 cursor-pointer transition-colors"
+      className="border-b border-[var(--color-border-primary)] hover:bg-[var(--color-bg-secondary)] cursor-pointer transition-colors"
       onClick={onClick}
     >
-      <td className="px-4 py-3 font-mono text-sm">{strategy.name}</td>
-      <td className="px-4 py-3 text-sm">{strategy.strategy_type || '--'}</td>
-      <td className="px-4 py-3 text-sm">{strategy.timeframe || '--'}</td>
+      <td className="px-4 py-3 font-mono text-sm text-[var(--color-text-primary)]">{strategy.name}</td>
+      <td className="px-4 py-3 text-sm text-[var(--color-text-secondary)] hide-mobile">{strategy.strategy_type || '--'}</td>
+      <td className="px-4 py-3 text-sm text-[var(--color-text-secondary)] hide-mobile">{strategy.timeframe || '--'}</td>
       <td className="px-4 py-3">
-        <span
-          className={`px-2 py-0.5 rounded text-xs font-medium ${
-            STATUS_COLORS[strategy.status] || 'bg-gray-500/20 text-gray-400'
-          }`}
-        >
+        <span className={`badge ${STATUS_STYLES[strategy.status] || 'badge-neutral'}`}>
           {strategy.status}
         </span>
       </td>
-      <td className="px-4 py-3 text-sm text-right font-mono">
+      <td className="px-4 py-3 text-sm text-right font-mono text-[var(--color-text-secondary)]">
         {formatNumber(strategy.sharpe_ratio)}
       </td>
-      <td className="px-4 py-3 text-sm text-right font-mono">
+      <td className="px-4 py-3 text-sm text-right font-mono text-[var(--color-text-secondary)] hide-mobile">
         {formatPct(strategy.win_rate)}
       </td>
-      <td className="px-4 py-3 text-sm text-right font-mono">
+      <td className="px-4 py-3 text-sm text-right font-mono text-[var(--color-text-secondary)] hide-mobile">
         {strategy.total_trades ?? '--'}
       </td>
       <td className={`px-4 py-3 text-sm text-right font-mono ${pnlColor}`}>
         {strategy.total_pnl ? `$${strategy.total_pnl.toFixed(2)}` : '--'}
       </td>
     </tr>
+  );
+}
+
+// Metric Card for Modal
+function MetricCard({
+  label,
+  value,
+  negative,
+}: {
+  label: string;
+  value: string;
+  negative?: boolean;
+}) {
+  return (
+    <div className="bg-[var(--color-bg-secondary)] rounded-lg p-3">
+      <div className="text-xs text-[var(--color-text-tertiary)] mb-1">{label}</div>
+      <div className={`text-lg font-mono ${negative ? 'text-[var(--color-loss)]' : 'text-[var(--color-text-primary)]'}`}>
+        {value}
+      </div>
+    </div>
   );
 }
 
@@ -80,9 +96,9 @@ function StrategyModal({
 
   if (isLoading) {
     return (
-      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-        <div className="bg-card border border-terminal rounded-lg p-8">
-          <Activity className="w-8 h-8 animate-spin text-muted" />
+      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+        <div className="card p-8">
+          <Activity className="w-8 h-8 animate-spin text-[var(--color-text-tertiary)]" />
         </div>
       </div>
     );
@@ -91,41 +107,37 @@ function StrategyModal({
   if (!strategy) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-8">
-      <div className="bg-card border border-terminal rounded-lg w-full max-w-4xl max-h-[90vh] flex flex-col">
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4 md:p-8">
+      <div className="card w-full max-w-4xl max-h-[90vh] flex flex-col p-0 overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-terminal">
+        <div className="flex items-center justify-between p-4 border-b border-[var(--color-border-primary)]">
           <div>
-            <h2 className="text-lg font-bold font-mono">{strategy.name}</h2>
+            <h2 className="text-lg font-bold font-mono text-[var(--color-text-primary)]">{strategy.name}</h2>
             <div className="flex items-center gap-3 mt-1">
-              <span className="text-sm text-muted">
+              <span className="text-sm text-[var(--color-text-secondary)]">
                 {strategy.strategy_type} | {strategy.timeframe}
               </span>
-              <span
-                className={`px-2 py-0.5 rounded text-xs font-medium ${
-                  STATUS_COLORS[strategy.status]
-                }`}
-              >
+              <span className={`badge ${STATUS_STYLES[strategy.status]}`}>
                 {strategy.status}
               </span>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-2 hover:bg-white/10 rounded transition-colors"
+            className="btn btn-ghost p-2"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-terminal">
+        <div className="flex border-b border-[var(--color-border-primary)]">
           <button
             onClick={() => setActiveTab('code')}
-            className={`flex items-center gap-2 px-4 py-2 text-sm border-b-2 transition-colors ${
+            className={`flex items-center gap-2 px-4 py-3 text-sm border-b-2 transition-colors ${
               activeTab === 'code'
-                ? 'border-profit text-profit'
-                : 'border-transparent text-muted hover:text-foreground'
+                ? 'border-[var(--color-accent)] text-[var(--color-accent)]'
+                : 'border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]'
             }`}
           >
             <Code className="w-4 h-4" />
@@ -133,10 +145,10 @@ function StrategyModal({
           </button>
           <button
             onClick={() => setActiveTab('backtest')}
-            className={`flex items-center gap-2 px-4 py-2 text-sm border-b-2 transition-colors ${
+            className={`flex items-center gap-2 px-4 py-3 text-sm border-b-2 transition-colors ${
               activeTab === 'backtest'
-                ? 'border-profit text-profit'
-                : 'border-transparent text-muted hover:text-foreground'
+                ? 'border-[var(--color-accent)] text-[var(--color-accent)]'
+                : 'border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]'
             }`}
           >
             <BarChart2 className="w-4 h-4" />
@@ -147,8 +159,8 @@ function StrategyModal({
         {/* Content */}
         <div className="flex-1 overflow-auto p-4">
           {activeTab === 'code' && (
-            <div className="bg-background rounded p-4 overflow-auto">
-              <pre className="text-sm font-mono whitespace-pre-wrap">
+            <div className="bg-[var(--color-bg-secondary)] rounded-lg p-4 overflow-auto">
+              <pre className="text-sm font-mono whitespace-pre-wrap text-[var(--color-text-secondary)]">
                 {strategy.code || 'No code available'}
               </pre>
             </div>
@@ -156,57 +168,29 @@ function StrategyModal({
 
           {activeTab === 'backtest' && strategy.backtest && (
             <div className="space-y-4">
-              <h3 className="text-sm font-semibold text-muted uppercase">
+              <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase">
                 Backtest Metrics
               </h3>
-              <div className="grid grid-cols-4 gap-4">
-                <MetricCard
-                  label="Sharpe Ratio"
-                  value={formatNumber(strategy.backtest.sharpe_ratio)}
-                />
-                <MetricCard
-                  label="Win Rate"
-                  value={formatPct(strategy.backtest.win_rate)}
-                />
-                <MetricCard
-                  label="Max Drawdown"
-                  value={formatPct(strategy.backtest.max_drawdown)}
-                  negative
-                />
-                <MetricCard
-                  label="Total Trades"
-                  value={strategy.backtest.total_trades?.toString() || '--'}
-                />
-                <MetricCard
-                  label="Expectancy"
-                  value={formatNumber(strategy.backtest.expectancy)}
-                />
-                <MetricCard
-                  label="Total Return"
-                  value={formatPct(strategy.backtest.total_return)}
-                />
-                <MetricCard
-                  label="Period Type"
-                  value={strategy.backtest.period_type || '--'}
-                />
-                <MetricCard
-                  label="Period Days"
-                  value={strategy.backtest.period_days?.toString() || '--'}
-                />
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <MetricCard label="Sharpe Ratio" value={formatNumber(strategy.backtest.sharpe_ratio)} />
+                <MetricCard label="Win Rate" value={formatPct(strategy.backtest.win_rate)} />
+                <MetricCard label="Max Drawdown" value={formatPct(strategy.backtest.max_drawdown)} negative />
+                <MetricCard label="Total Trades" value={strategy.backtest.total_trades?.toString() || '--'} />
+                <MetricCard label="Expectancy" value={formatNumber(strategy.backtest.expectancy)} />
+                <MetricCard label="Total Return" value={formatPct(strategy.backtest.total_return)} />
+                <MetricCard label="Period Type" value={strategy.backtest.period_type || '--'} />
+                <MetricCard label="Period Days" value={strategy.backtest.period_days?.toString() || '--'} />
               </div>
 
               {/* Pattern Coins */}
               {strategy.pattern_coins && strategy.pattern_coins.length > 0 && (
                 <div className="mt-4">
-                  <h4 className="text-sm font-semibold text-muted uppercase mb-2">
+                  <h4 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-2">
                     Pattern Coins
                   </h4>
                   <div className="flex flex-wrap gap-2">
                     {strategy.pattern_coins.map((coin) => (
-                      <span
-                        key={coin}
-                        className="px-2 py-1 bg-profit/20 text-profit rounded text-xs"
-                      >
+                      <span key={coin} className="badge badge-profit">
                         {coin}
                       </span>
                     ))}
@@ -217,31 +201,11 @@ function StrategyModal({
           )}
 
           {activeTab === 'backtest' && !strategy.backtest && (
-            <div className="text-center text-muted py-8">
+            <div className="text-center text-[var(--color-text-tertiary)] py-8">
               No backtest results available
             </div>
           )}
         </div>
-      </div>
-    </div>
-  );
-}
-
-// Metric Card
-function MetricCard({
-  label,
-  value,
-  negative,
-}: {
-  label: string;
-  value: string;
-  negative?: boolean;
-}) {
-  return (
-    <div className="bg-background rounded p-3">
-      <div className="text-xs text-muted mb-1">{label}</div>
-      <div className={`text-lg font-mono ${negative ? 'text-loss' : ''}`}>
-        {value}
       </div>
     </div>
   );
@@ -269,26 +233,24 @@ export default function Strategies() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Strategies</h1>
-          <p className="text-sm text-muted mt-1">
-            {data?.total || 0} strategies total
-          </p>
-        </div>
+      <div>
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Strategies</h1>
+        <p className="text-sm text-[var(--color-text-secondary)] mt-1">
+          {data?.total || 0} strategies total
+        </p>
       </div>
 
-      {/* Filters */}
-      <div className="flex items-center gap-4">
+      {/* Filters - Stack on mobile */}
+      <div className="flex flex-col sm:flex-row gap-3">
         {/* Search */}
-        <div className="relative flex-1 max-w-xs">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" />
+        <div className="relative flex-1 sm:max-w-xs">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-text-tertiary)]" />
           <input
             type="text"
             placeholder="Search strategies..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 bg-card border border-border rounded text-sm focus:outline-none focus:border-profit"
+            className="input pl-10"
           />
         </div>
 
@@ -296,7 +258,7 @@ export default function Strategies() {
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="px-3 py-2 bg-card border border-border rounded text-sm focus:outline-none focus:border-profit"
+          className="input sm:w-auto"
         >
           <option value="">All Status</option>
           <option value="GENERATED">Generated</option>
@@ -311,7 +273,7 @@ export default function Strategies() {
         <select
           value={typeFilter}
           onChange={(e) => setTypeFilter(e.target.value)}
-          className="px-3 py-2 bg-card border border-border rounded text-sm focus:outline-none focus:border-profit"
+          className="input sm:w-auto"
         >
           <option value="">All Types</option>
           <option value="MOM">Momentum</option>
@@ -324,60 +286,46 @@ export default function Strategies() {
       </div>
 
       {/* Table */}
-      <div className="bg-card border border-border rounded-lg overflow-hidden">
+      <div className="card p-0 overflow-hidden">
         {isLoading ? (
           <div className="flex items-center justify-center h-64">
-            <Activity className="w-8 h-8 animate-spin text-muted" />
+            <Activity className="w-8 h-8 animate-spin text-[var(--color-text-tertiary)]" />
           </div>
         ) : error ? (
-          <div className="p-4 text-loss">Error loading strategies</div>
+          <div className="p-4 text-[var(--color-loss)]">Error loading strategies</div>
         ) : (
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-terminal bg-background">
-                <th className="px-4 py-3 text-left text-xs font-semibold text-muted uppercase">
-                  Name
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-muted uppercase">
-                  Type
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-muted uppercase">
-                  TF
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-muted uppercase">
-                  Status
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-semibold text-muted uppercase">
-                  Sharpe
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-semibold text-muted uppercase">
-                  Win %
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-semibold text-muted uppercase">
-                  Trades
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-semibold text-muted uppercase">
-                  PnL
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredStrategies.map((strategy) => (
-                <StrategyRow
-                  key={strategy.id}
-                  strategy={strategy}
-                  onClick={() => setSelectedId(strategy.id)}
-                />
-              ))}
-              {filteredStrategies.length === 0 && (
+          <div className="table-responsive">
+            <table className="table">
+              <thead>
                 <tr>
-                  <td colSpan={8} className="px-4 py-8 text-center text-muted">
-                    No strategies found
-                  </td>
+                  <th>Name</th>
+                  <th className="hide-mobile">Type</th>
+                  <th className="hide-mobile">TF</th>
+                  <th>Status</th>
+                  <th className="text-right">Sharpe</th>
+                  <th className="text-right hide-mobile">Win %</th>
+                  <th className="text-right hide-mobile">Trades</th>
+                  <th className="text-right">PnL</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {filteredStrategies.map((strategy) => (
+                  <StrategyRow
+                    key={strategy.id}
+                    strategy={strategy}
+                    onClick={() => setSelectedId(strategy.id)}
+                  />
+                ))}
+                {filteredStrategies.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="text-center py-8 text-[var(--color-text-tertiary)]">
+                      No strategies found
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 

@@ -6,20 +6,14 @@ export default {
   ],
   theme: {
     extend: {
-      colors: {
-        // Terminal dark theme
-        background: '#0a0a0a',
-        foreground: '#fafafa',
-        card: '#111111',
-        border: '#1f1f1f',
-        muted: '#888888',
-        // Trading colors
-        profit: '#10b981',  // Green
-        loss: '#ef4444',    // Red
-        warning: '#f59e0b', // Amber
-      },
+      // Colors now defined via CSS variables in index.css
+      // This ensures theme switching works properly
       fontFamily: {
-        mono: ['JetBrains Mono', 'Consolas', 'Monaco', 'monospace'],
+        sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
+        mono: ['JetBrains Mono', 'SF Mono', 'Consolas', 'monospace'],
+      },
+      screens: {
+        'xs': '475px',
       },
     },
   },
