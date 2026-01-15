@@ -284,6 +284,9 @@ class RetirementPolicy:
 
                 strategy.status = 'RETIRED'
                 strategy.retired_at = datetime.now(UTC)
+                # Clear processing lock (if any)
+                strategy.processing_by = None
+                strategy.processing_started_at = None
 
                 # Remove .py file from live/
                 remove_from_live(strategy.name)

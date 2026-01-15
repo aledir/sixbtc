@@ -205,6 +205,9 @@ class PoolManager:
                 strategy.status = 'RETIRED'
                 strategy.retired_at = datetime.now(UTC)
                 strategy.retired_reason = reason_code
+                # Clear processing lock
+                strategy.processing_by = None
+                strategy.processing_started_at = None
                 session.commit()
                 # Remove .py file from pool/
                 remove_from_pool(strategy.name)
