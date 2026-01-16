@@ -102,7 +102,10 @@ class BalanceReconciliationService:
         start_ms = now_ms - (self.catchup_lookback_days * 24 * 60 * 60 * 1000)
 
         with get_session() as session:
-            subaccounts = session.query(Subaccount).all()
+            # Only reconcile ACTIVE subaccounts - PAUSED/STOPPED have stale data
+            subaccounts = session.query(Subaccount).filter(
+                Subaccount.status == 'ACTIVE'
+            ).all()
 
             for sa in subaccounts:
                 try:

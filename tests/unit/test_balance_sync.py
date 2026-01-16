@@ -39,7 +39,7 @@ class TestBalanceSyncService:
         with patch('src.executor.balance_sync.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_subaccount]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_subaccount]
 
             result = service.sync_all_subaccounts()
 
@@ -66,7 +66,7 @@ class TestBalanceSyncService:
         with patch('src.executor.balance_sync.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_subaccount]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_subaccount]
 
             result = service.sync_all_subaccounts()
 
@@ -88,7 +88,7 @@ class TestBalanceSyncService:
         with patch('src.executor.balance_sync.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_subaccount]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_subaccount]
 
             result = service.sync_all_subaccounts()
 
@@ -108,7 +108,7 @@ class TestBalanceSyncService:
         with patch('src.executor.balance_sync.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_subaccount]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_subaccount]
 
             # Should not raise
             result = service.sync_all_subaccounts()
@@ -127,7 +127,7 @@ class TestBalanceSyncService:
         with patch('src.executor.balance_sync.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_subaccount]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_subaccount]
 
             result = service.sync_all_subaccounts()
 
@@ -155,7 +155,7 @@ class TestBalanceSyncService:
         with patch('src.executor.balance_sync.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_subaccount]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_subaccount]
 
             service.sync_all_subaccounts()
 
@@ -184,7 +184,7 @@ class TestBalanceSyncService:
         with patch('src.executor.balance_sync.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = subaccounts
+            session_instance.query.return_value.filter.return_value.all.return_value = subaccounts
 
             result = service.sync_all_subaccounts()
 
@@ -238,6 +238,7 @@ class TestBalanceSyncService:
         with patch('src.executor.balance_sync.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
+            # get_sync_status uses .all() without filter (reports all subaccounts)
             session_instance.query.return_value.all.return_value = [mock_subaccount]
 
             status = service.get_sync_status()
@@ -260,6 +261,7 @@ class TestBalanceSyncService:
         with patch('src.executor.balance_sync.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
+            # get_sync_status uses .all() without filter (reports all subaccounts)
             session_instance.query.return_value.all.return_value = [mock_subaccount]
 
             status = service.get_sync_status()

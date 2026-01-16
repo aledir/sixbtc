@@ -270,7 +270,7 @@ class EmergencyStopManager:
 
             # Sum daily_pnl_usd across all active subaccounts
             subaccounts = session.query(Subaccount).filter(
-                Subaccount.status.in_(['ACTIVE', 'PAUSED'])
+                Subaccount.status == 'ACTIVE'  # Only ACTIVE - PAUSED/STOPPED have stale data
             ).all()
 
             total_capital = sum(sa.allocated_capital or 0 for sa in subaccounts)
@@ -314,7 +314,7 @@ class EmergencyStopManager:
                 return None  # Already stopped
 
             subaccounts = session.query(Subaccount).filter(
-                Subaccount.status.in_(['ACTIVE', 'PAUSED'])
+                Subaccount.status == 'ACTIVE'  # Only ACTIVE - PAUSED/STOPPED have stale data
             ).all()
 
             if not subaccounts:
@@ -778,7 +778,7 @@ class EmergencyStopManager:
     def _is_data_still_stale(self, session: Session) -> bool:
         """Check if data is still stale."""
         subaccounts = session.query(Subaccount).filter(
-            Subaccount.status.in_(['ACTIVE', 'PAUSED'])
+            Subaccount.status == 'ACTIVE'  # Only ACTIVE - PAUSED/STOPPED have stale data
         ).all()
 
         if not subaccounts:
@@ -1067,7 +1067,7 @@ class EmergencyStopManager:
 
         with get_session() as session:
             subaccounts = session.query(Subaccount).filter(
-                Subaccount.status.in_(['ACTIVE', 'PAUSED'])
+                Subaccount.status == 'ACTIVE'  # Only ACTIVE - PAUSED/STOPPED have stale data
             ).all()
             subaccount_ids = [sa.id for sa in subaccounts]
 

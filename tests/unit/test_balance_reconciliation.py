@@ -70,7 +70,7 @@ class TestBalanceReconciliationService:
         with patch('src.executor.balance_reconciliation.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_subaccount]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_subaccount]
 
             service = BalanceReconciliationService(mock_client, None, config)
             fixed = await service.startup_catchup()
@@ -98,7 +98,7 @@ class TestBalanceReconciliationService:
         with patch('src.executor.balance_reconciliation.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_subaccount]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_subaccount]
 
             service = BalanceReconciliationService(mock_client, None, config)
             fixed = await service.startup_catchup()
@@ -126,7 +126,7 @@ class TestBalanceReconciliationService:
         with patch('src.executor.balance_reconciliation.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_subaccount]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_subaccount]
 
             service = BalanceReconciliationService(mock_client, None, config)
             fixed = await service.startup_catchup()
@@ -154,7 +154,7 @@ class TestBalanceReconciliationService:
         with patch('src.executor.balance_reconciliation.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_subaccount]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_subaccount]
 
             service = BalanceReconciliationService(mock_client, None, config)
             await service.startup_catchup()
@@ -182,7 +182,7 @@ class TestBalanceReconciliationService:
         with patch('src.executor.balance_reconciliation.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_subaccount]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_subaccount]
 
             service = BalanceReconciliationService(mock_client, None, config)
             await service.startup_catchup()
@@ -228,7 +228,7 @@ class TestBalanceReconciliationService:
         with patch('src.executor.balance_reconciliation.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_subaccount]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_subaccount]
 
             service = BalanceReconciliationService(mock_client, None, config)
             # Should not raise
@@ -260,7 +260,7 @@ class TestBalanceReconciliationService:
         with patch('src.executor.balance_reconciliation.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_sub1, mock_sub2]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_sub1, mock_sub2]
 
             service = BalanceReconciliationService(mock_client, None, config)
             await service.startup_catchup()
@@ -297,7 +297,7 @@ class TestBalanceReconciliationService:
         with patch('src.executor.balance_reconciliation.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_sub1, mock_sub2]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_sub1, mock_sub2]
 
             service = BalanceReconciliationService(mock_client, None, config)
             fixed = await service.startup_catchup()
@@ -373,7 +373,7 @@ class TestBalanceReconciliationService:
         with patch('src.executor.balance_reconciliation.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
-            session_instance.query.return_value.all.return_value = [mock_subaccount]
+            session_instance.query.return_value.filter.return_value.all.return_value = [mock_subaccount]
 
             service = BalanceReconciliationService(mock_client, None, config)
             await service.startup_catchup()
@@ -399,6 +399,7 @@ class TestBalanceReconciliationService:
         with patch('src.executor.balance_reconciliation.get_session') as mock_session:
             session_instance = MagicMock()
             mock_session.return_value.__enter__.return_value = session_instance
+            # get_reconciliation_status uses .all() without filter (reports all subaccounts)
             session_instance.query.return_value.all.return_value = [mock_subaccount]
 
             status = service.get_reconciliation_status()

@@ -52,7 +52,11 @@ class BalanceSyncService:
         results = {}
 
         with get_session() as session:
-            subaccounts = session.query(Subaccount).all()
+            # Only sync ACTIVE subaccounts - ignore PAUSED/STOPPED/RETIRED
+            # Old subaccounts with stale allocated_capital cause false DD alerts
+            subaccounts = session.query(Subaccount).filter(
+                Subaccount.status == 'ACTIVE'
+            ).all()
 
             for sa in subaccounts:
                 try:
@@ -145,16 +149,9 @@ class BalanceSyncService:
                 sa.allocated_capital = actual_balance
                 sa.current_balance = actual_balance
 
-                # IMPORTANT: peak_balance must be based on allocated_capital, NOT actual_balance!
-                # If Hyperliquid balance is higher due to manual funding, we don't want to
-                # set peak_balance to that value (causes false drawdown calculations).
-                # peak_balance = what we ALLOCATED, not what happens to be in the account.
-                if sa.peak_balance is None or sa.peak_balance == 0:
-                    sa.peak_balance = actual_balance  # First time init
-                # Only increase peak if profits were made (current > allocated)
-                elif actual_balance > sa.allocated_capital and actual_balance > sa.peak_balance:
-                    sa.peak_balance = actual_balance
-
+                # Force sync resets the baseline - peak_balance = new allocated_capital
+                # This is intentional: user explicitly requested a reset
+                sa.peak_balance = actual_balance
                 sa.peak_balance_updated_at = datetime.now(UTC)
                 session.commit()
 
