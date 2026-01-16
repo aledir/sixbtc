@@ -512,3 +512,30 @@ class PairsUpdateHistoryResponse(BaseModel):
     """History of pairs updates"""
     updates: List[PairsUpdateDetailResponse]
     total: int
+
+
+# =============================================================================
+# POSITIONS (from Hyperliquid real-time)
+# =============================================================================
+
+class PositionInfo(BaseModel):
+    """Single position from Hyperliquid"""
+    subaccount_id: int
+    strategy_name: Optional[str] = None
+    symbol: str
+    side: str  # 'long' or 'short'
+    size: float
+    entry_price: float
+    mark_price: float
+    unrealized_pnl: float
+    leverage: int = 1
+    liquidation_price: Optional[float] = None
+    margin_used: float = 0.0
+
+
+class PositionsResponse(BaseModel):
+    """Response for /api/positions endpoint"""
+    positions: List[PositionInfo]
+    total_unrealized_pnl: float
+    total_positions: int
+    total_margin_used: float

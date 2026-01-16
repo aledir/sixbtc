@@ -1,17 +1,16 @@
+import { useState } from 'react';
 import { useStatus, useMetricsSnapshot, usePerformanceEquity } from '../hooks/useApi';
-import type { ServiceInfo, PipelineCounts, SnapshotSubaccount } from '../types';
+import type { ServiceInfo, SnapshotSubaccount, MetricsSnapshotResponse } from '../types';
 import {
   Activity,
-  TrendingUp,
-  TrendingDown,
-  Zap,
-  BarChart3,
-  Wallet,
-  ArrowRight,
   AlertTriangle,
   CheckCircle,
+  ChevronRight,
+  ArrowUpRight,
+  ArrowDownRight,
 } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
+import { Link } from 'react-router-dom';
 import {
   LineChart,
   Line,
@@ -38,69 +37,140 @@ function formatUsd(value: number): string {
   return `$${value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 }
 
+function formatCompact(value: number): string {
+  if (value >= 1000000) return `${(value / 1000000).toFixed(1)}M`;
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
+  return value.toString();
+}
+
 // === Components ===
 
-function MetricCard({ label, value, subValue, icon: Icon, trend }: {
-  label: string;
-  value: string;
-  subValue?: string;
-  icon: React.ElementType;
-  trend?: 'up' | 'down' | 'neutral';
-}) {
-  const valueColor = trend === 'up'
-    ? 'text-[var(--color-profit)]'
-    : trend === 'down'
-      ? 'text-[var(--color-loss)]'
-      : 'text-[var(--color-text-primary)]';
+function StatusBadge({ mode, status }: { mode: string; status: string }) {
+  const isLive = mode === 'LIVE';
+  const isHealthy = status === 'HEALTHY';
 
   return (
-    <div className="card">
-      <div className="flex items-start justify-between">
-        <div className="flex-1 min-w-0">
-          <p className="metric-label">{label}</p>
-          <p className={`metric-value ${valueColor}`}>{value}</p>
-          {subValue && (
-            <p className={`text-sm mt-1 ${valueColor}`}>{subValue}</p>
-          )}
+    <div className="flex items-center gap-3">
+      <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg ${
+        isLive
+          ? 'bg-[var(--color-profit)]/10 border border-[var(--color-profit)]/30'
+          : 'bg-[var(--color-warning)]/10 border border-[var(--color-warning)]/30'
+      }`}>
+        <span className={`w-2 h-2 rounded-full ${
+          isLive ? 'bg-[var(--color-profit)] animate-pulse' : 'bg-[var(--color-warning)]'
+        }`} />
+        <span className={`text-sm font-medium ${
+          isLive ? 'text-[var(--color-profit)]' : 'text-[var(--color-warning)]'
+        }`}>
+          {mode}
+        </span>
+      </div>
+      <div className={`flex items-center gap-1.5 px-2 py-1 rounded ${
+        isHealthy ? 'text-[var(--color-profit)]' : 'text-[var(--color-warning)]'
+      }`}>
+        {isHealthy ? <CheckCircle size={16} /> : <AlertTriangle size={16} />}
+        <span className="text-xs font-medium">{status}</span>
+      </div>
+    </div>
+  );
+}
+
+// Hero P&L Section - The most important info
+function PnlHero({ snapshot }: { snapshot: MetricsSnapshotResponse }) {
+  const totalRpnl = snapshot.subaccounts.reduce((sum, s) => sum + s.rpnl, 0);
+  const totalUpnl = snapshot.subaccounts.reduce((sum, s) => sum + s.upnl, 0);
+  const totalPnl = totalRpnl + totalUpnl;
+  const capital = snapshot.capital;
+  const pnlPct = capital.subaccounts > 0 ? (totalPnl / capital.subaccounts) * 100 : 0;
+  const isProfit = totalPnl >= 0;
+
+  // Calculate max drawdown from subaccounts
+  const maxDd = Math.max(...snapshot.subaccounts.map(s => s.dd_pct), 0);
+  const maxAllowedDd = 30; // From config
+
+  return (
+    <div className="card bg-gradient-to-br from-[var(--color-bg-elevated)] to-[var(--color-bg-secondary)]">
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+        {/* Main P&L Display */}
+        <div className="flex-1">
+          <p className="text-sm text-[var(--color-text-tertiary)] uppercase tracking-wide mb-2">
+            Total P&L
+          </p>
+          <div className="flex items-baseline gap-3">
+            <span className={`text-4xl md:text-5xl font-bold ${
+              isProfit ? 'text-[var(--color-profit)]' : 'text-[var(--color-loss)]'
+            }`}>
+              {formatPnl(totalPnl)}
+            </span>
+            <span className={`text-xl font-medium flex items-center gap-1 ${
+              isProfit ? 'text-[var(--color-profit)]' : 'text-[var(--color-loss)]'
+            }`}>
+              {isProfit ? <ArrowUpRight size={20} /> : <ArrowDownRight size={20} />}
+              {formatPct(pnlPct)}
+            </span>
+          </div>
+          <p className="text-sm text-[var(--color-text-tertiary)] mt-2">
+            on {formatUsd(capital.subaccounts)} deployed
+          </p>
         </div>
-        <div className="p-2.5 bg-[var(--color-bg-secondary)] rounded-lg shrink-0">
-          <Icon size={20} className="text-[var(--color-text-tertiary)]" />
+
+        {/* Secondary Metrics */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 lg:gap-6">
+          <div className="text-center lg:text-right">
+            <p className="text-xs text-[var(--color-text-tertiary)] uppercase">Realized</p>
+            <p className={`text-lg font-mono font-medium ${
+              totalRpnl >= 0 ? 'text-[var(--color-profit)]' : 'text-[var(--color-loss)]'
+            }`}>
+              {formatPnl(totalRpnl)}
+            </p>
+          </div>
+          <div className="text-center lg:text-right">
+            <p className="text-xs text-[var(--color-text-tertiary)] uppercase">Unrealized</p>
+            <p className={`text-lg font-mono font-medium ${
+              totalUpnl >= 0 ? 'text-[var(--color-profit)]' : 'text-[var(--color-loss)]'
+            }`}>
+              {formatPnl(totalUpnl)}
+            </p>
+          </div>
+          <div className="text-center lg:text-right">
+            <p className="text-xs text-[var(--color-text-tertiary)] uppercase">Positions</p>
+            <p className="text-lg font-mono font-medium text-[var(--color-text-primary)]">
+              {snapshot.subaccounts.reduce((sum, s) => sum + s.positions, 0)}
+            </p>
+          </div>
+          <div className="text-center lg:text-right">
+            <p className="text-xs text-[var(--color-text-tertiary)] uppercase">Drawdown</p>
+            <div className="flex items-center justify-center lg:justify-end gap-2">
+              <div className="w-16 h-2 bg-[var(--color-bg-tertiary)] rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${
+                    maxDd > 20 ? 'bg-[var(--color-loss)]' :
+                    maxDd > 10 ? 'bg-[var(--color-warning)]' :
+                    'bg-[var(--color-profit)]'
+                  }`}
+                  style={{ width: `${(maxDd / maxAllowedDd) * 100}%` }}
+                />
+              </div>
+              <span className={`text-sm font-mono ${
+                maxDd > 20 ? 'text-[var(--color-loss)]' :
+                maxDd > 10 ? 'text-[var(--color-warning)]' :
+                'text-[var(--color-text-secondary)]'
+              }`}>
+                {maxDd.toFixed(0)}%
+              </span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function TradingModeIndicator({ mode, status }: { mode: string; status: string }) {
-  const isLive = mode === 'LIVE';
-  const isHealthy = status === 'HEALTHY';
-
-  return (
-    <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg ${
-      isLive
-        ? 'bg-[var(--color-profit)]/10 border border-[var(--color-profit)]/30'
-        : 'bg-[var(--color-warning)]/10 border border-[var(--color-warning)]/30'
-    }`}>
-      <span className={`w-2 h-2 rounded-full ${
-        isLive ? 'bg-[var(--color-profit)] animate-pulse' : 'bg-[var(--color-warning)]'
-      }`} />
-      <span className={`text-sm font-medium ${
-        isLive ? 'text-[var(--color-profit)]' : 'text-[var(--color-warning)]'
-      }`}>
-        {mode}
-      </span>
-      {isHealthy ? (
-        <CheckCircle className="w-4 h-4 text-[var(--color-profit)]" />
-      ) : (
-        <AlertTriangle className="w-4 h-4 text-[var(--color-warning)]" />
-      )}
-    </div>
-  );
-}
-
+// Equity Curve with period selector
 function EquityCurve() {
   const { theme } = useTheme();
-  const { data: performanceData, isLoading } = usePerformanceEquity({ period: '7d' });
+  const [period, setPeriod] = useState<'24h' | '7d' | '30d'>('24h');
+  const { data: performanceData, isLoading } = usePerformanceEquity({ period });
 
   const chartColors = {
     axis: theme === 'dark' ? '#64748b' : '#94a3b8',
@@ -108,29 +178,15 @@ function EquityCurve() {
       bg: theme === 'dark' ? '#1e293b' : '#ffffff',
       border: theme === 'dark' ? '#334155' : '#e2e8f0',
     },
-    grid: theme === 'dark' ? '#334155' : '#e2e8f0',
   };
-
-  if (isLoading) {
-    return (
-      <div className="card">
-        <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
-          Portfolio Equity (7d)
-        </h3>
-        <div className="h-48 flex items-center justify-center">
-          <Activity className="w-6 h-6 animate-spin text-[var(--color-text-tertiary)]" />
-        </div>
-      </div>
-    );
-  }
 
   const equityData = performanceData?.data_points.map((point) => ({
     time: new Date(point.timestamp).toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
+      hour: period === '24h' ? '2-digit' : undefined,
     }),
     equity: point.equity,
-    pnl: point.total_pnl,
   })) || [];
 
   const startEquity = performanceData?.start_equity || 0;
@@ -139,54 +195,69 @@ function EquityCurve() {
 
   return (
     <div className="card">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
-        <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase">
-          Portfolio Equity (7d)
-        </h3>
-        {performanceData && (
-          <div className="flex gap-4 text-xs">
-            <div>
-              <span className="text-[var(--color-text-tertiary)]">Return: </span>
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase">
+            Portfolio Equity
+          </h3>
+          {performanceData && (
+            <div className="flex gap-4 text-xs mt-1">
               <span className={`font-mono ${currentReturn >= 0 ? 'text-[var(--color-profit)]' : 'text-[var(--color-loss)]'}`}>
-                {formatPct(currentReturn * 100)}
+                Return: {formatPct(currentReturn * 100)}
               </span>
-            </div>
-            <div>
-              <span className="text-[var(--color-text-tertiary)]">Max DD: </span>
               <span className="font-mono text-[var(--color-loss)]">
-                {formatPct(maxDrawdown * 100)}
+                Max DD: {formatPct(maxDrawdown * 100)}
               </span>
             </div>
-          </div>
-        )}
+          )}
+        </div>
+        <div className="flex gap-1">
+          {(['24h', '7d', '30d'] as const).map((p) => (
+            <button
+              key={p}
+              onClick={() => setPeriod(p)}
+              className={`px-2 py-1 text-xs rounded transition-colors ${
+                period === p
+                  ? 'bg-[var(--color-accent)] text-white'
+                  : 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-secondary)]'
+              }`}
+            >
+              {p}
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="h-48">
-        {equityData.length > 0 ? (
-          <ResponsiveContainer width="100%" height={192}>
+      <div className="h-40">
+        {isLoading ? (
+          <div className="flex items-center justify-center h-full">
+            <Activity className="w-5 h-5 animate-spin text-[var(--color-text-tertiary)]" />
+          </div>
+        ) : equityData.length > 0 ? (
+          <ResponsiveContainer width="100%" height="100%">
             <LineChart data={equityData}>
               <XAxis
                 dataKey="time"
                 stroke={chartColors.axis}
-                fontSize={11}
+                fontSize={10}
                 tickLine={false}
                 axisLine={false}
+                interval="preserveStartEnd"
               />
               <YAxis
                 stroke={chartColors.axis}
-                fontSize={11}
+                fontSize={10}
                 tickLine={false}
                 axisLine={false}
                 tickFormatter={(value) => `$${value}`}
-                width={60}
+                width={50}
               />
               <Tooltip
                 contentStyle={{
                   backgroundColor: chartColors.tooltip.bg,
                   border: `1px solid ${chartColors.tooltip.border}`,
-                  borderRadius: '8px',
-                  fontSize: '12px',
+                  borderRadius: '6px',
+                  fontSize: '11px',
                 }}
-                labelStyle={{ color: chartColors.axis }}
               />
               <ReferenceLine y={startEquity} stroke={chartColors.axis} strokeDasharray="3 3" />
               <Line
@@ -199,8 +270,8 @@ function EquityCurve() {
             </LineChart>
           </ResponsiveContainer>
         ) : (
-          <div className="flex items-center justify-center h-full text-[var(--color-text-tertiary)]">
-            No equity data available
+          <div className="flex items-center justify-center h-full text-sm text-[var(--color-text-tertiary)]">
+            No data
           </div>
         )}
       </div>
@@ -208,227 +279,199 @@ function EquityCurve() {
   );
 }
 
-function CapitalBreakdown({ capital }: {
-  capital: { total: number; main_account: number; subaccounts: number }
-}) {
-  const subPct = capital.total > 0 ? (capital.subaccounts / capital.total) * 100 : 0;
+// Mini Pipeline Funnel - 10 steps
+function MiniPipeline({ snapshot }: { snapshot: MetricsSnapshotResponse }) {
+  const f = snapshot.funnel;
+  const fail = snapshot.failures;
 
-  return (
-    <div className="card">
-      <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
-        Capital Allocation
-      </h3>
-      <div className="space-y-4">
-        <div className="text-center">
-          <p className="text-3xl font-bold text-[var(--color-text-primary)]">
-            {formatUsd(capital.total)}
-          </p>
-          <p className="text-sm text-[var(--color-text-tertiary)]">Total Capital</p>
-        </div>
-
-        {/* Progress bar showing allocation */}
-        <div className="h-3 bg-[var(--color-bg-secondary)] rounded-full overflow-hidden">
-          <div
-            className="h-full bg-[var(--color-accent)] rounded-full transition-all"
-            style={{ width: `${subPct}%` }}
-          />
-        </div>
-
-        <div className="grid grid-cols-2 gap-4 text-sm">
-          <div className="text-center p-3 bg-[var(--color-bg-secondary)] rounded-lg">
-            <p className="font-mono font-medium text-[var(--color-text-primary)]">
-              {formatUsd(capital.main_account)}
-            </p>
-            <p className="text-xs text-[var(--color-text-tertiary)]">Main Account</p>
-          </div>
-          <div className="text-center p-3 bg-[var(--color-accent)]/10 rounded-lg">
-            <p className="font-mono font-medium text-[var(--color-accent)]">
-              {formatUsd(capital.subaccounts)}
-            </p>
-            <p className="text-xs text-[var(--color-text-tertiary)]">Deployed ({subPct.toFixed(0)}%)</p>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PipelineStatus({ pipeline }: { pipeline: PipelineCounts }) {
   const stages = [
-    { key: 'GENERATED' as const, label: 'Generated', color: 'bg-slate-400' },
-    { key: 'VALIDATED' as const, label: 'Validated', color: 'bg-[var(--color-accent)]' },
-  ];
-
-  const liveStages = [
-    { key: 'ACTIVE' as const, label: 'Active Pool', color: 'bg-violet-500' },
-    { key: 'LIVE' as const, label: 'Live', color: 'bg-[var(--color-profit)]' },
+    { label: 'Gen', value: f.generated, failed: 0 },
+    { label: 'Val', value: f.validated, failed: fail.validation },
+    { label: 'Param', value: snapshot.parametric?.total_combos || 0, failed: fail.parametric_fail },
+    { label: 'IS', value: snapshot.is_backtest?.passed || 0, failed: snapshot.is_backtest?.failed || 0 },
+    { label: 'OOS', value: snapshot.oos_backtest?.passed || 0, failed: snapshot.oos_backtest?.failed || 0 },
+    { label: 'Score', value: f.score_passed || 0, failed: fail.score_reject },
+    { label: 'Shuf', value: f.shuffle_passed || 0, failed: fail.shuffle_fail },
+    { label: 'WFA', value: f.multi_window_passed || 0, failed: fail.mw_fail },
+    { label: 'Rob', value: f.robustness_passed || 0, failed: 0 },
+    { label: 'Pool', value: f.pool_added || 0, failed: fail.pool_reject },
+    { label: 'Live', value: snapshot.live.live, failed: 0, highlight: true },
   ];
 
   return (
     <div className="card">
-      <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-4">Pipeline Status</h3>
-      <div className="flex items-center justify-between overflow-x-auto">
-        {stages.map((stage, i) => (
-          <div key={stage.key} className="flex items-center gap-3 shrink-0">
-            <div className="text-center">
-              <div className={`w-12 h-12 rounded-full ${stage.color} flex items-center justify-center text-white font-bold`}>
-                {pipeline[stage.key] || 0}
-              </div>
-              <p className="text-xs text-[var(--color-text-tertiary)] mt-2">{stage.label}</p>
-            </div>
-            {i < stages.length - 1 && (
-              <ArrowRight size={16} className="text-[var(--color-text-tertiary)]" />
-            )}
-          </div>
-        ))}
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase">
+          Pipeline (24h)
+        </h3>
+        <Link to="/pipeline" className="text-xs text-[var(--color-accent)] hover:underline flex items-center gap-1">
+          Details <ChevronRight size={14} />
+        </Link>
+      </div>
+      <div className="flex items-end gap-1 overflow-x-auto pb-2">
+        {stages.map((stage, i) => {
+          const prevValue = i > 0 ? stages[i - 1].value : stage.value;
+          const convRate = prevValue > 0 && i > 0 ? (stage.value / prevValue * 100) : 100;
 
-        <ArrowRight size={16} className="text-[var(--color-text-tertiary)] shrink-0" />
-
-        {liveStages.map((stage, i) => (
-          <div key={stage.key} className="flex items-center gap-3 shrink-0">
-            <div className="text-center">
-              <div className={`w-12 h-12 rounded-full ${stage.color} flex items-center justify-center text-white font-bold`}>
-                {pipeline[stage.key] || 0}
-              </div>
-              <p className="text-xs text-[var(--color-text-tertiary)] mt-2">{stage.label}</p>
+          return (
+            <div key={stage.label} className="flex flex-col items-center min-w-[42px]">
+              <span className={`text-xs font-mono font-medium ${
+                stage.highlight ? 'text-[var(--color-profit)]' : 'text-[var(--color-text-primary)]'
+              }`}>
+                {formatCompact(stage.value)}
+              </span>
+              {stage.failed > 0 && (
+                <span className="text-[10px] text-[var(--color-loss)]">
+                  -{formatCompact(stage.failed)}
+                </span>
+              )}
+              <div className={`w-8 rounded-t transition-all ${
+                stage.highlight ? 'bg-[var(--color-profit)]' : 'bg-[var(--color-accent)]'
+              }`} style={{
+                height: `${Math.max(4, Math.min(40, Math.log10(stage.value + 1) * 15))}px`
+              }} />
+              <span className="text-[10px] text-[var(--color-text-tertiary)] mt-1">
+                {stage.label}
+              </span>
+              {i > 0 && convRate < 100 && (
+                <span className={`text-[9px] ${convRate < 50 ? 'text-[var(--color-loss)]' : 'text-[var(--color-text-tertiary)]'}`}>
+                  {convRate.toFixed(0)}%
+                </span>
+              )}
             </div>
-            {i < liveStages.length - 1 && (
-              <ArrowRight size={16} className="text-[var(--color-text-tertiary)]" />
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function ServicesGrid({ services }: { services: ServiceInfo[] }) {
+// Quick Stats Row
+function QuickStats({ snapshot, services }: { snapshot: MetricsSnapshotResponse; services: ServiceInfo[] }) {
+  const pool = snapshot.pool;
+  const poolUtilization = pool.limit > 0 ? (pool.size / pool.limit) * 100 : 0;
+  const servicesOk = services.filter(s => s.status === 'RUNNING').length;
+
   return (
-    <div className="card">
-      <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-4">Services</h3>
-      <div className="grid grid-cols-2 gap-2">
-        {services.map((svc) => (
-          <div
-            key={svc.name}
-            className="flex items-center justify-between px-3 py-2.5 bg-[var(--color-bg-secondary)] rounded-lg"
-          >
-            <span className="text-sm text-[var(--color-text-secondary)]">
-              {svc.name.replace('sixbtc:', '')}
-            </span>
-            <span className={`w-2.5 h-2.5 rounded-full ${
-              svc.status === 'RUNNING' ? 'bg-[var(--color-profit)] animate-pulse-slow' :
-              svc.status === 'STOPPED' ? 'bg-[var(--color-text-tertiary)]' : 'bg-[var(--color-loss)]'
-            }`} />
-          </div>
-        ))}
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="card py-3">
+        <p className="text-xs text-[var(--color-text-tertiary)]">Pool</p>
+        <p className="text-lg font-mono font-medium text-[var(--color-text-primary)]">
+          {pool.size}/{pool.limit}
+        </p>
+        <div className="w-full h-1.5 bg-[var(--color-bg-tertiary)] rounded-full mt-1">
+          <div className="h-full bg-[var(--color-accent)] rounded-full" style={{ width: `${poolUtilization}%` }} />
+        </div>
+      </div>
+      <div className="card py-3">
+        <p className="text-xs text-[var(--color-text-tertiary)]">Avg Sharpe</p>
+        <p className="text-lg font-mono font-medium text-[var(--color-text-primary)]">
+          {pool.quality.sharpe_avg?.toFixed(1) || '--'}
+        </p>
+      </div>
+      <div className="card py-3">
+        <p className="text-xs text-[var(--color-text-tertiary)]">Win Rate</p>
+        <p className="text-lg font-mono font-medium text-[var(--color-text-primary)]">
+          {pool.quality.winrate_avg ? `${(pool.quality.winrate_avg * 100).toFixed(0)}%` : '--'}
+        </p>
+      </div>
+      <div className="card py-3">
+        <p className="text-xs text-[var(--color-text-tertiary)]">Services</p>
+        <p className={`text-lg font-mono font-medium ${
+          servicesOk === services.length ? 'text-[var(--color-profit)]' : 'text-[var(--color-warning)]'
+        }`}>
+          {servicesOk}/{services.length}
+        </p>
       </div>
     </div>
   );
 }
 
-function SubaccountsList({ subaccounts }: { subaccounts: SnapshotSubaccount[] }) {
+// Subaccounts Summary - Compact
+function SubaccountsSummary({ subaccounts }: { subaccounts: SnapshotSubaccount[] }) {
   const active = subaccounts.filter(s => s.strategy_name);
 
+  if (active.length === 0) {
+    return (
+      <div className="card">
+        <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-3">
+          Live Subaccounts
+        </h3>
+        <p className="text-sm text-[var(--color-text-tertiary)] text-center py-4">
+          No active subaccounts
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="card">
-      <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-4">
-        Live Subaccounts ({active.length})
-      </h3>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase">
+          Live Subaccounts ({active.length})
+        </h3>
+        <Link to="/trading" className="text-xs text-[var(--color-accent)] hover:underline flex items-center gap-1">
+          View all <ChevronRight size={14} />
+        </Link>
+      </div>
       <div className="space-y-2">
         {active.map((sub) => (
           <div
             key={sub.id}
-            className="px-3 py-2.5 bg-[var(--color-bg-secondary)] rounded-lg"
+            className="flex items-center justify-between px-3 py-2 bg-[var(--color-bg-secondary)] rounded-lg"
           >
-            <div className="flex items-center justify-between mb-1">
-              <div className="flex items-center gap-2 min-w-0">
-                <span className="badge badge-neutral">#{sub.id}</span>
-                <span className="text-sm font-mono text-[var(--color-text-secondary)] truncate">
-                  {sub.strategy_name}
-                </span>
-              </div>
-              <span className={`text-sm font-mono font-medium shrink-0 ${
-                sub.rpnl >= 0 ? 'text-[var(--color-profit)]' : 'text-[var(--color-loss)]'
-              }`}>
-                {formatPnl(sub.rpnl)}
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-xs font-mono text-[var(--color-text-tertiary)]">#{sub.id}</span>
+              <span className="text-sm font-mono text-[var(--color-text-secondary)] truncate max-w-[120px]">
+                {sub.strategy_name?.split('_').slice(-1)[0]}
+              </span>
+              <span className="text-xs text-[var(--color-text-tertiary)]">
+                {sub.timeframe}/{sub.direction?.[0]}
               </span>
             </div>
-            <div className="flex items-center gap-4 text-xs text-[var(--color-text-tertiary)]">
-              <span>{sub.timeframe}/{sub.direction?.[0] || '?'}</span>
-              <span>DD: {sub.dd_pct.toFixed(0)}%</span>
-              <span>WR: {sub.wr_pct.toFixed(0)}%</span>
-              <span>Pos: {sub.positions}</span>
-              <span className="ml-auto">{formatUsd(sub.balance)}</span>
+            <div className="flex items-center gap-3">
+              {sub.positions > 0 && (
+                <span className="text-xs px-1.5 py-0.5 bg-[var(--color-accent)]/10 text-[var(--color-accent)] rounded">
+                  {sub.positions} pos
+                </span>
+              )}
+              <span className={`text-sm font-mono font-medium ${
+                sub.rpnl + sub.upnl >= 0 ? 'text-[var(--color-profit)]' : 'text-[var(--color-loss)]'
+              }`}>
+                {formatPnl(sub.rpnl + sub.upnl)}
+              </span>
             </div>
           </div>
         ))}
-        {active.length === 0 && (
-          <div className="text-center py-8">
-            <p className="text-sm text-[var(--color-text-tertiary)]">No active subaccounts</p>
-          </div>
-        )}
       </div>
     </div>
   );
 }
 
-function PoolQuality({ pool }: {
-  pool: {
-    size: number;
-    limit: number;
-    quality: {
-      sharpe_avg: number | null;
-      winrate_avg: number | null;
-      dd_avg: number | null;
-    }
-  }
-}) {
-  const utilization = pool.limit > 0 ? (pool.size / pool.limit) * 100 : 0;
+// Capital Card
+function CapitalCard({ capital }: { capital: { total: number; main_account: number; subaccounts: number } }) {
+  const deployedPct = capital.total > 0 ? (capital.subaccounts / capital.total) * 100 : 0;
 
   return (
     <div className="card">
-      <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
-        Active Pool Quality
+      <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-3">
+        Capital
       </h3>
-      <div className="space-y-4">
-        {/* Pool size with progress bar */}
-        <div>
-          <div className="flex justify-between text-sm mb-1">
-            <span className="text-[var(--color-text-secondary)]">Pool Size</span>
-            <span className="font-mono text-[var(--color-text-primary)]">{pool.size}/{pool.limit}</span>
-          </div>
-          <div className="h-2 bg-[var(--color-bg-secondary)] rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all ${
-                utilization > 90 ? 'bg-[var(--color-loss)]' :
-                utilization > 70 ? 'bg-[var(--color-warning)]' :
-                'bg-[var(--color-profit)]'
-              }`}
-              style={{ width: `${utilization}%` }}
-            />
-          </div>
+      <div className="text-center mb-3">
+        <p className="text-2xl font-bold text-[var(--color-text-primary)]">{formatUsd(capital.total)}</p>
+        <p className="text-xs text-[var(--color-text-tertiary)]">Total</p>
+      </div>
+      <div className="h-2 bg-[var(--color-bg-tertiary)] rounded-full overflow-hidden mb-3">
+        <div className="h-full bg-[var(--color-accent)] rounded-full" style={{ width: `${deployedPct}%` }} />
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-center text-sm">
+        <div className="p-2 bg-[var(--color-bg-secondary)] rounded">
+          <p className="font-mono text-[var(--color-text-primary)]">{formatUsd(capital.main_account)}</p>
+          <p className="text-xs text-[var(--color-text-tertiary)]">Reserve</p>
         </div>
-
-        {/* Quality metrics */}
-        <div className="grid grid-cols-3 gap-3 text-center">
-          <div className="p-2 bg-[var(--color-bg-secondary)] rounded-lg">
-            <p className="text-lg font-mono font-medium text-[var(--color-text-primary)]">
-              {pool.quality.sharpe_avg?.toFixed(1) || '--'}
-            </p>
-            <p className="text-xs text-[var(--color-text-tertiary)]">Avg Sharpe</p>
-          </div>
-          <div className="p-2 bg-[var(--color-bg-secondary)] rounded-lg">
-            <p className="text-lg font-mono font-medium text-[var(--color-text-primary)]">
-              {pool.quality.winrate_avg ? `${(pool.quality.winrate_avg * 100).toFixed(0)}%` : '--'}
-            </p>
-            <p className="text-xs text-[var(--color-text-tertiary)]">Avg Win Rate</p>
-          </div>
-          <div className="p-2 bg-[var(--color-bg-secondary)] rounded-lg">
-            <p className="text-lg font-mono font-medium text-[var(--color-loss)]">
-              {pool.quality.dd_avg ? `${(pool.quality.dd_avg * 100).toFixed(0)}%` : '--'}
-            </p>
-            <p className="text-xs text-[var(--color-text-tertiary)]">Avg DD</p>
-          </div>
+        <div className="p-2 bg-[var(--color-accent)]/10 rounded">
+          <p className="font-mono text-[var(--color-accent)]">{formatUsd(capital.subaccounts)}</p>
+          <p className="text-xs text-[var(--color-text-tertiary)]">Deployed</p>
         </div>
       </div>
     </div>
@@ -439,9 +482,9 @@ function PoolQuality({ pool }: {
 
 export default function Overview() {
   const { data: status, isLoading: statusLoading, error: statusError } = useStatus();
-  const { data: snapshot } = useMetricsSnapshot();
+  const { data: snapshot, isLoading: snapshotLoading } = useMetricsSnapshot();
 
-  if (statusLoading) {
+  if (statusLoading || snapshotLoading) {
     return (
       <div className="flex items-center justify-center h-64">
         <Activity className="w-8 h-8 animate-spin text-[var(--color-text-tertiary)]" />
@@ -451,7 +494,7 @@ export default function Overview() {
 
   if (statusError) {
     return (
-      <div className="card border-[var(--color-loss)]/20 bg-[var(--color-loss-bg)]">
+      <div className="card border-[var(--color-loss)]/20">
         <div className="text-center py-8">
           <p className="text-[var(--color-loss)] font-medium">Failed to connect to API</p>
           <p className="text-sm text-[var(--color-text-tertiary)] mt-2">
@@ -462,89 +505,35 @@ export default function Overview() {
     );
   }
 
-  if (!status) return null;
-
-  // Calculate totals from snapshot subaccounts
-  const totalRpnl = snapshot?.subaccounts.reduce((sum, s) => sum + s.rpnl, 0) || 0;
-  const totalUpnl = snapshot?.subaccounts.reduce((sum, s) => sum + s.upnl, 0) || 0;
-  const totalPnl = totalRpnl + totalUpnl;
-  const capital = snapshot?.capital || { total: 0, main_account: 0, subaccounts: 0 };
-  const pnlPct = capital.subaccounts > 0 ? (totalPnl / capital.subaccounts) * 100 : 0;
-
-  // Pool quality metrics
-  const poolQuality = snapshot?.pool.quality || { sharpe_avg: null, winrate_avg: null, dd_avg: null };
-  const avgWinRate = poolQuality.winrate_avg;
+  if (!status || !snapshot) return null;
 
   return (
-    <div className="space-y-6">
-      {/* Page Header with Trading Mode */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Overview</h1>
-          <p className="text-sm text-[var(--color-text-secondary)] mt-1">
-            Real-time system status and performance
-          </p>
-        </div>
-        {snapshot && (
-          <TradingModeIndicator
-            mode={snapshot.trading_mode}
-            status={snapshot.status}
-          />
-        )}
+    <div className="space-y-4">
+      {/* Header with Status */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Overview</h1>
+        <StatusBadge mode={snapshot.trading_mode} status={snapshot.status} />
       </div>
 
-      {/* KPI Cards - 2 cols mobile, 4 cols desktop */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <MetricCard
-          label="Total P&L"
-          value={formatPnl(totalPnl)}
-          subValue={formatPct(pnlPct)}
-          icon={Wallet}
-          trend={totalPnl >= 0 ? 'up' : 'down'}
-        />
-        <MetricCard
-          label="Unrealized P&L"
-          value={formatPnl(totalUpnl)}
-          subValue={`${snapshot?.subaccounts.filter(s => s.positions > 0).length || 0} positions`}
-          icon={totalUpnl >= 0 ? TrendingUp : TrendingDown}
-          trend={totalUpnl >= 0 ? 'up' : 'down'}
-        />
-        <MetricCard
-          label="Pool Win Rate"
-          value={avgWinRate ? `${(avgWinRate * 100).toFixed(0)}%` : '--'}
-          subValue={`${snapshot?.pool.size || 0} strategies`}
-          icon={BarChart3}
-          trend={avgWinRate && avgWinRate >= 0.5 ? 'up' : 'neutral'}
-        />
-        <MetricCard
-          label="Live Strategies"
-          value={`${snapshot?.live.live || status.pipeline.LIVE || 0}`}
-          subValue={`${snapshot?.pool.size || status.pipeline.ACTIVE || 0} in pool`}
-          icon={Zap}
-          trend="neutral"
-        />
-      </div>
+      {/* P&L Hero - The most important section */}
+      <PnlHero snapshot={snapshot} />
 
-      {/* Second Row: Equity Curve + Capital - 2 cols on desktop */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2">
+      {/* Quick Stats Row */}
+      <QuickStats snapshot={snapshot} services={status.services} />
+
+      {/* Two Column Layout */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Left: Equity + Pipeline */}
+        <div className="lg:col-span-2 space-y-4">
           <EquityCurve />
+          <MiniPipeline snapshot={snapshot} />
         </div>
-        {snapshot && (
-          <CapitalBreakdown capital={snapshot.capital} />
-        )}
-      </div>
 
-      {/* Pipeline Status - Full width */}
-      <PipelineStatus pipeline={status.pipeline} />
-
-      {/* Third Row: Services + Subaccounts + Pool Quality */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <ServicesGrid services={status.services} />
-        <SubaccountsList subaccounts={snapshot?.subaccounts || []} />
-        {snapshot && (
-          <PoolQuality pool={snapshot.pool} />
-        )}
+        {/* Right: Capital + Subaccounts */}
+        <div className="space-y-4">
+          <CapitalCard capital={snapshot.capital} />
+          <SubaccountsSummary subaccounts={snapshot.subaccounts} />
+        </div>
       </div>
     </div>
   );

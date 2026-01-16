@@ -343,3 +343,14 @@ export async function getMetricsSnapshot() {
     `${API_BASE}/metrics/snapshot`
   );
 }
+
+// Positions - real-time from Hyperliquid
+export async function getPositions(params?: { subaccount_id?: number }) {
+  const searchParams = new URLSearchParams();
+  if (params?.subaccount_id) searchParams.set('subaccount_id', params.subaccount_id.toString());
+
+  const query = searchParams.toString();
+  return fetchJson<import('../types').PositionsResponse>(
+    `${API_BASE}/positions${query ? `?${query}` : ''}`
+  );
+}

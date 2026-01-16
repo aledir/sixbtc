@@ -271,3 +271,12 @@ export function useMetricsSnapshot() {
     refetchInterval: SLOW_REFRESH,  // 60s - matches collection interval
   });
 }
+
+// Positions - real-time from Hyperliquid
+export function usePositions(params?: Parameters<typeof api.getPositions>[0]) {
+  return useQuery({
+    queryKey: ['positions', params],
+    queryFn: () => api.getPositions(params),
+    refetchInterval: FAST_REFRESH,  // 10s for live positions
+  });
+}

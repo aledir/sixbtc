@@ -1,12 +1,14 @@
 import { useState } from 'react';
-import { useTrades, useTradesSummary, usePerformanceEquity, useMetricsSnapshot } from '../hooks/useApi';
-import type { TradeItem, SnapshotSubaccount } from '../types';
+import { useTrades, useTradesSummary, usePerformanceEquity, useMetricsSnapshot, usePositions } from '../hooks/useApi';
+import type { TradeItem, SnapshotSubaccount, Position } from '../types';
 import {
   Activity,
   Wallet,
   Clock,
   Target,
   AlertTriangle,
+  TrendingUp,
+  TrendingDown,
 } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import {
@@ -191,11 +193,91 @@ function SubaccountCard({ subaccount }: { subaccount: SnapshotSubaccount }) {
   );
 }
 
-// Open Positions Table
-function OpenPositionsTable({ subaccounts }: { subaccounts: SnapshotSubaccount[] }) {
-  const withPositions = subaccounts.filter(s => s.positions > 0);
+// Format price based on magnitude
+function formatPrice(price: number): string {
+  if (price >= 1000) return `$${price.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  if (price >= 1) return `$${price.toFixed(2)}`;
+  return `$${price.toFixed(4)}`;
+}
 
-  if (withPositions.length === 0) {
+// Format size based on magnitude
+function formatSize(size: number): string {
+  if (size >= 1) return size.toFixed(4);
+  return size.toFixed(6);
+}
+
+// Position Row Component
+function PositionRow({ position }: { position: Position }) {
+  const pnlColor = position.unrealized_pnl >= 0 ? 'text-[var(--color-profit)]' : 'text-[var(--color-loss)]';
+  const pnlPct = (position.unrealized_pnl / (position.margin_used || 1)) * 100;
+
+  return (
+    <tr className="border-b border-[var(--color-border-primary)] hover:bg-[var(--color-bg-secondary)]">
+      {/* Symbol + Side */}
+      <td className="px-4 py-3">
+        <div className="flex items-center gap-2">
+          <span className="font-mono font-medium text-[var(--color-text-primary)]">{position.symbol}</span>
+          <span className={`badge ${position.side === 'long' ? 'badge-profit' : 'badge-loss'}`}>
+            {position.side === 'long' ? <TrendingUp size={10} className="mr-0.5" /> : <TrendingDown size={10} className="mr-0.5" />}
+            {position.side.toUpperCase()}
+          </span>
+        </div>
+        <div className="text-xs text-[var(--color-text-tertiary)] mt-0.5 md:hidden">
+          Sub #{position.subaccount_id}
+        </div>
+      </td>
+
+      {/* Subaccount (desktop only) */}
+      <td className="px-4 py-3 hide-mobile">
+        <span className="text-sm font-mono text-[var(--color-text-secondary)]">#{position.subaccount_id}</span>
+      </td>
+
+      {/* Size */}
+      <td className="px-4 py-3 text-sm font-mono text-[var(--color-text-secondary)]">
+        {formatSize(position.size)}
+        <span className="text-[var(--color-text-tertiary)] text-xs ml-1">{position.leverage}x</span>
+      </td>
+
+      {/* Entry Price */}
+      <td className="px-4 py-3 text-sm font-mono text-[var(--color-text-secondary)] hide-mobile">
+        {formatPrice(position.entry_price)}
+      </td>
+
+      {/* Mark Price */}
+      <td className="px-4 py-3 text-sm font-mono text-[var(--color-text-primary)]">
+        {formatPrice(position.mark_price)}
+      </td>
+
+      {/* Unrealized P&L */}
+      <td className={`px-4 py-3 text-right ${pnlColor}`}>
+        <div className="font-mono font-medium">{formatPnl(position.unrealized_pnl)}</div>
+        <div className="text-xs">{pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(1)}%</div>
+      </td>
+
+      {/* Liquidation Price (desktop only) */}
+      <td className="px-4 py-3 text-sm font-mono text-[var(--color-text-tertiary)] hide-mobile">
+        {position.liquidation_price ? formatPrice(position.liquidation_price) : '--'}
+      </td>
+    </tr>
+  );
+}
+
+// Detailed Positions Table with individual positions
+function DetailedPositionsTable({ positions, isLoading }: { positions: Position[]; isLoading: boolean }) {
+  if (isLoading) {
+    return (
+      <div className="card">
+        <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
+          Open Positions
+        </h3>
+        <div className="flex items-center justify-center py-8">
+          <Activity className="w-5 h-5 animate-spin text-[var(--color-text-tertiary)]" />
+        </div>
+      </div>
+    );
+  }
+
+  if (positions.length === 0) {
     return (
       <div className="card">
         <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
@@ -208,11 +290,65 @@ function OpenPositionsTable({ subaccounts }: { subaccounts: SnapshotSubaccount[]
     );
   }
 
+  const totalPnl = positions.reduce((sum, p) => sum + p.unrealized_pnl, 0);
+  const totalMargin = positions.reduce((sum, p) => sum + p.margin_used, 0);
+
+  return (
+    <div className="card p-0 overflow-hidden">
+      <div className="px-4 py-3 border-b border-[var(--color-border-primary)] flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase">
+          Open Positions ({positions.length})
+        </h3>
+        <div className="flex items-center gap-4 text-sm">
+          <div>
+            <span className="text-[var(--color-text-tertiary)]">Margin: </span>
+            <span className="font-mono text-[var(--color-text-primary)]">${totalMargin.toFixed(0)}</span>
+          </div>
+          <div>
+            <span className="text-[var(--color-text-tertiary)]">uPnL: </span>
+            <span className={`font-mono font-medium ${totalPnl >= 0 ? 'text-[var(--color-profit)]' : 'text-[var(--color-loss)]'}`}>
+              {formatPnl(totalPnl)}
+            </span>
+          </div>
+        </div>
+      </div>
+      <div className="table-responsive">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th className="hide-mobile">Sub</th>
+              <th>Size</th>
+              <th className="hide-mobile">Entry</th>
+              <th>Mark</th>
+              <th className="text-right">uPnL</th>
+              <th className="hide-mobile">Liq. Price</th>
+            </tr>
+          </thead>
+          <tbody>
+            {positions.map((pos, idx) => (
+              <PositionRow key={`${pos.subaccount_id}-${pos.symbol}-${idx}`} position={pos} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// Subaccounts Summary Table (compact view of subaccounts with positions)
+function SubaccountPositionsSummary({ subaccounts }: { subaccounts: SnapshotSubaccount[] }) {
+  const withPositions = subaccounts.filter(s => s.positions > 0);
+
+  if (withPositions.length === 0) {
+    return null;
+  }
+
   return (
     <div className="card p-0 overflow-hidden">
       <div className="px-4 py-3 border-b border-[var(--color-border-primary)]">
         <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase">
-          Open Positions ({withPositions.reduce((sum, s) => sum + s.positions, 0)})
+          Subaccounts with Positions ({withPositions.length})
         </h3>
       </div>
       <div className="table-responsive">
@@ -292,6 +428,7 @@ export default function Trading() {
   });
 
   const { data: snapshot, isLoading: snapshotLoading } = useMetricsSnapshot();
+  const { data: positionsData, isLoading: positionsLoading } = usePositions();
   const { data: summary } = useTradesSummary({ days: 30 });
   const { data: performanceData } = usePerformanceEquity({ period: '24h' });
 
@@ -452,8 +589,14 @@ export default function Trading() {
         </div>
       </div>
 
-      {/* Open Positions Section */}
-      <OpenPositionsTable subaccounts={subaccounts} />
+      {/* Open Positions Section - Detailed individual positions */}
+      <DetailedPositionsTable
+        positions={positionsData?.positions || []}
+        isLoading={positionsLoading}
+      />
+
+      {/* Subaccounts with Positions Summary */}
+      <SubaccountPositionsSummary subaccounts={subaccounts} />
 
       {/* Subaccounts Grid */}
       <div>

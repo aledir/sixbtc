@@ -1,4 +1,4 @@
-import { NavLink, Outlet, useLocation } from 'react-router-dom';
+import { NavLink, Outlet } from 'react-router-dom';
 import {
   LayoutDashboard,
   LineChart,
@@ -7,17 +7,9 @@ import {
   Settings,
   Sun,
   Moon,
-  Menu,
-  X,
-  Trophy,
-  FileCode,
-  CheckCircle,
-  Clock,
-  ScrollText,
 } from 'lucide-react';
 import { useStatus } from '../hooks/useApi';
 import { useTheme } from '../contexts/ThemeContext';
-import { useState } from 'react';
 
 // Main navigation items (shown in bottom bar on mobile)
 const mainNavItems = [
@@ -25,7 +17,7 @@ const mainNavItems = [
   { to: '/trading', icon: LineChart, label: 'Trading' },
   { to: '/strategies', icon: TrendingUp, label: 'Strategies' },
   { to: '/pipeline', icon: Activity, label: 'Pipeline' },
-  { to: '/settings', icon: Settings, label: 'More' },
+  { to: '/system', icon: Settings, label: 'System' },
 ];
 
 // All navigation items for desktop sidebar and mobile menu
@@ -34,12 +26,7 @@ const allNavItems = [
   { to: '/trading', icon: LineChart, label: 'Trading' },
   { to: '/strategies', icon: TrendingUp, label: 'Strategies' },
   { to: '/pipeline', icon: Activity, label: 'Pipeline' },
-  { to: '/rankings', icon: Trophy, label: 'Rankings' },
-  { to: '/validation', icon: CheckCircle, label: 'Validation' },
-  { to: '/templates', icon: FileCode, label: 'Templates' },
-  { to: '/system-tasks', icon: Clock, label: 'System Tasks' },
-  { to: '/logs', icon: ScrollText, label: 'Logs' },
-  { to: '/settings', icon: Settings, label: 'Settings' },
+  { to: '/system', icon: Settings, label: 'System' },
 ];
 
 function formatUptime(seconds: number): string {
@@ -94,62 +81,6 @@ function StatusIndicator() {
   );
 }
 
-// Mobile menu overlay
-function MobileMenu({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
-  if (!isOpen) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 md:hidden">
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-        onClick={onClose}
-      />
-
-      {/* Menu panel */}
-      <div className="absolute right-0 top-0 bottom-0 w-72 bg-[var(--color-bg-elevated)] shadow-lg flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-[var(--color-border-primary)]">
-          <span className="font-semibold">Menu</span>
-          <button onClick={onClose} className="btn btn-ghost p-2">
-            <X size={20} />
-          </button>
-        </div>
-
-        {/* Nav items */}
-        <nav className="flex-1 p-2 overflow-y-auto">
-          {allNavItems.map(({ to, icon: Icon, label }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={to === '/'}
-              onClick={onClose}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-4 py-3 rounded-lg text-sm transition-colors ${
-                  isActive
-                    ? 'bg-[var(--color-accent-muted)] text-[var(--color-accent)]'
-                    : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]'
-                }`
-              }
-            >
-              <Icon size={20} />
-              {label}
-            </NavLink>
-          ))}
-        </nav>
-
-        {/* Footer */}
-        <div className="p-4 border-t border-[var(--color-border-primary)]">
-          <div className="flex items-center justify-between">
-            <StatusIndicator />
-            <ThemeToggle />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // Desktop sidebar
 function DesktopSidebar() {
   return (
@@ -193,54 +124,27 @@ function DesktopSidebar() {
 }
 
 // Mobile bottom tab bar
-function MobileTabBar({ onMenuOpen }: { onMenuOpen: () => void }) {
-  const location = useLocation();
-
-  // Check if we're on one of the "More" pages
-  const isMorePage = ['/rankings', '/validation', '/templates', '/system-tasks', '/logs', '/settings'].includes(
-    location.pathname
-  );
-
+function MobileTabBar() {
   return (
     <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-[var(--color-bg-elevated)] border-t border-[var(--color-border-primary)] safe-bottom z-40">
       <div className="flex items-center justify-around h-16">
-        {mainNavItems.map(({ to, icon: Icon, label }) => {
-          // Special handling for "More" button
-          if (label === 'More') {
-            return (
-              <button
-                key="more"
-                onClick={onMenuOpen}
-                className={`flex flex-col items-center justify-center gap-1 flex-1 h-full transition-colors ${
-                  isMorePage
-                    ? 'text-[var(--color-accent)]'
-                    : 'text-[var(--color-text-tertiary)]'
-                }`}
-              >
-                <Menu size={22} />
-                <span className="text-[10px] font-medium">{label}</span>
-              </button>
-            );
-          }
-
-          return (
-            <NavLink
-              key={to}
-              to={to}
-              end={to === '/'}
-              className={({ isActive }) =>
-                `flex flex-col items-center justify-center gap-1 flex-1 h-full transition-colors ${
-                  isActive
-                    ? 'text-[var(--color-accent)]'
-                    : 'text-[var(--color-text-tertiary)]'
-                }`
-              }
-            >
-              <Icon size={22} />
-              <span className="text-[10px] font-medium">{label}</span>
-            </NavLink>
-          );
-        })}
+        {mainNavItems.map(({ to, icon: Icon, label }) => (
+          <NavLink
+            key={to}
+            to={to}
+            end={to === '/'}
+            className={({ isActive }) =>
+              `flex flex-col items-center justify-center gap-1 flex-1 h-full transition-colors ${
+                isActive
+                  ? 'text-[var(--color-accent)]'
+                  : 'text-[var(--color-text-tertiary)]'
+              }`
+            }
+          >
+            <Icon size={22} />
+            <span className="text-[10px] font-medium">{label}</span>
+          </NavLink>
+        ))}
       </div>
     </nav>
   );
@@ -262,7 +166,6 @@ function MobileHeader() {
 }
 
 export default function Layout() {
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const { data: status } = useStatus();
   const hasAlerts = (status?.alerts.length ?? 0) > 0;
 
@@ -297,13 +200,7 @@ export default function Layout() {
       </div>
 
       {/* Mobile Bottom Tab Bar */}
-      <MobileTabBar onMenuOpen={() => setIsMobileMenuOpen(true)} />
-
-      {/* Mobile Menu Overlay */}
-      <MobileMenu
-        isOpen={isMobileMenuOpen}
-        onClose={() => setIsMobileMenuOpen(false)}
-      />
+      <MobileTabBar />
     </div>
   );
 }

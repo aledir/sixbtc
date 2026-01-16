@@ -104,6 +104,7 @@ from src.api.routes import (
     metrics_router,
     performance_router,
     pipeline_router,
+    positions_router,
     scheduler_router,
     coins_router,
     services_router,
@@ -124,6 +125,7 @@ app.include_router(execution_router, prefix="/api", tags=["Execution"])
 app.include_router(performance_router, prefix="/api", tags=["Performance"])
 app.include_router(trades_router, prefix="/api", tags=["Trades"])
 app.include_router(subaccounts_router, prefix="/api", tags=["Subaccounts"])
+app.include_router(positions_router, prefix="/api", tags=["Positions"])
 app.include_router(scheduler_router, prefix="/api", tags=["Scheduler"])
 app.include_router(coins_router, prefix="/api", tags=["Coins"])
 app.include_router(services_router, prefix="/api", tags=["Services"])

@@ -71,7 +71,7 @@ hyperliquid:
   # MASTER dry_run flag - controls ALL trading behavior
   # true = no real orders (safe testing)
   # false = real orders (live trading)
-  dry_run: false
+  dry_run: true
 
   # Testnet mode (if true, uses testnet API)
   testnet: false
@@ -82,7 +82,7 @@ hyperliquid:
   # Subaccounts are managed via scripts/setup_hyperliquid.py
   # Master wallet credentials are in .env: HL_MASTER_ADDRESS, HL_MASTER_PRIVATE_KEY
   subaccounts:
-    count: 5                       # Target number of subaccounts (max 10 per HL)
+    count: 8                       # Target number of subaccounts (max 10 per HL)
     naming_pattern: "Bot-{:03d}"   # Pattern for names: Bot-001, Bot-002, etc.
 
   # --------------------------------------------------------------------------
@@ -101,8 +101,8 @@ hyperliquid:
   # Automatic topup from master to subaccounts when balance falls below threshold
   # Policy: topup only from master, NEVER between subaccounts
   funds:
-    min_operational_usd: 50        # Below this → trigger topup
-    topup_target_usd: 100          # Target balance after topup
+    min_operational_usd: 150       # Below this → trigger topup
+    topup_target_usd: 200          # Target balance after topup
     master_reserve_usd: 100        # Never drain master below this
     min_tradeable_usd: 15          # Below this → subaccount cannot trade
     check_interval_hours: 24       # How often to check balances
@@ -301,7 +301,7 @@ generation:
 # New strategies enter if: score >= min_score AND (pool not full OR score > min(pool))
 # NOTE: All strategies in ACTIVE are eligible for LIVE deployment (single threshold)
 active_pool:
-  max_size: 300                  # Max strategies in pool (leaderboard)
+  max_size: 100                  # Max strategies in pool (10x buffer with 10 subaccounts)
   min_score: 40                  # Minimum score to enter pool (and be LIVE eligible)
 
 # ==============================================================================
@@ -400,7 +400,7 @@ backtesting:
 
   # Re-backtest configuration for ACTIVE pool freshness
   retest:
-    interval_days: 3         # Re-test ACTIVE strategies every 3 days
+    interval_days: 1         # Re-test ACTIVE strategies daily (pool=50 is manageable)
     # Re-backtest uses: optimal TF only, 365+30 days, same parameters (no parametric)
 
   # In-sample/Out-of-sample split (unified approach)
@@ -494,8 +494,8 @@ scorer:
 # ==============================================================================
 rotator:
   check_interval_minutes: 15     # Check every 15 min for deployment opportunities
-  max_live_strategies: 5         # Max strategies in LIVE (= subaccounts.count)
-  min_pool_size: 100             # Don't deploy until ACTIVE pool has >= 100 strategies
+  max_live_strategies: 8         # Max strategies in LIVE (= subaccounts.count)
+  min_pool_size: 30              # Sbarramento: serve pool >= 30 prima di andare live
   # NOTE: min_score for LIVE eligibility uses active_pool.min_score (single threshold)
 
   # Diversification rules
@@ -710,6 +710,11 @@ scheduler:
       run_hour: 1                 # Run at 01:40 UTC
       run_minute: 40
       max_age_days: 7             # Delete RETIRED older than 7 days
+
+    # Sync subaccount balances from Hyperliquid (reduces data staleness)
+    sync_balances:
+      enabled: true
+      interval_minutes: 5         # Every 5 minutes for fresh balance data
 
 # ==============================================================================
 # DATA SCHEDULER

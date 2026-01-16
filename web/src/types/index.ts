@@ -854,6 +854,31 @@ export interface SnapshotFailures {
   pool_reject: number;
 }
 
+// =============================================================================
+// POSITIONS (from Hyperliquid real-time)
+// =============================================================================
+
+export interface Position {
+  subaccount_id: number;
+  strategy_name: string | null;
+  symbol: string;
+  side: 'long' | 'short';
+  size: number;
+  entry_price: number;
+  mark_price: number;
+  unrealized_pnl: number;
+  leverage: number;
+  liquidation_price: number | null;
+  margin_used: number;
+}
+
+export interface PositionsResponse {
+  positions: Position[];
+  total_unrealized_pnl: number;
+  total_positions: number;
+  total_margin_used: number;
+}
+
 // Full snapshot response
 export interface MetricsSnapshotResponse {
   timestamp: string;

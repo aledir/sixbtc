@@ -120,6 +120,13 @@ class ContinuousSchedulerProcess:
             self.cleanup_retired_minute = retired_config.get('run_minute', 10)
             self.cleanup_retired_max_age_days = retired_config.get('max_age_days', 7)
 
+        # Sync balances from Hyperliquid (reduces data staleness)
+        sync_config = scheduler_config.get('sync_balances', {})
+        if sync_config.get('enabled', False):
+            # Convert minutes to hours for the interval check
+            interval_minutes = sync_config.get('interval_minutes', 5)
+            self.tasks['sync_balances'] = interval_minutes / 60.0  # 5 min = 0.0833 hours
+
         # Market regime detection (Unger method)
         # Runs 2x daily AFTER download_data (02:30 and 14:30 UTC)
         regime_config = self.config._raw_config.get('regime', {})
@@ -356,6 +363,11 @@ class ContinuousSchedulerProcess:
                 result = await self._download_data()
                 tracker.add_metadata('downloaded', result.get('downloaded', 0))
                 tracker.add_metadata('symbols', result.get('symbols', 0))
+
+            elif task_name == 'sync_balances':
+                result = await self._sync_balances()
+                tracker.add_metadata('synced', result.get('synced', 0))
+                tracker.add_metadata('total_balance', result.get('total_balance', 0))
 
             else:
                 logger.warning(f"Unknown task: {task_name}")
@@ -906,6 +918,47 @@ class ContinuousSchedulerProcess:
         except Exception as e:
             logger.error(f"Data download failed: {e}", exc_info=True)
             return {'downloaded': 0, 'reason': str(e)}
+
+    async def _sync_balances(self) -> dict:
+        """
+        Sync subaccount balances from Hyperliquid.
+
+        Uses BalanceSyncService to fetch real-time balances and update DB.
+        This reduces data staleness from trade-to-trade to < 5 minutes.
+        """
+        try:
+            from src.executor.hyperliquid_client import HyperliquidClient
+            from src.executor.balance_sync import BalanceSyncService
+
+            client = HyperliquidClient()
+            sync_service = BalanceSyncService(
+                config=self.config._raw_config,
+                client=client
+            )
+
+            # Sync all subaccounts
+            results = sync_service.sync_all_subaccounts()
+
+            synced_count = len(results)
+            total_balance = sum(results.values()) if results else 0
+
+            if synced_count > 0:
+                logger.info(
+                    f"Balance sync complete: {synced_count} subaccounts, "
+                    f"total=${total_balance:.2f}"
+                )
+            else:
+                logger.debug("Balance sync: no subaccounts with funds")
+
+            return {
+                'synced': synced_count,
+                'total_balance': total_balance,
+                'balances': results
+            }
+
+        except Exception as e:
+            logger.error(f"Balance sync failed: {e}", exc_info=True)
+            return {'synced': 0, 'reason': str(e)}
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals"""
