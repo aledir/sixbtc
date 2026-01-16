@@ -83,12 +83,26 @@ class StatisticsService:
         """
         Get current balance directly from Hyperliquid (source of truth).
 
+        Rule #4b: WebSocket First
+        - First try: WebSocket account_state (real-time, no API call)
+        - Fallback: HTTP API via client.get_account_balance()
+
         Args:
             subaccount_id: Subaccount number
 
         Returns:
             Current account balance
         """
+        # Rule #4b: Try WebSocket first (if data_provider is available)
+        if self.data_provider and self.data_provider.account_state:
+            # WebSocket account_state is for master account, not per-subaccount
+            # For subaccount-specific balances, we still need HTTP
+            # However, for subaccount 0 (master), we can use WebSocket
+            if subaccount_id == 0:
+                return self.data_provider.account_state.account_value
+            # For other subaccounts, fall through to HTTP
+
+        # HTTP fallback (or for subaccounts other than master)
         try:
             return self.client.get_account_balance(subaccount_id)
         except Exception as e:

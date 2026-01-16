@@ -24,6 +24,7 @@ from src.executor.risk_manager import RiskManager
 from src.executor.trailing_service import TrailingService
 from src.executor.emergency_stop_manager import EmergencyStopManager
 from src.executor.balance_sync import BalanceSyncService
+from src.executor.balance_reconciliation import BalanceReconciliationService
 from src.executor.statistics_service import StatisticsService
 from src.data.hyperliquid_websocket import get_data_provider, HyperliquidDataProvider
 from src.data.coin_registry import get_registry, get_active_pairs, CoinNotFoundError
@@ -88,6 +89,14 @@ class ContinuousExecutorProcess:
         # Formula: True P&L = Current Balance - Net Deposits
         # This is immune to manual deposits/withdrawals corrupting statistics
         self.statistics_service = StatisticsService(self.client, self.data_provider)
+
+        # Balance reconciliation service for tracking deposits/withdrawals
+        # Automatically adjusts allocated_capital based on ledger events
+        self.reconciliation_service = BalanceReconciliationService(
+            client=self.client,
+            data_provider=self.data_provider,
+            config=self.config._raw_config
+        )
 
         # Pass data_provider and statistics_service to emergency manager
         self.emergency_manager = EmergencyStopManager(
@@ -208,6 +217,12 @@ class ContinuousExecutorProcess:
                 logger.info(f"  Subaccount {sub_id}: ${balance:.2f}")
         else:
             logger.info("Balance sync: no subaccounts with funds found")
+
+        # Catch up on missed ledger events during downtime
+        # This reconciles allocated_capital based on actual deposits/withdrawals
+        logger.info("Running ledger reconciliation catchup...")
+        catchup_count = await self.reconciliation_service.startup_catchup()
+        logger.info(f"Ledger catchup complete: {catchup_count} events processed")
 
         # Validate subaccount state to prevent false emergency stops
         self._validate_subaccount_state()

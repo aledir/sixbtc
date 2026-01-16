@@ -74,6 +74,7 @@ Exchange state is canonical. Database is audit trail only.
 
 ### Rule #4b: WebSocket First
 WebSocket for ALL data. REST only for actions (place order, cancel). Rate limit: 1200 req/min.
+See `docs/HYPERLIQUID_INTEGRATION.md` for WebSocket channels and `docs/BALANCE_MANAGEMENT.md` for capital tracking.
 
 ### Rule #5: No AI Prompt Hardcoding
 Use Jinja2 templates in `src/generator/templates/`

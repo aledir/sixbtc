@@ -125,6 +125,14 @@ hyperliquid:
     enabled: true
     fills_lookback_days: 7  # How far back to look for fills
 
+  # Balance reconciliation configuration
+  # Automatically tracks deposits/withdrawals to adjust allocated_capital
+  # Solves "phantom capital" problem (allocated_capital > 0 but never funded)
+  balance_reconciliation:
+    enabled: true
+    catchup_lookback_days: 7      # Days to look back for missed events at startup
+    ws_silence_threshold_sec: 120 # WebSocket silence threshold for staleness warning
+
 # ==============================================================================
 # FUNDING RATES (Hyperliquid Perpetuals)
 # ==============================================================================
@@ -715,6 +723,17 @@ scheduler:
     sync_balances:
       enabled: true
       interval_minutes: 5         # Every 5 minutes for fresh balance data
+
+# ==============================================================================
+# GO LIVE (Preflight Checks)
+# ==============================================================================
+# Configuration for Go Live preflight checks in the frontend.
+# Capital/pool settings are read from their respective sections above.
+go_live:
+  preflight_checks:
+    require_funded: true          # Require subaccounts to be funded before going live
+    require_pool: true            # Require pool >= rotator.min_pool_size before going live
+    clear_emergency_stops: true   # Allow clearing emergency stops via UI
 
 # ==============================================================================
 # DATA SCHEDULER

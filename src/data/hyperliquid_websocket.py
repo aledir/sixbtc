@@ -25,7 +25,7 @@ import threading
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Deque, Any
+from typing import Dict, List, Optional, Deque, Any, Callable
 
 import websockets
 import pandas as pd
@@ -101,6 +101,21 @@ class UserFill:
     closed_pnl: float  # Non-zero only for closing fills
     direction: str  # "Open Long", "Close Short", etc.
     timestamp: datetime
+
+
+@dataclass
+class LedgerUpdate:
+    """
+    Ledger update event (deposit, withdraw, transfer).
+
+    Used by BalanceReconciliationService to track capital changes.
+    """
+    timestamp: datetime
+    update_type: str  # 'deposit', 'withdraw', 'internalTransfer', 'subAccountTransfer'
+    amount: float
+    direction: str  # 'in' or 'out'
+    hash: str  # Transaction hash for deduplication
+    raw_data: Dict
 
 
 class HyperliquidDataProvider:
@@ -191,6 +206,10 @@ class HyperliquidDataProvider:
 
         # User fills for trade reconstruction
         self.user_fills: Deque[UserFill] = deque(maxlen=1000)
+
+        # Ledger updates for balance reconciliation (deposit, withdraw, transfer)
+        self.ledger_updates: Deque[LedgerUpdate] = deque(maxlen=1000)
+        self._ledger_callback: Optional[Callable] = None
 
         # WebSocket health monitoring
         self.last_webdata2_update: Optional[datetime] = None
@@ -417,6 +436,39 @@ class HyperliquidDataProvider:
 
         # Fetch initial snapshot via HTTP (WebSocket only sends updates)
         await self._fetch_initial_account_state_snapshot()
+
+        # Subscribe to ledger updates for balance reconciliation
+        await self.subscribe_ledger_updates()
+
+    async def subscribe_ledger_updates(self):
+        """
+        Subscribe to userNonFundingLedgerUpdates for deposit/withdraw/transfer events.
+
+        Used by BalanceReconciliationService to automatically track capital changes.
+        """
+        if not self.user_address:
+            logger.debug("Cannot subscribe to ledger updates - no user_address in config")
+            return
+
+        await self.ws.send(json.dumps({
+            "method": "subscribe",
+            "subscription": {
+                "type": "userNonFundingLedgerUpdates",
+                "user": self.user_address
+            },
+        }))
+        logger.info("Subscribed to userNonFundingLedgerUpdates (balance reconciliation)")
+
+    def set_ledger_callback(self, callback: Callable[[LedgerUpdate], None]):
+        """
+        Set callback for ledger updates.
+
+        Args:
+            callback: Function to call when a ledger update is received.
+                      Receives LedgerUpdate object.
+        """
+        self._ledger_callback = callback
+        logger.debug("Ledger callback registered")
 
     async def _fetch_initial_account_state_snapshot(self):
         """
@@ -690,6 +742,86 @@ class HyperliquidDataProvider:
         except Exception as e:
             logger.error(f"Error handling user fills: {e}", exc_info=True)
 
+    async def _handle_ledger_update(self, data: Dict):
+        """
+        Handle userNonFundingLedgerUpdates (deposit, withdraw, transfer events).
+
+        These events are used by BalanceReconciliationService to track capital changes.
+        Supports: deposit, withdraw, internalTransfer, subAccountTransfer
+        """
+        try:
+            updates_data = data.get("data", {})
+
+            # Skip subscription confirmations (empty or string data)
+            if not updates_data or isinstance(updates_data, str):
+                logger.debug("userNonFundingLedgerUpdates: subscription confirmed")
+                return
+
+            # Handle both single update and list of updates
+            if isinstance(updates_data, dict):
+                updates_list = [updates_data]
+            elif isinstance(updates_data, list):
+                updates_list = updates_data
+            else:
+                logger.warning(f"Unexpected ledger update format: {type(updates_data)}")
+                return
+
+            for update_data in updates_list:
+                # Parse the update type and amount
+                # Hyperliquid format: {"time": ms, "hash": "...", "delta": {...}}
+                delta = update_data.get("delta", update_data)
+
+                update_type = delta.get("type", "unknown")
+                amount = float(delta.get("usdc", 0))
+
+                # Determine direction based on type and amount sign
+                # deposit/transferIn -> 'in'
+                # withdraw/transferOut -> 'out'
+                if update_type in ("deposit", "internalTransfer"):
+                    direction = "in" if amount > 0 else "out"
+                elif update_type in ("withdraw",):
+                    direction = "out"
+                elif update_type == "subAccountTransfer":
+                    # subAccountTransfer uses 'user' field to determine direction
+                    # If receiving, amount > 0; if sending, amount < 0
+                    direction = "in" if amount > 0 else "out"
+                else:
+                    direction = "in" if amount > 0 else "out"
+
+                # Parse timestamp
+                time_ms = update_data.get("time", 0)
+                timestamp = datetime.fromtimestamp(time_ms / 1000) if time_ms else datetime.now()
+
+                # Get transaction hash for deduplication
+                tx_hash = update_data.get("hash", f"no_hash_{time_ms}")
+
+                ledger_update = LedgerUpdate(
+                    timestamp=timestamp,
+                    update_type=update_type,
+                    amount=abs(amount),
+                    direction=direction,
+                    hash=tx_hash,
+                    raw_data=update_data,
+                )
+
+                async with self.async_lock:
+                    self.ledger_updates.append(ledger_update)
+
+                logger.info(
+                    f"Ledger update: {update_type} {direction.upper()} "
+                    f"${abs(amount):.2f} (hash: {tx_hash[:16]}...)"
+                )
+
+                # Call callback if registered
+                if self._ledger_callback:
+                    try:
+                        self._ledger_callback(ledger_update)
+                    except Exception as e:
+                        logger.error(f"Error in ledger callback: {e}", exc_info=True)
+
+        except Exception as e:
+            logger.error(f"Error handling ledger update: {e}", exc_info=True)
+
     async def _message_handler(self):
         """Main message processing loop"""
         try:
@@ -717,6 +849,9 @@ class HyperliquidDataProvider:
                 elif channel == "orderUpdates":
                     # Not used by TradeSync, but log for debugging
                     logger.debug(f"orderUpdates received")
+
+                elif channel == "userNonFundingLedgerUpdates":
+                    await self._handle_ledger_update(data)
 
                 elif channel == "subscriptionResponse":
                     sub_data = data.get('data', {})
