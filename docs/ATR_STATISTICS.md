@@ -85,9 +85,14 @@ For `close_based` patterns (time-based exit), the SL is calculated using ATR ins
 ```python
 # In parametric_backtest.py build_execution_type_space():
 if execution_type == 'close_based':
-    if atr_signal_median:
-        # ATR-based SL: volatility-aware protection
-        sl_values = [atr_signal_median * mult for mult in [2.0, 3.0, 4.0, 5.0]]
+    if atr_signal_median and atr_signal_median > 0:
+        # ATR-based SL: pattern fired at this volatility level
+        # For close_based, the edge manifests at TIME EXIT (e.g., 24h)
+        # SL must be wide enough to survive normal volatility until then
+        # Typical 24h price swing: 3-5x daily ATR
+        # Multipliers: 4x to 10x ATR for sufficient breathing room
+        sl_multipliers = [4.0, 6.0, 8.0, 10.0]
+        sl_values = [atr_signal_median * mult for mult in sl_multipliers]
     else:
         # Fallback: wider magnitude-based (less accurate)
         sl_values = [base_magnitude * mult for mult in [4.0, 6.0, 8.0, 10.0]]
@@ -96,11 +101,10 @@ if execution_type == 'close_based':
 **Why ATR-based SL?**
 - Pattern-discovery validates close_based patterns with no SL (only time exit)
 - Real trading needs SL for risk management
-- Using magnitude-based SL can be too tight or too loose
-- ATR reflects actual volatility when pattern fired → appropriate SL level
+- SL must be wide enough to survive normal volatility until time exit
+- Typical 24h price swing: 3-5x daily ATR, so multipliers 4-10x give breathing room
 
 **Example:**
 - Pattern `return_24h_gt_pos6`: magnitude=3%, atr_signal_median=1.13%
-- Old SL (magnitude×2-5): [6%, 9%, 12%, 15%]
-- New SL (ATR×2-5): [2.3%, 3.4%, 4.5%, 5.6%]
-- The new values are tighter but more aligned with actual volatility
+- SL (ATR×4-10): [4.5%, 6.8%, 9.0%, 11.3%]
+- Wide enough to avoid premature stop-outs before time exit
