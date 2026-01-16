@@ -81,25 +81,23 @@ class BalanceReconciliationService:
 
     async def startup_catchup(self) -> int:
         """
-        Catch up on missed ledger events during downtime via HTTP API.
+        Reconcile allocated_capital with actual balance at startup.
 
-        Called at executor startup AFTER balance_sync but BEFORE main loop.
+        Simple rule: allocated_capital = current_balance
+        This ensures DD calculation is always based on actual funds.
 
         Returns:
-            Number of events processed
+            Number of subaccounts reconciled
         """
         if not self.enabled:
             logger.info("Balance reconciliation disabled, skipping catchup")
             return 0
 
-        logger.info(
-            f"Starting ledger catchup (last {self.catchup_lookback_days} days)..."
-        )
+        logger.info("Starting balance reconciliation...")
 
-        total_processed = 0
-        phantom_capital_fixed = 0
+        reconciled_count = 0
 
-        # Calculate time range
+        # Calculate time range for ledger (for tracking hashes only)
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
         start_ms = now_ms - (self.catchup_lookback_days * 24 * 60 * 60 * 1000)
 
@@ -113,70 +111,76 @@ class BalanceReconciliationService:
                         logger.debug(f"Subaccount {sa.id}: no credentials, skipping")
                         continue
 
-                    # Get ledger updates from Hyperliquid
-                    events = self.client.get_ledger_updates(
-                        subaccount_id=sa.id,
-                        start_time=start_ms,
-                        end_time=now_ms
-                    )
+                    old_allocated = sa.allocated_capital or 0
+                    old_current = sa.current_balance or 0
 
-                    # Count deposit events for this subaccount
-                    deposit_events = [
-                        e for e in events
-                        if e.get('direction') == 'in' and e.get('type') in (
-                            'deposit', 'internalTransfer', 'subAccountTransfer', 'send'
-                        )
-                    ]
+                    # Get actual balance from Hyperliquid (source of truth)
+                    try:
+                        actual_balance = self.client.get_account_balance(sa.id)
+                    except Exception as e:
+                        logger.warning(f"Subaccount {sa.id}: cannot get balance - {e}")
+                        continue
 
-                    # CRITICAL: Detect phantom capital
-                    # If allocated_capital > 0 but NO deposit events found, zero it out
-                    if sa.allocated_capital and sa.allocated_capital > 0:
-                        if len(deposit_events) == 0:
-                            logger.warning(
-                                f"Subaccount {sa.id}: PHANTOM CAPITAL detected! "
-                                f"allocated_capital=${sa.allocated_capital:.2f} but no deposits found. "
-                                f"Zeroing out allocated_capital."
-                            )
+                    # Update current_balance to actual
+                    sa.current_balance = actual_balance
+
+                    # SIMPLE RULE: allocated_capital = actual_balance
+                    # This ensures no DD discrepancy from stale allocated values
+                    needs_update = False
+                    reason = ""
+
+                    if actual_balance <= 0:
+                        # No funds - zero everything
+                        if old_allocated > 0:
+                            reason = f"PHANTOM (allocated=${old_allocated:.2f}, balance=$0)"
                             sa.allocated_capital = 0
-                            sa.current_balance = 0
-                            phantom_capital_fixed += 1
-                            continue
+                            sa.peak_balance = 0
+                            needs_update = True
+                    else:
+                        # Has funds - ensure allocated matches balance
+                        # This prevents false DD when allocated > balance due to withdrawals
+                        diff = abs(old_allocated - actual_balance)
+                        if diff > 1.0:  # Only fix significant differences (>$1)
+                            reason = f"MISMATCH (allocated=${old_allocated:.2f}, balance=${actual_balance:.2f})"
+                            sa.allocated_capital = actual_balance
+                            # Peak should be at least current balance
+                            if sa.peak_balance is None or sa.peak_balance < actual_balance:
+                                sa.peak_balance = actual_balance
+                                sa.peak_balance_updated_at = datetime.now(UTC)
+                            needs_update = True
 
-                    # Process each event (skip duplicates)
-                    for event in events:
-                        tx_hash = event.get('hash', '')
-                        if tx_hash in self._processed_hashes:
-                            continue
-
-                        self._processed_hashes.add(tx_hash)
-
-                        # Apply adjustment
-                        adjusted = self._apply_adjustment(
-                            session=session,
-                            subaccount_id=sa.id,
-                            amount=event.get('amount', 0),
-                            direction=event.get('direction', 'unknown'),
-                            event_type=event.get('type', 'unknown'),
-                            timestamp=event.get('timestamp', 0)
+                    if needs_update:
+                        logger.info(
+                            f"Subaccount {sa.id}: reconciling - {reason} -> "
+                            f"allocated=${sa.allocated_capital:.2f}"
                         )
+                        reconciled_count += 1
 
-                        if adjusted:
-                            total_processed += 1
+                    # Track ledger hashes for real-time deduplication
+                    try:
+                        events = self.client.get_ledger_updates(
+                            subaccount_id=sa.id,
+                            start_time=start_ms,
+                            end_time=now_ms
+                        )
+                        for event in events:
+                            tx_hash = event.get('hash', '')
+                            if tx_hash:
+                                self._processed_hashes.add(tx_hash)
+                    except Exception:
+                        pass  # Ledger tracking is best-effort
 
                 except Exception as e:
                     logger.error(
-                        f"Subaccount {sa.id}: error during catchup - {e}",
+                        f"Subaccount {sa.id}: error during reconciliation - {e}",
                         exc_info=True
                     )
 
             session.commit()
 
-        logger.info(
-            f"Ledger catchup complete: {total_processed} events processed, "
-            f"{phantom_capital_fixed} phantom capital issues fixed"
-        )
+        logger.info(f"Balance reconciliation complete: {reconciled_count} subaccounts fixed")
 
-        return total_processed
+        return reconciled_count
 
     def _on_ledger_update(self, update: 'LedgerUpdate') -> None:
         """

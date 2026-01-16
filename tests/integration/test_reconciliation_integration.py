@@ -2,18 +2,15 @@
 Integration tests for BalanceReconciliationService with real PostgreSQL.
 
 These tests verify:
-1. Full deposit reconciliation cycle
-2. WebSocket and HTTP consistency
-3. Recovery after restart
-
-Each test runs in a transaction that is rolled back at the end.
+1. Phantom capital detection and zeroing
+2. Mismatch correction (allocated != balance)
+3. Multiple subaccounts processed correctly
 """
 import pytest
-import uuid
 from datetime import datetime, UTC
 from unittest.mock import Mock, patch
 
-from src.database.connection import get_session, get_session_factory
+from src.database.connection import get_session_factory
 from src.database.models import Subaccount
 from src.executor.balance_reconciliation import BalanceReconciliationService
 
@@ -26,8 +23,6 @@ from src.executor.balance_reconciliation import BalanceReconciliationService
 def db_session():
     """
     Provide a database session that rolls back after each test.
-
-    This ensures tests don't persist data in the real database.
     """
     SessionFactory = get_session_factory()
     session = SessionFactory()
@@ -43,8 +38,9 @@ def db_session():
 def mock_client():
     """Create mock Hyperliquid client."""
     client = Mock()
-    client._subaccount_credentials = {1: {'address': '0x123abc'}}
+    client._subaccount_credentials = {}
     client.get_ledger_updates.return_value = []
+    client.get_account_balance.return_value = 0.0
     return client
 
 
@@ -62,76 +58,155 @@ def config():
 
 
 # =============================================================================
-# TEST 1: Full Cycle Deposit Reconciliation
+# TEST 1: Phantom Capital Detection
 # =============================================================================
 
-class TestFullCycleDepositReconciliation:
-    """Test full deposit reconciliation cycle with real DB."""
+class TestPhantomCapitalDetection:
+    """Test phantom capital detection and zeroing."""
 
     @pytest.mark.asyncio
-    async def test_full_cycle_deposit_reconciliation(self, db_session, mock_client, config):
+    async def test_phantom_capital_zeroed(self, db_session, mock_client, config):
         """
-        Test complete deposit reconciliation flow:
-        1. Create subaccount with allocated_capital = 0
-        2. Mock ledger with deposit event
-        3. Run startup_catchup
-        4. Verify allocated_capital updated in DB
+        Test that phantom capital is detected and zeroed.
         """
-        # Create subaccount in DB
+        # Create subaccount with phantom capital
         subaccount = Subaccount(
-            id=99,  # Use high ID to avoid conflicts
+            id=96,
             status='ACTIVE',
-            allocated_capital=0,
-            current_balance=0,
-            peak_balance=None
+            allocated_capital=500.0,  # Phantom!
+            current_balance=0.0,
+            peak_balance=500.0
         )
         db_session.add(subaccount)
         db_session.flush()
 
-        # Mock ledger updates
-        mock_client._subaccount_credentials = {99: {'address': '0xtest99'}}
-        mock_client.get_ledger_updates.return_value = [
-            {
-                'hash': 'tx_integration_001',
-                'type': 'deposit',
-                'amount': 250.0,
-                'direction': 'in',
-                'timestamp': 1700000000000
-            }
-        ]
+        # Mock: no balance on Hyperliquid
+        mock_client._subaccount_credentials = {96: {'address': '0xtest96'}}
+        mock_client.get_account_balance.return_value = 0.0
 
-        # Patch get_session to use our test session
         with patch('src.executor.balance_reconciliation.get_session') as mock_get_session:
             mock_get_session.return_value.__enter__ = Mock(return_value=db_session)
             mock_get_session.return_value.__exit__ = Mock(return_value=None)
 
             service = BalanceReconciliationService(mock_client, None, config)
-            processed = await service.startup_catchup()
+            fixed = await service.startup_catchup()
 
-            # Verify
-            assert processed == 1
-
-            # Refresh from DB
+            assert fixed == 1
             db_session.refresh(subaccount)
-            assert subaccount.allocated_capital == 250.0
-            assert subaccount.peak_balance == 250.0
+            assert subaccount.allocated_capital == 0
+            assert subaccount.peak_balance == 0
 
 
 # =============================================================================
-# TEST 2: WebSocket and HTTP Consistency
+# TEST 2: Mismatch Correction
 # =============================================================================
 
-class TestWebSocketHttpConsistency:
-    """Test that WebSocket and HTTP produce consistent results."""
+class TestMismatchCorrection:
+    """Test mismatch correction (allocated != balance)."""
 
     @pytest.mark.asyncio
-    async def test_websocket_and_http_consistency(self, db_session, mock_client, config):
+    async def test_mismatch_corrected(self, db_session, mock_client, config):
         """
-        Test that HTTP catchup and WebSocket real-time produce same result.
+        Test that allocated > balance mismatch is corrected.
         """
-        # Create subaccount
         subaccount = Subaccount(
-            id=98,
+            id=97,
+            status='ACTIVE',
+            allocated_capital=300.0,  # Too high
+            current_balance=100.0,
+            peak_balance=300.0
+        )
+        db_session.add(subaccount)
+        db_session.flush()
+
+        mock_client._subaccount_credentials = {97: {'address': '0xtest97'}}
+        mock_client.get_account_balance.return_value = 100.0  # Actual balance
+
+        with patch('src.executor.balance_reconciliation.get_session') as mock_get_session:
+            mock_get_session.return_value.__enter__ = Mock(return_value=db_session)
+            mock_get_session.return_value.__exit__ = Mock(return_value=None)
+
+            service = BalanceReconciliationService(mock_client, None, config)
+            fixed = await service.startup_catchup()
+
+            assert fixed == 1
+            db_session.refresh(subaccount)
+            assert subaccount.allocated_capital == 100.0
+            assert subaccount.current_balance == 100.0
+
+
+# =============================================================================
+# TEST 3: Multiple Subaccounts
+# =============================================================================
+
+class TestMultipleSubaccounts:
+    """Test processing multiple subaccounts."""
+
+    @pytest.mark.asyncio
+    async def test_multiple_subaccounts_fixed(self, db_session, mock_client, config):
+        """
+        Test that multiple subaccounts are processed correctly.
+        """
+        # Phantom capital
+        sub1 = Subaccount(
+            id=94,
+            status='ACTIVE',
+            allocated_capital=200.0,
+            current_balance=0.0,
+            peak_balance=200.0
+        )
+        # Mismatch
+        sub2 = Subaccount(
+            id=95,
+            status='ACTIVE',
+            allocated_capital=300.0,
+            current_balance=150.0,
+            peak_balance=300.0
+        )
+
+        db_session.add_all([sub1, sub2])
+        db_session.flush()
+
+        mock_client._subaccount_credentials = {
+            94: {'address': '0xtest94'},
+            95: {'address': '0xtest95'}
+        }
+
+        def get_balance(sub_id):
+            return {94: 0.0, 95: 150.0}[sub_id]
+
+        mock_client.get_account_balance.side_effect = get_balance
+
+        with patch('src.executor.balance_reconciliation.get_session') as mock_get_session:
+            mock_get_session.return_value.__enter__ = Mock(return_value=db_session)
+            mock_get_session.return_value.__exit__ = Mock(return_value=None)
+
+            service = BalanceReconciliationService(mock_client, None, config)
+            fixed = await service.startup_catchup()
+
+            assert fixed == 2
+
+            db_session.refresh(sub1)
+            db_session.refresh(sub2)
+
+            assert sub1.allocated_capital == 0  # Phantom zeroed
+            assert sub2.allocated_capital == 150.0  # Mismatch corrected
+
+
+# =============================================================================
+# TEST 4: Correct State Not Changed
+# =============================================================================
+
+class TestCorrectStatePreserved:
+    """Test that correct state is not changed."""
+
+    @pytest.mark.asyncio
+    async def test_correct_state_unchanged(self, db_session, mock_client, config):
+        """
+        Test that subaccounts with correct state are not modified.
+        """
+        subaccount = Subaccount(
+            id=93,
             status='ACTIVE',
             allocated_capital=100.0,
             current_balance=100.0,
@@ -140,161 +215,15 @@ class TestWebSocketHttpConsistency:
         db_session.add(subaccount)
         db_session.flush()
 
-        mock_client._subaccount_credentials = {98: {'address': '0xtest98'}}
-
-        # Same event via HTTP
-        mock_client.get_ledger_updates.return_value = [
-            {
-                'hash': 'tx_consistency_001',
-                'type': 'deposit',
-                'amount': 50.0,
-                'direction': 'in',
-                'timestamp': 1700000000000
-            }
-        ]
+        mock_client._subaccount_credentials = {93: {'address': '0xtest93'}}
+        mock_client.get_account_balance.return_value = 100.0
 
         with patch('src.executor.balance_reconciliation.get_session') as mock_get_session:
             mock_get_session.return_value.__enter__ = Mock(return_value=db_session)
             mock_get_session.return_value.__exit__ = Mock(return_value=None)
 
             service = BalanceReconciliationService(mock_client, None, config)
-            await service.startup_catchup()
+            fixed = await service.startup_catchup()
 
-            # HTTP result: 100 + 50 = 150
-            db_session.refresh(subaccount)
-            assert subaccount.allocated_capital == 150.0
-
-            # Now simulate same event via WebSocket (should be skipped as duplicate)
-            from dataclasses import dataclass
-
-            @dataclass
-            class MockLedgerUpdate:
-                timestamp: datetime
-                update_type: str
-                amount: float
-                direction: str
-                hash: str
-                raw_data: dict
-
-            ws_update = MockLedgerUpdate(
-                timestamp=datetime.now(UTC),
-                update_type='deposit',
-                amount=50.0,
-                direction='in',
-                hash='tx_consistency_001',  # Same hash
-                raw_data={'delta': {'destination': '0xtest98'}}
-            )
-
-            service._on_ledger_update(ws_update)
-
-            # Should still be 150 (duplicate skipped)
-            db_session.refresh(subaccount)
-            assert subaccount.allocated_capital == 150.0
-
-
-# =============================================================================
-# TEST 3: Recovery After Restart
-# =============================================================================
-
-class TestRecoveryAfterRestart:
-    """Test recovery of missed events after system restart."""
-
-    @pytest.mark.asyncio
-    async def test_recovery_after_restart(self, db_session, mock_client, config):
-        """
-        Simulate events missed during downtime and recovered at startup.
-        """
-        # Create subaccount that was active before shutdown
-        subaccount = Subaccount(
-            id=97,
-            status='ACTIVE',
-            allocated_capital=500.0,
-            current_balance=500.0,
-            peak_balance=500.0
-        )
-        db_session.add(subaccount)
-        db_session.flush()
-
-        mock_client._subaccount_credentials = {97: {'address': '0xtest97'}}
-
-        # Events that happened during downtime
-        mock_client.get_ledger_updates.return_value = [
-            {
-                'hash': 'tx_recovery_001',
-                'type': 'deposit',
-                'amount': 100.0,
-                'direction': 'in',
-                'timestamp': 1700000000000
-            },
-            {
-                'hash': 'tx_recovery_002',
-                'type': 'withdraw',
-                'amount': 30.0,
-                'direction': 'out',
-                'timestamp': 1700001000000
-            },
-            {
-                'hash': 'tx_recovery_003',
-                'type': 'deposit',
-                'amount': 50.0,
-                'direction': 'in',
-                'timestamp': 1700002000000
-            }
-        ]
-
-        with patch('src.executor.balance_reconciliation.get_session') as mock_get_session:
-            mock_get_session.return_value.__enter__ = Mock(return_value=db_session)
-            mock_get_session.return_value.__exit__ = Mock(return_value=None)
-
-            service = BalanceReconciliationService(mock_client, None, config)
-            processed = await service.startup_catchup()
-
-            # All 3 events processed
-            assert processed == 3
-
-            # Verify final balance: 500 + 100 - 30 + 50 = 620
-            db_session.refresh(subaccount)
-            assert subaccount.allocated_capital == 620.0
-            assert subaccount.peak_balance == 620.0
-
-
-# =============================================================================
-# TEST 4: Phantom Capital Detection Integration
-# =============================================================================
-
-class TestPhantomCapitalDetection:
-    """Test phantom capital detection with real DB."""
-
-    @pytest.mark.asyncio
-    async def test_phantom_capital_zeroed(self, db_session, mock_client, config):
-        """
-        Test that phantom capital is detected and zeroed.
-        Subaccount has allocated_capital but no deposit events.
-        """
-        # Create subaccount with phantom capital
-        subaccount = Subaccount(
-            id=96,
-            status='ACTIVE',
-            allocated_capital=83.33,  # Set by Deployer but never funded
-            current_balance=0,
-            peak_balance=83.33
-        )
-        db_session.add(subaccount)
-        db_session.flush()
-
-        mock_client._subaccount_credentials = {96: {'address': '0xtest96'}}
-
-        # No deposit events found
-        mock_client.get_ledger_updates.return_value = []
-
-        with patch('src.executor.balance_reconciliation.get_session') as mock_get_session:
-            mock_get_session.return_value.__enter__ = Mock(return_value=db_session)
-            mock_get_session.return_value.__exit__ = Mock(return_value=None)
-
-            service = BalanceReconciliationService(mock_client, None, config)
-            await service.startup_catchup()
-
-            # Phantom capital should be zeroed
-            db_session.refresh(subaccount)
-            assert subaccount.allocated_capital == 0
-            assert subaccount.current_balance == 0
+            # No fix needed (diff < $1)
+            assert fixed == 0

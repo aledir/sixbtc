@@ -165,8 +165,37 @@ class ContinuousExecutorProcess:
             f"{len(self._bootstrapped_timeframes)} timeframes from LIVE strategies"
         )
 
-        # Rule #4b: Start WebSocket data provider FIRST
-        # This provides real-time prices and user data
+        # =======================================================================
+        # CRITICAL: Balance reconciliation MUST run BEFORE candle bootstrap
+        # This ensures correct capital state for emergency stop calculations
+        # =======================================================================
+
+        # 1. Sync subaccount balances from Hyperliquid
+        # This initializes allocated_capital for manually funded subaccounts
+        balance_sync = BalanceSyncService(self.config._raw_config, self.client)
+        logger.info("Syncing subaccount balances from Hyperliquid...")
+        synced = balance_sync.sync_all_subaccounts()
+        if synced:
+            logger.info(f"Balance sync complete: {len(synced)} subaccounts synced")
+            for sub_id, balance in synced.items():
+                logger.info(f"  Subaccount {sub_id}: ${balance:.2f}")
+        else:
+            logger.info("Balance sync: no subaccounts with funds found")
+
+        # 2. Reconcile allocated_capital based on actual deposits/withdrawals
+        # This catches up on missed ledger events during downtime
+        logger.info("Running ledger reconciliation catchup...")
+        catchup_count = await self.reconciliation_service.startup_catchup()
+        logger.info(f"Ledger catchup complete: {catchup_count} events processed")
+
+        # 3. Validate subaccount state to prevent false emergency stops
+        self._validate_subaccount_state()
+
+        # =======================================================================
+        # Now bootstrap candle data (slow but not critical for capital state)
+        # =======================================================================
+
+        # Rule #4b: Start WebSocket data provider
         logger.info("Starting WebSocket data provider (Rule #4b: WebSocket First)...")
 
         # Bootstrap historical candles BEFORE starting WebSocket
@@ -205,27 +234,6 @@ class ContinuousExecutorProcess:
                 f"WebSocket has only {len(self.data_provider.mid_prices)} mid prices "
                 f"after {max_wait}s - continuing with REST fallback"
             )
-
-        # Sync subaccount balances from Hyperliquid at startup
-        # This initializes allocated_capital for manually funded subaccounts
-        balance_sync = BalanceSyncService(self.config._raw_config, self.client)
-        logger.info("Syncing subaccount balances from Hyperliquid...")
-        synced = balance_sync.sync_all_subaccounts()
-        if synced:
-            logger.info(f"Balance sync complete: {len(synced)} subaccounts synced")
-            for sub_id, balance in synced.items():
-                logger.info(f"  Subaccount {sub_id}: ${balance:.2f}")
-        else:
-            logger.info("Balance sync: no subaccounts with funds found")
-
-        # Catch up on missed ledger events during downtime
-        # This reconciles allocated_capital based on actual deposits/withdrawals
-        logger.info("Running ledger reconciliation catchup...")
-        catchup_count = await self.reconciliation_service.startup_catchup()
-        logger.info(f"Ledger catchup complete: {catchup_count} events processed")
-
-        # Validate subaccount state to prevent false emergency stops
-        self._validate_subaccount_state()
 
         # Start trailing service
         await self.trailing_service.start()
