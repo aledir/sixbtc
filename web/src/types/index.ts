@@ -914,3 +914,68 @@ export interface MetricsSnapshotResponse {
   timing: SnapshotTiming;
   failures: SnapshotFailures;
 }
+
+// =============================================================================
+// PREFLIGHT / GO LIVE
+// =============================================================================
+
+export interface PreflightCheck {
+  name: string;
+  status: 'pass' | 'fail' | 'warn';
+  message: string;
+  details: Record<string, any>;
+  can_fix: boolean;
+}
+
+export interface ConfigMismatch {
+  key: string;
+  current: string;
+  target: string;
+}
+
+export interface SubaccountPreflightStatus {
+  id: number;
+  exists: boolean;
+  balance: number | null;
+  status: 'funded' | 'underfunded' | 'unknown' | 'missing';
+}
+
+export interface EmergencyStopInfo {
+  scope: string;
+  scope_id: string;
+  reason: string | null;
+}
+
+export interface PreflightResponse {
+  ready: boolean;
+  checks: PreflightCheck[];
+  config_mismatches: ConfigMismatch[];
+  subaccounts: SubaccountPreflightStatus[];
+  emergency_stops: EmergencyStopInfo[];
+  pool_stats: {
+    active: number;
+    live: number;
+    total: number;
+    required: number;
+  };
+  target_config: {
+    num_subaccounts: number;
+    capital_per_subaccount: number;
+    min_operational: number;
+    max_live_strategies: number;
+    pool_max_size: number;
+    pool_min_for_live: number;
+    dry_run: boolean;
+  };
+}
+
+export interface PreflightApplyRequest {
+  create_subaccounts: boolean;
+  clear_emergency_stops: boolean;
+}
+
+export interface PreflightApplyResponse {
+  success: boolean;
+  actions_taken: string[];
+  errors: string[];
+}

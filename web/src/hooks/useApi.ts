@@ -280,3 +280,26 @@ export function usePositions(params?: Parameters<typeof api.getPositions>[0]) {
     refetchInterval: FAST_REFRESH,  // 10s for live positions
   });
 }
+
+// Preflight / Go Live
+export function usePreflight() {
+  return useQuery({
+    queryKey: ['preflight'],
+    queryFn: api.getPreflight,
+    refetchInterval: SLOW_REFRESH,  // 60s - not critical
+  });
+}
+
+export function useApplyPreflightFixes() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (request: Parameters<typeof api.applyPreflightFixes>[0]) =>
+      api.applyPreflightFixes(request),
+    onSuccess: () => {
+      // Invalidate preflight to refresh status
+      queryClient.invalidateQueries({ queryKey: ['preflight'] });
+      queryClient.invalidateQueries({ queryKey: ['subaccounts'] });
+    },
+  });
+}

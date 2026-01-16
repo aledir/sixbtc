@@ -354,3 +354,20 @@ export async function getPositions(params?: { subaccount_id?: number }) {
     `${API_BASE}/positions${query ? `?${query}` : ''}`
   );
 }
+
+// Preflight / Go Live
+export async function getPreflight() {
+  return fetchJson<import('../types').PreflightResponse>(
+    `${API_BASE}/preflight`
+  );
+}
+
+export async function applyPreflightFixes(request: import('../types').PreflightApplyRequest) {
+  return fetchJson<import('../types').PreflightApplyResponse>(
+    `${API_BASE}/preflight/apply`,
+    {
+      method: 'POST',
+      body: JSON.stringify(request),
+    }
+  );
+}

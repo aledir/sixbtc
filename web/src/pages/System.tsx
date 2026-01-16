@@ -10,8 +10,10 @@ import {
   useServiceControl,
   useConfig,
   useThresholds,
+  usePreflight,
+  useApplyPreflightFixes,
 } from '../hooks/useApi';
-import type { ServiceInfo, LogLine } from '../types';
+import type { ServiceInfo, LogLine, PreflightCheck, SubaccountPreflightStatus } from '../types';
 import {
   AlertCircle,
   CheckCircle,
@@ -25,13 +27,18 @@ import {
   RotateCcw,
   Settings as SettingsIcon,
   AlertTriangle,
+  Rocket,
+  XCircle,
+  Database,
+  Zap,
 } from 'lucide-react';
 
 // === Types ===
 
-type TabType = 'tasks' | 'logs' | 'settings';
+type TabType = 'tasks' | 'logs' | 'settings' | 'golive';
 
 const TABS: { id: TabType; label: string }[] = [
+  { id: 'golive', label: 'Go Live' },
   { id: 'tasks', label: 'Tasks' },
   { id: 'logs', label: 'Logs' },
   { id: 'settings', label: 'Settings' },
@@ -817,10 +824,396 @@ function SettingsTab() {
   );
 }
 
+// === Go Live Tab Components ===
+
+function CheckStatusIcon({ status }: { status: 'pass' | 'fail' | 'warn' }) {
+  if (status === 'pass') {
+    return <CheckCircle className="w-5 h-5 text-[var(--color-profit)]" />;
+  }
+  if (status === 'fail') {
+    return <XCircle className="w-5 h-5 text-[var(--color-loss)]" />;
+  }
+  return <AlertTriangle className="w-5 h-5 text-[var(--color-warning)]" />;
+}
+
+function PreflightCheckCard({ check }: { check: PreflightCheck }) {
+  return (
+    <div className="flex items-start gap-3 p-4 bg-[var(--color-bg-secondary)] rounded-lg">
+      <CheckStatusIcon status={check.status} />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="font-medium text-[var(--color-text-primary)]">{check.name}</span>
+          {check.can_fix && (
+            <span className="text-xs px-2 py-0.5 rounded bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
+              Fixable
+            </span>
+          )}
+        </div>
+        <p className="text-sm text-[var(--color-text-secondary)] mt-1">{check.message}</p>
+      </div>
+    </div>
+  );
+}
+
+function SubaccountStatusRow({ sa }: { sa: SubaccountPreflightStatus }) {
+  const statusColors: Record<string, string> = {
+    funded: 'text-[var(--color-profit)]',
+    underfunded: 'text-[var(--color-loss)]',
+    unknown: 'text-[var(--color-warning)]',
+    missing: 'text-[var(--color-text-tertiary)]',
+  };
+
+  const statusIcons: Record<string, React.ReactNode> = {
+    funded: <CheckCircle className="w-4 h-4" />,
+    underfunded: <AlertTriangle className="w-4 h-4" />,
+    unknown: <AlertCircle className="w-4 h-4" />,
+    missing: <XCircle className="w-4 h-4" />,
+  };
+
+  return (
+    <div className="flex items-center justify-between p-3 bg-[var(--color-bg-secondary)] rounded-lg">
+      <div className="flex items-center gap-3">
+        <Database className="w-4 h-4 text-[var(--color-text-tertiary)]" />
+        <span className="font-medium text-[var(--color-text-primary)]">Subaccount {sa.id}</span>
+      </div>
+      <div className="flex items-center gap-3">
+        {sa.balance !== null && (
+          <span className="text-sm text-[var(--color-text-secondary)]">
+            ${sa.balance.toFixed(2)}
+          </span>
+        )}
+        <span className={`flex items-center gap-1 text-sm ${statusColors[sa.status]}`}>
+          {statusIcons[sa.status]}
+          {sa.status}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function GoLiveTab() {
+  const { data, isLoading, error, refetch } = usePreflight();
+  const { mutate: applyFixes, isPending: isApplying } = useApplyPreflightFixes();
+  const [showDetails, setShowDetails] = useState(false);
+
+  const handleApplyFixes = () => {
+    if (!data) return;
+
+    const needsSubaccounts = data.subaccounts.some((sa) => !sa.exists);
+    const hasEmergencyStops = data.emergency_stops.length > 0;
+
+    if (!needsSubaccounts && !hasEmergencyStops) {
+      alert('No fixable issues found');
+      return;
+    }
+
+    if (confirm('Apply fixes? This will create missing subaccounts and clear emergency stops.')) {
+      applyFixes({
+        create_subaccounts: needsSubaccounts,
+        clear_emergency_stops: hasEmergencyStops,
+      });
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Activity className="w-6 h-6 animate-spin text-[var(--color-text-tertiary)]" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="card p-6 text-center">
+        <AlertCircle className="w-8 h-8 text-[var(--color-loss)] mx-auto mb-3" />
+        <p className="text-[var(--color-loss)]">Failed to load preflight status</p>
+        <p className="text-sm text-[var(--color-text-tertiary)] mt-1">
+          {(error as Error).message}
+        </p>
+        <button onClick={() => refetch()} className="btn btn-primary mt-4">
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (!data) return null;
+
+  const failedChecks = data.checks.filter((c) => c.status === 'fail');
+  const warnChecks = data.checks.filter((c) => c.status === 'warn');
+  const canApplyFixes =
+    data.subaccounts.some((sa) => !sa.exists) || data.emergency_stops.length > 0;
+
+  return (
+    <div className="space-y-6">
+      {/* Overall Status */}
+      <div
+        className={`card p-6 border-2 ${
+          data.ready
+            ? 'border-[var(--color-profit)]/50 bg-[var(--color-profit)]/5'
+            : 'border-[var(--color-loss)]/50 bg-[var(--color-loss)]/5'
+        }`}
+      >
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div
+              className={`w-16 h-16 rounded-full flex items-center justify-center ${
+                data.ready ? 'bg-[var(--color-profit)]/20' : 'bg-[var(--color-loss)]/20'
+              }`}
+            >
+              {data.ready ? (
+                <Rocket className="w-8 h-8 text-[var(--color-profit)]" />
+              ) : (
+                <AlertTriangle className="w-8 h-8 text-[var(--color-loss)]" />
+              )}
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-[var(--color-text-primary)]">
+                {data.ready ? 'Ready for Live Trading' : 'Not Ready'}
+              </h2>
+              <p className="text-[var(--color-text-secondary)] mt-1">
+                {failedChecks.length > 0
+                  ? `${failedChecks.length} check(s) failed`
+                  : warnChecks.length > 0
+                    ? `${warnChecks.length} warning(s)`
+                    : 'All checks passed'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex gap-3">
+            <button onClick={() => refetch()} className="btn btn-ghost">
+              <RefreshCw className="w-4 h-4" />
+            </button>
+            {canApplyFixes && (
+              <button
+                onClick={handleApplyFixes}
+                disabled={isApplying}
+                className="btn btn-primary flex items-center gap-2"
+              >
+                {isApplying ? (
+                  <Activity className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Zap className="w-4 h-4" />
+                )}
+                Apply Fixes
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Checks */}
+      <div className="card">
+        <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
+          Preflight Checks
+        </h3>
+        <div className="space-y-3">
+          {data.checks.map((check) => (
+            <PreflightCheckCard key={check.name} check={check} />
+          ))}
+        </div>
+      </div>
+
+      {/* Config Mismatches */}
+      {data.config_mismatches.length > 0 && (
+        <div className="card">
+          <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
+            Config Mismatches (Manual Fix Required)
+          </h3>
+          <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+            Edit <code className="px-1.5 py-0.5 bg-[var(--color-bg-secondary)] rounded">config/config.yaml</code> to match these values:
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[var(--color-text-tertiary)]">
+                  <th className="pb-2">Key</th>
+                  <th className="pb-2">Current</th>
+                  <th className="pb-2">Target</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.config_mismatches.map((m) => (
+                  <tr key={m.key} className="border-t border-[var(--color-border-primary)]">
+                    <td className="py-2 font-mono text-[var(--color-text-primary)]">{m.key}</td>
+                    <td className="py-2 text-[var(--color-loss)]">{m.current}</td>
+                    <td className="py-2 text-[var(--color-profit)]">{m.target}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Pool Stats */}
+      <div className="card">
+        <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
+          Strategy Pool
+        </h3>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div>
+            <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Active</p>
+            <p className="text-xl font-bold text-[var(--color-text-primary)]">
+              {data.pool_stats.active}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Live</p>
+            <p className="text-xl font-bold text-[var(--color-text-primary)]">
+              {data.pool_stats.live}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Total Ready</p>
+            <p
+              className={`text-xl font-bold ${
+                data.pool_stats.total >= data.pool_stats.required
+                  ? 'text-[var(--color-profit)]'
+                  : 'text-[var(--color-loss)]'
+              }`}
+            >
+              {data.pool_stats.total}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Required</p>
+            <p className="text-xl font-bold text-[var(--color-text-primary)]">
+              {data.pool_stats.required}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Subaccounts */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase">
+            Subaccounts ({data.subaccounts.length})
+          </h3>
+          <button
+            onClick={() => setShowDetails(!showDetails)}
+            className="btn btn-ghost text-sm"
+          >
+            {showDetails ? 'Hide Details' : 'Show Details'}
+          </button>
+        </div>
+
+        {showDetails && (
+          <div className="space-y-2">
+            {data.subaccounts.map((sa) => (
+              <SubaccountStatusRow key={sa.id} sa={sa} />
+            ))}
+          </div>
+        )}
+
+        {!showDetails && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div>
+              <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Funded</p>
+              <p className="text-xl font-bold text-[var(--color-profit)]">
+                {data.subaccounts.filter((sa) => sa.status === 'funded').length}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Underfunded</p>
+              <p className="text-xl font-bold text-[var(--color-loss)]">
+                {data.subaccounts.filter((sa) => sa.status === 'underfunded').length}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Missing</p>
+              <p className="text-xl font-bold text-[var(--color-text-tertiary)]">
+                {data.subaccounts.filter((sa) => !sa.exists).length}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">
+                Min Balance
+              </p>
+              <p className="text-xl font-bold text-[var(--color-text-primary)]">
+                ${data.target_config.min_operational}
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Emergency Stops */}
+      {data.emergency_stops.length > 0 && (
+        <div className="card border border-[var(--color-loss)]/50">
+          <h3 className="text-sm font-semibold text-[var(--color-loss)] uppercase mb-4">
+            Active Emergency Stops ({data.emergency_stops.length})
+          </h3>
+          <div className="space-y-2">
+            {data.emergency_stops.map((stop, idx) => (
+              <div
+                key={idx}
+                className="flex items-center justify-between p-3 bg-[var(--color-loss)]/10 rounded-lg"
+              >
+                <div className="flex items-center gap-3">
+                  <AlertCircle className="w-4 h-4 text-[var(--color-loss)]" />
+                  <span className="font-medium text-[var(--color-text-primary)]">
+                    [{stop.scope}:{stop.scope_id}]
+                  </span>
+                </div>
+                <span className="text-sm text-[var(--color-text-secondary)]">
+                  {stop.reason || 'No reason specified'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Target Config */}
+      <div className="card">
+        <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
+          Target Configuration (from prepare_live.yaml)
+        </h3>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+          <div>
+            <p className="text-[var(--color-text-tertiary)]">Subaccounts</p>
+            <p className="font-medium text-[var(--color-text-primary)]">
+              {data.target_config.num_subaccounts}
+            </p>
+          </div>
+          <div>
+            <p className="text-[var(--color-text-tertiary)]">Capital/Sub</p>
+            <p className="font-medium text-[var(--color-text-primary)]">
+              ${data.target_config.capital_per_subaccount}
+            </p>
+          </div>
+          <div>
+            <p className="text-[var(--color-text-tertiary)]">Max Live</p>
+            <p className="font-medium text-[var(--color-text-primary)]">
+              {data.target_config.max_live_strategies}
+            </p>
+          </div>
+          <div>
+            <p className="text-[var(--color-text-tertiary)]">Mode</p>
+            <p
+              className={`font-medium ${
+                data.target_config.dry_run
+                  ? 'text-[var(--color-warning)]'
+                  : 'text-[var(--color-profit)]'
+              }`}
+            >
+              {data.target_config.dry_run ? 'DRY RUN' : 'LIVE'}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // === Main Page ===
 
 export default function System() {
-  const [activeTab, setActiveTab] = useState<TabType>('tasks');
+  const [activeTab, setActiveTab] = useState<TabType>('golive');
 
   return (
     <div className="space-y-6">
@@ -830,7 +1223,7 @@ export default function System() {
         <div>
           <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">System</h1>
           <p className="text-sm text-[var(--color-text-secondary)] mt-1">
-            Tasks, logs, and system configuration
+            Go live setup, tasks, logs, and configuration
           </p>
         </div>
       </div>
@@ -853,6 +1246,7 @@ export default function System() {
       </div>
 
       {/* Tab Content */}
+      {activeTab === 'golive' && <GoLiveTab />}
       {activeTab === 'tasks' && <TasksTab />}
       {activeTab === 'logs' && <LogsTab />}
       {activeTab === 'settings' && <SettingsTab />}
