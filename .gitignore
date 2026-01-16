@@ -195,6 +195,9 @@ postgres_data/
 *~
 .DS_Store
 
+# Playwright MCP screenshots
+.playwright-mcp/
+
 # Temporary files
 tmp/
 temp/
