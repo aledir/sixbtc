@@ -71,6 +71,20 @@ class EventTracker:
             True if event was saved, False if error occurred
         """
         try:
+            # Handle event_data passed as kwarg - flatten it into metadata
+            # This prevents double-nesting like {"event_data": {"key": "value"}}
+            final_data = None
+            if metadata:
+                if 'event_data' in metadata and isinstance(metadata['event_data'], dict):
+                    # Flatten: merge event_data contents with other metadata
+                    final_data = {**metadata['event_data']}
+                    # Add any other metadata keys (excluding event_data itself)
+                    for k, v in metadata.items():
+                        if k != 'event_data':
+                            final_data[k] = v
+                else:
+                    final_data = metadata
+
             event = StrategyEvent(
                 timestamp=datetime.now(UTC),
                 strategy_id=strategy_id,
@@ -80,7 +94,7 @@ class EventTracker:
                 stage=stage,
                 status=status,
                 duration_ms=duration_ms,
-                event_data=metadata if metadata else None
+                event_data=final_data if final_data else None
             )
 
             with get_session() as session:

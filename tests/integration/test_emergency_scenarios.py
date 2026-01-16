@@ -524,3 +524,125 @@ class TestThrottlingBehavior:
         result3 = manager.check_all_conditions()
         # This should not return empty due to throttling
         assert manager.last_check_time is not None
+
+
+class TestNullBalanceHandling:
+    """Test NULL balance handling - critical for avoiding false emergency stops."""
+
+    @patch('src.executor.emergency_stop_manager.get_session')
+    def test_null_balance_subaccount_not_triggered(self, mock_session, manager):
+        """
+        Verify subaccount with NULL current_balance does NOT trigger DD stop.
+
+        NULL balance = subaccount created but never used/funded.
+        This is different from balance = 0 (real 100% loss).
+        """
+        mock_ctx = create_mock_session()
+        mock_session.return_value = mock_ctx
+
+        # Create subaccount with NULL current_balance (never used)
+        mock_sa_null = MagicMock()
+        mock_sa_null.id = 1
+        mock_sa_null.status = 'ACTIVE'
+        mock_sa_null.allocated_capital = 200.0  # Has capital allocated
+        mock_sa_null.current_balance = None  # Never received balance update
+
+        # Create normal subaccount with valid balance
+        mock_sa_valid = MagicMock()
+        mock_sa_valid.id = 2
+        mock_sa_valid.status = 'ACTIVE'
+        mock_sa_valid.allocated_capital = 200.0
+        mock_sa_valid.current_balance = 190.0  # 5% DD - not triggered
+
+        def mock_query_side_effect(model):
+            result = MagicMock()
+            if model.__name__ == 'Subaccount':
+                result.filter.return_value.all.return_value = [mock_sa_null, mock_sa_valid]
+            elif model.__name__ == 'EmergencyStopState':
+                result.filter.return_value.first.return_value = None
+            return result
+
+        mock_ctx.query.side_effect = mock_query_side_effect
+
+        # Check subaccount drawdowns
+        triggered = manager._check_subaccount_drawdowns()
+
+        # Should NOT trigger for NULL balance subaccount
+        # Only trigger if balance is set and DD >= threshold
+        assert len(triggered) == 0
+
+    @patch('src.executor.emergency_stop_manager.get_session')
+    def test_zero_balance_triggers_stop(self, mock_session, manager):
+        """
+        Verify subaccount with balance = 0 DOES trigger DD stop.
+
+        balance = 0 is a real 100% drawdown (lost everything).
+        This must trigger emergency stop.
+        """
+        mock_ctx = create_mock_session()
+        mock_session.return_value = mock_ctx
+
+        # Create subaccount with zero balance (real 100% loss)
+        mock_sa = MagicMock()
+        mock_sa.id = 1
+        mock_sa.status = 'ACTIVE'
+        mock_sa.allocated_capital = 200.0
+        mock_sa.current_balance = 0.0  # Lost everything - real DD
+
+        def mock_query_side_effect(model):
+            result = MagicMock()
+            if model.__name__ == 'Subaccount':
+                result.filter.return_value.all.return_value = [mock_sa]
+            elif model.__name__ == 'EmergencyStopState':
+                result.filter.return_value.first.return_value = None
+            return result
+
+        mock_ctx.query.side_effect = mock_query_side_effect
+
+        # Check subaccount drawdowns
+        triggered = manager._check_subaccount_drawdowns()
+
+        # MUST trigger for 100% DD (balance = 0)
+        assert len(triggered) == 1
+        assert 'Subaccount 1 DD' in triggered[0]['reason']
+
+    @patch('src.executor.emergency_stop_manager.get_session')
+    def test_portfolio_dd_excludes_null_balance_subaccounts(self, mock_session, manager):
+        """
+        Verify portfolio DD calculation excludes subaccounts with NULL balance.
+
+        If some subaccounts have NULL balance, they shouldn't be counted
+        in portfolio totals (would cause false DD calculation).
+        """
+        mock_ctx = create_mock_session()
+        mock_session.return_value = mock_ctx
+
+        # Subaccount 1: NULL balance (never used)
+        mock_sa_null = MagicMock()
+        mock_sa_null.id = 1
+        mock_sa_null.allocated_capital = 200.0
+        mock_sa_null.current_balance = None
+
+        # Subaccount 2: Valid balance, small DD
+        mock_sa_valid = MagicMock()
+        mock_sa_valid.id = 2
+        mock_sa_valid.allocated_capital = 200.0
+        mock_sa_valid.current_balance = 190.0  # 5% DD
+
+        def mock_query_side_effect(model):
+            result = MagicMock()
+            if model.__name__ == 'Subaccount':
+                result.filter.return_value.all.return_value = [mock_sa_null, mock_sa_valid]
+            elif model.__name__ == 'EmergencyStopState':
+                result.filter.return_value.first.return_value = None
+            return result
+
+        mock_ctx.query.side_effect = mock_query_side_effect
+
+        # Check portfolio drawdown
+        result = manager._check_portfolio_drawdown()
+
+        # Should NOT trigger because:
+        # - Only subaccount 2 counted (valid balance)
+        # - DD = (200 - 190) / 200 = 5% < 20% threshold
+        assert result is None

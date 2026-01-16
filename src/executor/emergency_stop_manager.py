@@ -321,8 +321,18 @@ class EmergencyStopManager:
                 return None
 
             # Sum up allocated capital and current balance across all subaccounts
-            total_allocated = sum(sa.allocated_capital or 0 for sa in subaccounts)
-            total_current = sum(sa.current_balance or 0 for sa in subaccounts)
+            # CRITICAL: Only include subaccounts with actual balance data
+            # Skip subaccounts where current_balance IS NULL (never used)
+            subaccounts_with_balance = [
+                sa for sa in subaccounts
+                if sa.current_balance is not None and sa.allocated_capital
+            ]
+
+            if not subaccounts_with_balance:
+                return None  # No subaccounts with balance data yet
+
+            total_allocated = sum(sa.allocated_capital for sa in subaccounts_with_balance)
+            total_current = sum(sa.current_balance for sa in subaccounts_with_balance)
 
             if total_allocated <= 0:
                 return None
@@ -376,13 +386,6 @@ class EmergencyStopManager:
                 if existing:
                     continue
 
-                # Get current balance from WebSocket (source of truth) or fallback to DB
-                current = sa.current_balance or 0.0
-                if self.data_provider and self.data_provider.account_state:
-                    # TODO: WebSocket shows main account, not subaccounts
-                    # For now, rely on DB balance which is synced from REST API
-                    pass
-
                 # Use allocated_capital as base (immune to peak_balance corruption)
                 # allocated_capital = what we initially funded this subaccount with
                 base_capital = sa.allocated_capital or 0.0
@@ -390,6 +393,20 @@ class EmergencyStopManager:
                 if base_capital <= 0:
                     # No capital allocated yet, skip
                     continue
+
+                # CRITICAL: Distinguish NULL (never used) vs 0 (real 100% DD)
+                # - current_balance IS NULL → subaccount created but never traded, skip DD calc
+                # - current_balance == 0 → real 100% drawdown, must trigger stop
+                if sa.current_balance is None:
+                    # Subaccount never used - no balance data yet, skip
+                    continue
+
+                # Get current balance (can be 0 for real 100% DD)
+                current = sa.current_balance
+                if self.data_provider and self.data_provider.account_state:
+                    # TODO: WebSocket shows main account, not subaccounts
+                    # For now, rely on DB balance which is synced from REST API
+                    pass
 
                 # Calculate drawdown: how much have we lost relative to initial capital
                 if current >= base_capital:

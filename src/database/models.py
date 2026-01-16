@@ -603,6 +603,7 @@ class Subaccount(Base):
     Subaccount management model
 
     Tracks allocation and performance per Hyperliquid subaccount (1-10).
+    Each subaccount can only have ONE strategy assigned (unique constraint).
     """
     __tablename__ = "subaccounts"
 
@@ -610,8 +611,8 @@ class Subaccount(Base):
     id = Column(Integer, primary_key=True)  # 1-10
     # Directly maps to Hyperliquid subaccount ID
 
-    # Current strategy assignment
-    strategy_id = Column(UUID(as_uuid=True), ForeignKey("strategies.id"), index=True)
+    # Current strategy assignment (UNIQUE: one strategy per subaccount system-wide)
+    strategy_id = Column(UUID(as_uuid=True), ForeignKey("strategies.id"), index=True, unique=True)
 
     # Capital allocation
     allocated_capital = Column(Float, nullable=False, default=0.0)

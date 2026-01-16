@@ -600,8 +600,9 @@ class BacktestEngine:
 
         def process_symbol(symbol):
             df = aligned_data[symbol]
+            coin_max_lev = self._get_coin_max_leverage(symbol)
             entries, exits, sizes, sl_pcts, tp_pcts, signal_meta = self._generate_signals_fast(
-                strategy, df, symbol, max_positions
+                strategy, df, symbol, max_positions, coin_max_lev
             )
             return symbol, {
                 'entries': entries,
@@ -944,8 +945,9 @@ class BacktestEngine:
         all_signals = {}
         for symbol in symbols:
             df = aligned_data[symbol]
+            coin_max_lev = self._get_coin_max_leverage(symbol)
             entries, exits, sizes, sl_pcts, tp_pcts, signal_meta = self._generate_signals_fast(
-                strategy, df, symbol, max_positions
+                strategy, df, symbol, max_positions, coin_max_lev
             )
             all_signals[symbol] = {
                 'entries': entries,
@@ -1443,7 +1445,8 @@ class BacktestEngine:
         strategy: StrategyCore,
         data: pd.DataFrame,
         symbol: str = None,
-        max_open_positions: int = 10
+        max_open_positions: int = 10,
+        coin_max_leverage: int = 50
     ) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series, Dict]:
         """
         Generate entry/exit signals from strategy class attributes.
@@ -1460,6 +1463,7 @@ class BacktestEngine:
             data: OHLCV DataFrame with high, low, close columns
             symbol: Symbol name for logging
             max_open_positions: Max concurrent positions (for dynamic size cap)
+            coin_max_leverage: Max leverage allowed for this coin (from CoinRegistry)
 
         Returns:
             (entries, exits, sizes, sl_pcts, tp_pcts, signal_meta)
@@ -1581,7 +1585,8 @@ class BacktestEngine:
             tp_pcts_arr[entry_indices] = tp_pcts_entries
 
             # Position sizing (vectorized)
-            effective_leverage = max(leverage, 1)
+            # Use actual leverage: min(strategy target, coin max) - matches kernel
+            effective_leverage = min(max(leverage, 1), coin_max_leverage)
             position_sizes = np.where(
                 sl_pcts_entries > 0,
                 np.minimum(risk_pct / (sl_pcts_entries * effective_leverage), dynamic_cap),
@@ -1595,8 +1600,8 @@ class BacktestEngine:
             sl_pcts_arr[entry_indices] = effective_sl_pct
             tp_pcts_arr[entry_indices] = tp_pct
 
-            # Divide by leverage to match live executor risk calculation
-            effective_leverage = max(leverage, 1)
+            # Use actual leverage: min(strategy target, coin max) - matches kernel
+            effective_leverage = min(max(leverage, 1), coin_max_leverage)
             position_size = min(risk_pct / (effective_sl_pct * effective_leverage), dynamic_cap) if effective_sl_pct > 0 else 0.1
             sizes_arr[entry_indices] = position_size
 
@@ -1606,8 +1611,8 @@ class BacktestEngine:
             sl_pcts_arr[entry_indices] = effective_sl_pct
             tp_pcts_arr[entry_indices] = tp_pct
 
-            # Divide by leverage to match live executor risk calculation
-            effective_leverage = max(leverage, 1)
+            # Use actual leverage: min(strategy target, coin max) - matches kernel
+            effective_leverage = min(max(leverage, 1), coin_max_leverage)
             position_size = min(risk_pct / (effective_sl_pct * effective_leverage), dynamic_cap) if effective_sl_pct > 0 else 0.1
             sizes_arr[entry_indices] = position_size
 

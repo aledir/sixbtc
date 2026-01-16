@@ -698,12 +698,23 @@ class MetricsCollector:
             ))
         ).scalar() or 0
 
-        # Score OK (passed score threshold)
+        # Score OK (passed score threshold) - counts non-cached shuffle starts
         score_ok = session.execute(
             select(func.count(StrategyEvent.id))
             .where(and_(
                 StrategyEvent.stage == 'shuffle_test',
                 StrategyEvent.event_type == 'started',
+                StrategyEvent.timestamp >= since
+            ))
+        ).scalar() or 0
+
+        # Shuffle tested = all completed shuffle tests (passed + failed, including cached)
+        # This is the correct denominator for shuffle pass rate
+        shuffle_tested = session.execute(
+            select(func.count(StrategyEvent.id))
+            .where(and_(
+                StrategyEvent.stage == 'shuffle_test',
+                StrategyEvent.event_type.in_(['passed', 'failed']),
                 StrategyEvent.timestamp >= since
             ))
         ).scalar() or 0
@@ -830,8 +841,9 @@ class MetricsCollector:
             'parametric_completed': parametric_output + parametric_failed,
             'score_ok': score_ok,
             'score_ok_pct': pct(score_ok, parametric_scored),
+            'shuffle_tested': shuffle_tested,
             'shuffle_ok': shuffle_ok,
-            'shuffle_ok_pct': pct(shuffle_ok, score_ok),
+            'shuffle_ok_pct': pct(shuffle_ok, shuffle_tested),  # Fixed: use shuffle_tested as denominator
             'mw_started': mw_started,
             'mw_ok': mw_ok,
             'mw_failed': mw_failed,
@@ -1774,15 +1786,25 @@ class MetricsCollector:
         passed = [e for e in events if e.status == 'passed']
         failed = [e for e in events if e.status == 'failed']
 
+        def extract_robustness(event_data: dict) -> Optional[float]:
+            """Extract robustness value, handling both nested and flat structures."""
+            if not event_data:
+                return None
+            # New format (flat): {"robustness": 0.9}
+            if 'robustness' in event_data:
+                return event_data['robustness']
+            # Old format (nested): {"event_data": {"robustness": 0.9}}
+            if 'event_data' in event_data and isinstance(event_data['event_data'], dict):
+                return event_data['event_data'].get('robustness')
+            return None
+
         passed_robustness = [
-            e.event_data.get('robustness', 0)
-            for e in passed
-            if e.event_data and 'robustness' in e.event_data
+            r for e in passed
+            if (r := extract_robustness(e.event_data)) is not None
         ]
         failed_robustness = [
-            e.event_data.get('robustness', 0)
-            for e in failed
-            if e.event_data and 'robustness' in e.event_data
+            r for e in failed
+            if (r := extract_robustness(e.event_data)) is not None
         ]
 
         return {
@@ -2437,6 +2459,7 @@ class MetricsCollector:
             """Format expectancy as percentage (0.0020 -> 0.20%)"""
             if val is None:
                 return "--"
+            return f"{val * 100:.2f}%"
 
         # Source abbreviation mapping (generation_mode -> abbrev)
         SOURCE_ABBREV = {
@@ -2742,10 +2765,11 @@ class MetricsCollector:
         # [7/10 SHUFFLE]
         # =====================================================================
         shuf = funnel["shuffle_ok"]
+        shuffle_tested = funnel["shuffle_tested"]
         shuffle_fail = failures["shuffle_fail"]
         shuffle_cached = failures.get("shuffle_cached", 0)
 
-        logger.info(f'[7/10 SHUFFLE] 24h: {shuf}/{score_ok} passed ({fmt_pct(funnel["shuffle_ok_pct"])})')
+        logger.info(f'[7/10 SHUFFLE] 24h: {shuf}/{shuffle_tested} passed ({fmt_pct(funnel["shuffle_ok_pct"])})')
         logger.info(f'[7/10 SHUFFLE] timing: {fmt_time(timing.get("shuffle"))} | bias_failures: {shuffle_fail} | cached: {shuffle_cached}')
 
         # =====================================================================
