@@ -136,6 +136,24 @@ export async function getThresholds() {
   return fetchJson<Record<string, Record<string, unknown>>>(`${API_BASE}/config/thresholds`);
 }
 
+export async function getConfigYaml() {
+  return fetchJson<import('../types').ConfigYamlResponse>(`${API_BASE}/config/yaml`);
+}
+
+export async function updateConfigYaml(yamlContent: string) {
+  return fetchJson<import('../types').ConfigYamlUpdateResponse>(
+    `${API_BASE}/config/yaml`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ yaml_content: yamlContent }),
+    }
+  );
+}
+
+export async function getConfigSections() {
+  return fetchJson<string[]>(`${API_BASE}/config/sections`);
+}
+
 // Pipeline Health
 export async function getPipelineHealth() {
   return fetchJson<import('../types').PipelineHealthResponse>(
@@ -371,3 +389,11 @@ export async function applyPreflightFixes(request: import('../types').PreflightA
     }
   );
 }
+
+export async function getPrepareConfig() {
+  return fetchJson<import('../types').PrepareConfig>(
+    `${API_BASE}/preflight/config`
+  );
+}
+
+// Note: updatePrepareConfig removed - config editing now via System > Settings > Configuration

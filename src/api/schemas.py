@@ -53,6 +53,16 @@ class Alert(BaseModel):
     timestamp: datetime
 
 
+class EmergencyState(BaseModel):
+    """Emergency stop state"""
+    scope: str  # portfolio, subaccount, strategy, system
+    scope_id: str  # global, 1-10, UUID, data_feed
+    is_stopped: bool
+    stop_reason: Optional[str] = None
+    stop_action: Optional[str] = None  # halt_entries, force_close
+    stopped_at: Optional[datetime] = None
+
+
 class StatusResponse(BaseModel):
     """Main status endpoint response"""
     uptime_seconds: int
@@ -60,6 +70,7 @@ class StatusResponse(BaseModel):
     services: List[ServiceInfo]
     portfolio: PortfolioSummary
     alerts: List[Alert] = []
+    emergency_stops: List[EmergencyState] = []
 
 
 # =============================================================================

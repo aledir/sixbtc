@@ -23,7 +23,6 @@ from src.database.models import (
     Trade,
     Coin,
     Subaccount,
-    ValidationCache,
     StrategyEvent,
     MarketRegime,
     EmergencyStopState,
@@ -296,44 +295,6 @@ class TestCoinIntegration:
         repr_str = repr(coin)
         assert test_symbol in repr_str
         assert '25' in repr_str
-
-
-# =============================================================================
-# VALIDATION CACHE INTEGRATION TESTS
-# =============================================================================
-
-class TestValidationCacheIntegration:
-    """Integration tests for ValidationCache model."""
-
-    def test_validation_cache_creation(self, db_session):
-        """Should store validation results by hash."""
-        cache = ValidationCache(
-            code_hash=uuid.uuid4().hex,
-            shuffle_passed=True,
-            multi_window_passed=True,
-        )
-        db_session.add(cache)
-        db_session.flush()
-
-        fetched = db_session.query(ValidationCache).filter_by(
-            code_hash=cache.code_hash
-        ).first()
-        assert fetched.shuffle_passed is True
-        assert fetched.multi_window_passed is True
-
-    def test_validation_cache_repr(self, db_session):
-        """Should show hash prefix and status."""
-        cache = ValidationCache(
-            code_hash='abc123def456789ghijklmnop',
-            shuffle_passed=False,
-            multi_window_passed=None,
-        )
-        db_session.add(cache)
-        db_session.flush()
-
-        repr_str = repr(cache)
-        assert 'abc123de' in repr_str
-        assert 'shuffle=False' in repr_str
 
 
 # =============================================================================

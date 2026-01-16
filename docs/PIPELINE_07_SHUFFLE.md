@@ -26,25 +26,6 @@
 
 ---
 
-## Caching (by base_code_hash)
-
-- Lookahead è proprietà del **BASE CODE**, non dei parametri
-- Se base code passa → tutte le strategie parametriche passano
-- Cache in `ValidationCache` table
-- Cache HIT: ~0ms, Cache MISS: ~50-100ms
-
-### Lookup
-
-`ValidationCache.get(base_code_hash, 'shuffle_test')`
-
-| Risultato | Azione |
-|-----------|--------|
-| EXISTS + passed=True | Skip test, return PASS |
-| EXISTS + passed=False | Skip test, return FAIL |
-| NOT EXISTS | Esegui test, salva risultato |
-
----
-
 ## Output
 
 | Risultato | Azione |

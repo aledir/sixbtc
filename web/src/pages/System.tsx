@@ -8,12 +8,12 @@ import {
   useLogs,
   useServices,
   useServiceControl,
-  useConfig,
   useThresholds,
   usePreflight,
   useApplyPreflightFixes,
+  useConfigYaml,
 } from '../hooks/useApi';
-import type { ServiceInfo, LogLine, PreflightCheck, SubaccountPreflightStatus } from '../types';
+import type { ServiceInfo, LogLine, SubaccountPreflightStatus } from '../types';
 import {
   AlertCircle,
   CheckCircle,
@@ -31,6 +31,10 @@ import {
   XCircle,
   Database,
   Zap,
+  Edit2,
+  ChevronUp,
+  ChevronDown,
+  X,
 } from 'lucide-react';
 
 // === Types ===
@@ -323,14 +327,17 @@ function TasksTab() {
 // === Logs Tab Components ===
 
 const SERVICES = [
+  'executor',
   'generator',
   'backtester',
   'validator',
-  'executor',
+  'rotator',
   'monitor',
+  'metrics',
   'scheduler',
-  'data',
   'api',
+  'frontend',
+  'subaccount',
 ];
 
 const LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR'];
@@ -377,6 +384,7 @@ function LogsTab() {
   const [search, setSearch] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const prevLinesCount = useRef(0);
 
   const { data, isLoading, error, refetch } = useLogs(selectedService, {
     lines: 500,
@@ -384,11 +392,14 @@ function LogsTab() {
     search: search || undefined,
   });
 
+  // Auto-scroll only when NEW lines are added, not on every re-render
   useEffect(() => {
-    if (autoScroll && scrollRef.current) {
+    const currentCount = data?.lines?.length || 0;
+    if (autoScroll && scrollRef.current && currentCount > prevLinesCount.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [data?.lines, autoScroll]);
+    prevLinesCount.current = currentCount;
+  }, [data?.lines?.length, autoScroll]);
 
   const handleScroll = () => {
     if (scrollRef.current) {
@@ -732,7 +743,122 @@ function ThresholdsSection() {
 }
 
 function ConfigViewer() {
-  const { data, isLoading } = useConfig();
+  const { data, isLoading, error, refetch } = useConfigYaml();
+  const [yamlContent, setYamlContent] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedSection, setSelectedSection] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await refetch();
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  // Initialize content when data loads
+  useEffect(() => {
+    if (data?.yaml_content && !yamlContent) {
+      setYamlContent(data.yaml_content);
+    }
+  }, [data, yamlContent]);
+
+  // Reset current match when search changes
+  useEffect(() => {
+    setCurrentMatchIndex(0);
+  }, [searchTerm]);
+
+  // Get filtered content based on section and search
+  const getFilteredContent = () => {
+    let content = yamlContent || data?.yaml_content || '';
+
+    // Filter by section if selected
+    if (selectedSection && data?.sections) {
+      // Find the section header (# ==== / # NAME / # ====)
+      const sectionIndex = content.indexOf(`# ${selectedSection}`);
+      if (sectionIndex !== -1) {
+        // Find start of section (the ==== line before the name)
+        const beforeSection = content.substring(0, sectionIndex);
+        const headerStart = beforeSection.lastIndexOf('# ==');
+
+        // Find the next section header (full 3-line pattern: ====, NAME, ====)
+        // Pattern matches: \n# ====...\n# SECTION_NAME\n# ====...
+        const nextSectionPattern = /\n# ={5,}\n# [A-Z][^\n]+\n# ={5,}/g;
+        nextSectionPattern.lastIndex = sectionIndex + selectedSection.length;
+        const nextMatch = nextSectionPattern.exec(content);
+
+        if (nextMatch) {
+          content = content.substring(headerStart >= 0 ? headerStart : sectionIndex, nextMatch.index);
+        } else {
+          content = content.substring(headerStart >= 0 ? headerStart : sectionIndex);
+        }
+      }
+    }
+
+    return content;
+  };
+
+  // Get line numbers for display
+  const getLineNumbers = (content: string) => {
+    const lines = content.split('\n');
+    return lines.map((_, i) => i + 1).join('\n');
+  };
+
+  const handleJumpToSection = (section: string) => {
+    setSelectedSection(section);
+    if (textareaRef.current && data?.yaml_content) {
+      const sectionIndex = data.yaml_content.indexOf(`# ${section}`);
+      if (sectionIndex !== -1) {
+        // Count lines to this position
+        const linesBeforeSection = data.yaml_content.substring(0, sectionIndex).split('\n').length - 1;
+        // Scroll textarea to approximately that position
+        textareaRef.current.scrollTop = linesBeforeSection * 16; // ~16px per line
+      }
+    }
+  };
+
+  // Count search matches
+  const getMatchCount = () => {
+    if (!searchTerm) return 0;
+    const content = getFilteredContent();
+    const matches = content.toLowerCase().split(searchTerm.toLowerCase()).length - 1;
+    return matches;
+  };
+
+  const matchCount = getMatchCount();
+
+  // Navigate to next/previous match
+  const handleNextMatch = () => {
+    if (matchCount > 0) {
+      setCurrentMatchIndex((prev) => (prev + 1) % matchCount);
+      scrollToMatch((currentMatchIndex + 1) % matchCount);
+    }
+  };
+
+  const handlePrevMatch = () => {
+    if (matchCount > 0) {
+      setCurrentMatchIndex((prev) => (prev - 1 + matchCount) % matchCount);
+      scrollToMatch((currentMatchIndex - 1 + matchCount) % matchCount);
+    }
+  };
+
+  const scrollToMatch = (index: number) => {
+    if (!contentRef.current || !searchTerm) return;
+    const highlights = contentRef.current.querySelectorAll('[data-match="true"]');
+    if (highlights[index]) {
+      highlights[index].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  };
+
+  const clearSearch = () => {
+    setSearchTerm('');
+    setCurrentMatchIndex(0);
+  };
 
   if (isLoading) {
     return (
@@ -742,23 +868,217 @@ function ConfigViewer() {
     );
   }
 
+  if (error) {
+    return (
+      <div className="card">
+        <p className="text-[var(--color-loss)]">Error loading config: {(error as Error).message}</p>
+        <button onClick={() => refetch()} className="btn btn-primary mt-4">
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  const displayContent = getFilteredContent();
+
   return (
-    <div className="card">
-      <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
-        Configuration (Read-Only)
-      </h3>
-      <div className="bg-[var(--color-bg-secondary)] rounded-lg p-4 max-h-96 overflow-auto">
-        <pre className="text-xs font-mono whitespace-pre-wrap text-[var(--color-text-secondary)]">
-          {JSON.stringify(data?.config || {}, null, 2)}
-        </pre>
+    <div className="space-y-4">
+      {/* Header with controls */}
+      <div className="card">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
+          <div>
+            <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase">
+              Configuration (config.yaml)
+            </h3>
+            <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
+              {data?.line_count} lines • {data?.sections?.length || 0} sections
+            </p>
+          </div>
+          <button
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            className="btn btn-ghost text-sm"
+            title="Refresh configuration"
+          >
+            <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+
+        {/* Info message - edit via file */}
+        <div className="flex items-center gap-3 p-3 bg-[var(--color-text-tertiary)]/10 border border-[var(--color-text-tertiary)]/30 rounded-lg mb-4">
+          <AlertCircle className="w-4 h-4 text-[var(--color-text-secondary)] flex-shrink-0" />
+          <p className="text-xs text-[var(--color-text-secondary)]">
+            Read-only view. To edit, modify <code className="bg-[var(--color-bg-tertiary)] px-1 rounded">config/config.yaml</code> directly and restart services.
+          </p>
+        </div>
+
+        {/* Filters row */}
+        <div className="flex flex-col sm:flex-row gap-3 mb-4">
+          {/* Section filter */}
+          <select
+            value={selectedSection || ''}
+            onChange={(e) => setSelectedSection(e.target.value || null)}
+            className="input sm:w-64"
+          >
+            <option value="">All Sections</option>
+            {data?.sections?.map((section) => (
+              <option key={section} value={section}>
+                {section}
+              </option>
+            ))}
+          </select>
+
+          {/* Search with navigation */}
+          <div className="flex items-center gap-1 flex-1 sm:flex-initial">
+            <div className="relative flex-1 sm:w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-text-tertiary)] pointer-events-none" />
+              <input
+                type="text"
+                placeholder="Search..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="input pl-9 pr-16 w-full"
+              />
+              {searchTerm && (
+                <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 text-xs text-[var(--color-text-tertiary)]">
+                  <span>{matchCount > 0 ? `${currentMatchIndex + 1}/${matchCount}` : '0/0'}</span>
+                  <button onClick={clearSearch} className="p-0.5 hover:text-[var(--color-text-primary)]">
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              )}
+            </div>
+            {searchTerm && matchCount > 0 && (
+              <>
+                <button
+                  onClick={handlePrevMatch}
+                  className="btn btn-ghost p-1.5"
+                  title="Previous match"
+                >
+                  <ChevronUp className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={handleNextMatch}
+                  className="btn btn-ghost p-1.5"
+                  title="Next match"
+                >
+                  <ChevronDown className="w-4 h-4" />
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Quick section links */}
+        {data?.sections && data.sections.length > 0 && (
+          <div className="flex flex-wrap gap-2 mb-4">
+            {data.sections.slice(0, 10).map((section) => (
+              <button
+                key={section}
+                onClick={() => handleJumpToSection(section)}
+                className={`text-xs px-2 py-1 rounded transition-colors ${
+                  selectedSection === section
+                    ? 'bg-[var(--color-accent)] text-white'
+                    : 'bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]'
+                }`}
+              >
+                {section.replace(/ \([^)]+\)/, '').substring(0, 20)}
+              </button>
+            ))}
+            {data.sections.length > 10 && (
+              <span className="text-xs text-[var(--color-text-tertiary)] px-2 py-1">
+                +{data.sections.length - 10} more
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* YAML content */}
+      <div className="card p-0 overflow-hidden">
+        <div ref={contentRef} className="flex h-[500px] overflow-auto">
+          {/* Line numbers */}
+          <div className="sticky left-0 flex-shrink-0 py-4 pl-4 pr-2 bg-[var(--color-bg-tertiary)] text-[var(--color-text-tertiary)] font-mono text-xs text-right select-none border-r border-[var(--color-border-primary)]">
+            <pre>{getLineNumbers(displayContent)}</pre>
+          </div>
+          {/* Content */}
+          <pre className="flex-1 p-4 font-mono text-xs text-[var(--color-text-secondary)] whitespace-pre">
+                {searchTerm
+                  ? displayContent.split('\n').map((line, i) => {
+                      const lowerLine = line.toLowerCase();
+                      const lowerSearch = searchTerm.toLowerCase();
+                      if (lowerLine.includes(lowerSearch)) {
+                        // Highlight matching text
+                        const parts = [];
+                        let lastIndex = 0;
+                        let index = lowerLine.indexOf(lowerSearch);
+                        while (index !== -1) {
+                          parts.push(line.substring(lastIndex, index));
+                          parts.push(
+                            <span key={`${i}-${index}`} className="bg-[var(--color-warning)]/40 text-[var(--color-warning)]">
+                              {line.substring(index, index + searchTerm.length)}
+                            </span>
+                          );
+                          lastIndex = index + searchTerm.length;
+                          index = lowerLine.indexOf(lowerSearch, lastIndex);
+                        }
+                        parts.push(line.substring(lastIndex));
+                        return (
+                          <div key={i} data-match="true" className="bg-[var(--color-warning)]/10">
+                            {parts}
+                          </div>
+                        );
+                      }
+                      return <div key={i}>{line || ' '}</div>;
+                    })
+                  : displayContent.split('\n').map((line, i) => {
+                      // Syntax highlighting
+                      let className = '';
+                      if (line.startsWith('#')) {
+                        className = 'text-[var(--color-text-tertiary)]'; // Comments
+                      } else if (line.match(/^\s*[a-z_]+:/i) && !line.includes('[REDACTED]')) {
+                        // Keys
+                        const colonIdx = line.indexOf(':');
+                        const key = line.substring(0, colonIdx + 1);
+                        const value = line.substring(colonIdx + 1);
+                        return (
+                          <div key={i}>
+                            <span className="text-[var(--color-accent)]">{key}</span>
+                            <span className={value.includes('#') ? '' : 'text-[var(--color-profit)]'}>
+                              {value}
+                            </span>
+                          </div>
+                        );
+                      } else if (line.includes('[REDACTED]') || line.includes('[ENV_VAR]')) {
+                        className = 'text-[var(--color-loss)]';
+                      }
+                      return (
+                        <div key={i} className={className}>
+                          {line || ' '}
+                        </div>
+                      );
+                    })}
+          </pre>
+        </div>
+      </div>
+
+      {/* Status bar */}
+      <div className="text-xs text-[var(--color-text-tertiary)] flex items-center gap-4">
+        <span>{displayContent.split('\n').length} lines shown</span>
+        {selectedSection && <span>Section: {selectedSection}</span>}
+        {searchTerm && (
+          <span>
+            {displayContent.toLowerCase().split(searchTerm.toLowerCase()).length - 1} matches
+          </span>
+        )}
       </div>
     </div>
   );
 }
 
-function SettingsTab() {
+function SettingsTab({ initialSubTab = 'services' }: { initialSubTab?: 'services' | 'config' }) {
   const { data: services, isLoading: servicesLoading } = useServices();
-  const [activeSubTab, setActiveSubTab] = useState<'services' | 'config'>('services');
+  const [activeSubTab, setActiveSubTab] = useState<'services' | 'config'>(initialSubTab);
 
   return (
     <div className="space-y-6">
@@ -836,25 +1156,6 @@ function CheckStatusIcon({ status }: { status: 'pass' | 'fail' | 'warn' }) {
   return <AlertTriangle className="w-5 h-5 text-[var(--color-warning)]" />;
 }
 
-function PreflightCheckCard({ check }: { check: PreflightCheck }) {
-  return (
-    <div className="flex items-start gap-3 p-4 bg-[var(--color-bg-secondary)] rounded-lg">
-      <CheckStatusIcon status={check.status} />
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="font-medium text-[var(--color-text-primary)]">{check.name}</span>
-          {check.can_fix && (
-            <span className="text-xs px-2 py-0.5 rounded bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
-              Fixable
-            </span>
-          )}
-        </div>
-        <p className="text-sm text-[var(--color-text-secondary)] mt-1">{check.message}</p>
-      </div>
-    </div>
-  );
-}
-
 function SubaccountStatusRow({ sa }: { sa: SubaccountPreflightStatus }) {
   const statusColors: Record<string, string> = {
     funded: 'text-[var(--color-profit)]',
@@ -891,10 +1192,20 @@ function SubaccountStatusRow({ sa }: { sa: SubaccountPreflightStatus }) {
   );
 }
 
-function GoLiveTab() {
+function GoLiveTab({ onNavigateToSettings }: { onNavigateToSettings?: () => void }) {
   const { data, isLoading, error, refetch } = usePreflight();
   const { mutate: applyFixes, isPending: isApplying } = useApplyPreflightFixes();
-  const [showDetails, setShowDetails] = useState(false);
+  const [showSubaccountDetails, setShowSubaccountDetails] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await refetch();
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   const handleApplyFixes = () => {
     if (!data) return;
@@ -944,48 +1255,59 @@ function GoLiveTab() {
   const warnChecks = data.checks.filter((c) => c.status === 'warn');
   const canApplyFixes =
     data.subaccounts.some((sa) => !sa.exists) || data.emergency_stops.length > 0;
+  const fundedCount = data.subaccounts.filter((sa) => sa.status === 'funded').length;
 
   return (
-    <div className="space-y-6">
-      {/* Overall Status */}
+    <div className="space-y-4">
+      {/* Status Header - Compact */}
       <div
-        className={`card p-6 border-2 ${
+        className={`card p-4 border-l-4 ${
           data.ready
-            ? 'border-[var(--color-profit)]/50 bg-[var(--color-profit)]/5'
-            : 'border-[var(--color-loss)]/50 bg-[var(--color-loss)]/5'
+            ? 'border-l-[var(--color-profit)] bg-[var(--color-profit)]/5'
+            : 'border-l-[var(--color-loss)] bg-[var(--color-loss)]/5'
         }`}
       >
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <div
-              className={`w-16 h-16 rounded-full flex items-center justify-center ${
-                data.ready ? 'bg-[var(--color-profit)]/20' : 'bg-[var(--color-loss)]/20'
-              }`}
-            >
-              {data.ready ? (
-                <Rocket className="w-8 h-8 text-[var(--color-profit)]" />
-              ) : (
-                <AlertTriangle className="w-8 h-8 text-[var(--color-loss)]" />
-              )}
-            </div>
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          {/* Left: Status */}
+          <div className="flex items-center gap-3">
+            {data.ready ? (
+              <Rocket className="w-6 h-6 text-[var(--color-profit)]" />
+            ) : (
+              <AlertTriangle className="w-6 h-6 text-[var(--color-loss)]" />
+            )}
             <div>
-              <h2 className="text-2xl font-bold text-[var(--color-text-primary)]">
+              <span className="font-bold text-[var(--color-text-primary)]">
                 {data.ready ? 'Ready for Live Trading' : 'Not Ready'}
-              </h2>
-              <p className="text-[var(--color-text-secondary)] mt-1">
+              </span>
+              <span className="text-sm text-[var(--color-text-secondary)] ml-2">
                 {failedChecks.length > 0
                   ? `${failedChecks.length} check(s) failed`
                   : warnChecks.length > 0
                     ? `${warnChecks.length} warning(s)`
                     : 'All checks passed'}
-              </p>
+              </span>
             </div>
           </div>
 
-          <div className="flex gap-3">
-            <button onClick={() => refetch()} className="btn btn-ghost">
-              <RefreshCw className="w-4 h-4" />
+          {/* Right: Actions */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              className="btn btn-ghost p-2"
+              title="Refresh status"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
             </button>
+            {onNavigateToSettings && (
+              <button
+                onClick={onNavigateToSettings}
+                className="btn btn-secondary flex items-center gap-2"
+              >
+                <Edit2 className="w-4 h-4" />
+                <span className="hidden sm:inline">Edit Config</span>
+              </button>
+            )}
             {canApplyFixes && (
               <button
                 onClick={handleApplyFixes}
@@ -1004,205 +1326,165 @@ function GoLiveTab() {
         </div>
       </div>
 
-      {/* Checks */}
-      <div className="card">
-        <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
-          Preflight Checks
-        </h3>
-        <div className="space-y-3">
-          {data.checks.map((check) => (
-            <PreflightCheckCard key={check.name} check={check} />
-          ))}
-        </div>
-      </div>
-
-      {/* Config Mismatches */}
-      {data.config_mismatches.length > 0 && (
-        <div className="card">
-          <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
-            Config Mismatches (Manual Fix Required)
-          </h3>
-          <p className="text-sm text-[var(--color-text-secondary)] mb-4">
-            Edit <code className="px-1.5 py-0.5 bg-[var(--color-bg-secondary)] rounded">config/config.yaml</code> to match these values:
-          </p>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-[var(--color-text-tertiary)]">
-                  <th className="pb-2">Key</th>
-                  <th className="pb-2">Current</th>
-                  <th className="pb-2">Target</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.config_mismatches.map((m) => (
-                  <tr key={m.key} className="border-t border-[var(--color-border-primary)]">
-                    <td className="py-2 font-mono text-[var(--color-text-primary)]">{m.key}</td>
-                    <td className="py-2 text-[var(--color-loss)]">{m.current}</td>
-                    <td className="py-2 text-[var(--color-profit)]">{m.target}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Pool Stats */}
-      <div className="card">
-        <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
-          Strategy Pool
-        </h3>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <div>
-            <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Active</p>
-            <p className="text-xl font-bold text-[var(--color-text-primary)]">
-              {data.pool_stats.active}
-            </p>
-          </div>
-          <div>
-            <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Live</p>
-            <p className="text-xl font-bold text-[var(--color-text-primary)]">
-              {data.pool_stats.live}
-            </p>
-          </div>
-          <div>
-            <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Total Ready</p>
-            <p
-              className={`text-xl font-bold ${
-                data.pool_stats.total >= data.pool_stats.required
-                  ? 'text-[var(--color-profit)]'
-                  : 'text-[var(--color-loss)]'
-              }`}
-            >
-              {data.pool_stats.total}
-            </p>
-          </div>
-          <div>
-            <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Required</p>
-            <p className="text-xl font-bold text-[var(--color-text-primary)]">
-              {data.pool_stats.required}
-            </p>
-          </div>
-        </div>
-      </div>
-
-      {/* Subaccounts */}
-      <div className="card">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase">
-            Subaccounts ({data.subaccounts.length})
-          </h3>
-          <button
-            onClick={() => setShowDetails(!showDetails)}
-            className="btn btn-ghost text-sm"
-          >
-            {showDetails ? 'Hide Details' : 'Show Details'}
-          </button>
-        </div>
-
-        {showDetails && (
-          <div className="space-y-2">
-            {data.subaccounts.map((sa) => (
-              <SubaccountStatusRow key={sa.id} sa={sa} />
-            ))}
-          </div>
-        )}
-
-        {!showDetails && (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <div>
-              <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Funded</p>
-              <p className="text-xl font-bold text-[var(--color-profit)]">
-                {data.subaccounts.filter((sa) => sa.status === 'funded').length}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Underfunded</p>
-              <p className="text-xl font-bold text-[var(--color-loss)]">
-                {data.subaccounts.filter((sa) => sa.status === 'underfunded').length}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">Missing</p>
-              <p className="text-xl font-bold text-[var(--color-text-tertiary)]">
-                {data.subaccounts.filter((sa) => !sa.exists).length}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs text-[var(--color-text-tertiary)] uppercase mb-1">
-                Min Balance
-              </p>
-              <p className="text-xl font-bold text-[var(--color-text-primary)]">
-                ${data.target_config.min_operational}
-              </p>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Emergency Stops */}
+      {/* Emergency Stops - Show prominently if any */}
       {data.emergency_stops.length > 0 && (
-        <div className="card border border-[var(--color-loss)]/50">
-          <h3 className="text-sm font-semibold text-[var(--color-loss)] uppercase mb-4">
+        <div className="card p-4 border border-[var(--color-loss)]/50 bg-[var(--color-loss)]/5">
+          <div className="flex items-center gap-2 text-[var(--color-loss)] font-medium mb-2">
+            <AlertCircle className="w-4 h-4" />
             Active Emergency Stops ({data.emergency_stops.length})
-          </h3>
-          <div className="space-y-2">
+          </div>
+          <div className="space-y-1">
             {data.emergency_stops.map((stop, idx) => (
-              <div
-                key={idx}
-                className="flex items-center justify-between p-3 bg-[var(--color-loss)]/10 rounded-lg"
-              >
-                <div className="flex items-center gap-3">
-                  <AlertCircle className="w-4 h-4 text-[var(--color-loss)]" />
-                  <span className="font-medium text-[var(--color-text-primary)]">
-                    [{stop.scope}:{stop.scope_id}]
-                  </span>
-                </div>
-                <span className="text-sm text-[var(--color-text-secondary)]">
-                  {stop.reason || 'No reason specified'}
-                </span>
+              <div key={idx} className="text-sm text-[var(--color-text-secondary)]">
+                <span className="font-mono">[{stop.scope}:{stop.scope_id}]</span> {stop.reason || 'No reason'}
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {/* Target Config */}
-      <div className="card">
-        <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase mb-4">
-          Target Configuration (from prepare_live.yaml)
-        </h3>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
-          <div>
-            <p className="text-[var(--color-text-tertiary)]">Subaccounts</p>
-            <p className="font-medium text-[var(--color-text-primary)]">
-              {data.target_config.num_subaccounts}
-            </p>
+      {/* Two-column layout for checks and stats */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Preflight Checks */}
+        <div className="card p-4">
+          <h3 className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase mb-3">
+            Preflight Checks
+          </h3>
+          <div className="space-y-2">
+            {data.checks.map((check) => (
+              <div key={check.name} className="flex items-start gap-2">
+                <CheckStatusIcon status={check.status} />
+                <div className="flex-1 min-w-0">
+                  <span className="text-sm font-medium text-[var(--color-text-primary)]">
+                    {check.name}
+                  </span>
+                  {check.can_fix && (
+                    <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
+                      Fixable
+                    </span>
+                  )}
+                  <p className="text-xs text-[var(--color-text-tertiary)]">{check.message}</p>
+                </div>
+              </div>
+            ))}
           </div>
-          <div>
-            <p className="text-[var(--color-text-tertiary)]">Capital/Sub</p>
-            <p className="font-medium text-[var(--color-text-primary)]">
-              ${data.target_config.capital_per_subaccount}
-            </p>
-          </div>
-          <div>
-            <p className="text-[var(--color-text-tertiary)]">Max Live</p>
-            <p className="font-medium text-[var(--color-text-primary)]">
-              {data.target_config.max_live_strategies}
-            </p>
-          </div>
-          <div>
-            <p className="text-[var(--color-text-tertiary)]">Mode</p>
-            <p
-              className={`font-medium ${
-                data.target_config.dry_run
+        </div>
+
+        {/* Quick Stats */}
+        <div className="card p-4">
+          <h3 className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase mb-3">
+            Current Status
+          </h3>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="p-3 bg-[var(--color-bg-secondary)] rounded-lg">
+              <p className="text-xs text-[var(--color-text-tertiary)]">Pool / Required</p>
+              <p className={`text-lg font-bold ${
+                data.pool_stats.total >= data.pool_stats.required
+                  ? 'text-[var(--color-profit)]'
+                  : 'text-[var(--color-loss)]'
+              }`}>
+                {data.pool_stats.total} / {data.pool_stats.required}
+              </p>
+            </div>
+            <div className="p-3 bg-[var(--color-bg-secondary)] rounded-lg">
+              <p className="text-xs text-[var(--color-text-tertiary)]">Live Strategies</p>
+              <p className="text-lg font-bold text-[var(--color-text-primary)]">
+                {data.pool_stats.live}
+              </p>
+            </div>
+            <div className="p-3 bg-[var(--color-bg-secondary)] rounded-lg">
+              <p className="text-xs text-[var(--color-text-tertiary)]">Subaccounts Funded</p>
+              <p className={`text-lg font-bold ${
+                fundedCount === data.subaccounts.length
+                  ? 'text-[var(--color-profit)]'
+                  : 'text-[var(--color-warning)]'
+              }`}>
+                {fundedCount} / {data.subaccounts.length}
+              </p>
+            </div>
+            <div className="p-3 bg-[var(--color-bg-secondary)] rounded-lg">
+              <p className="text-xs text-[var(--color-text-tertiary)]">Trading Mode</p>
+              <p className={`text-lg font-bold ${
+                data.config_summary.dry_run
                   ? 'text-[var(--color-warning)]'
                   : 'text-[var(--color-profit)]'
-              }`}
+              }`}>
+                {data.config_summary.dry_run ? 'DRY RUN' : 'LIVE'}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Subaccounts - Collapsible */}
+      <div className="card p-4">
+        <button
+          onClick={() => setShowSubaccountDetails(!showSubaccountDetails)}
+          className="flex items-center justify-between w-full text-left"
+        >
+          <h3 className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase">
+            Subaccounts ({data.subaccounts.length})
+          </h3>
+          <span className="text-xs text-[var(--color-accent)]">
+            {showSubaccountDetails ? 'Hide' : 'Show'} Details
+          </span>
+        </button>
+
+        {showSubaccountDetails && (
+          <div className="mt-3 space-y-2">
+            {data.subaccounts.map((sa) => (
+              <SubaccountStatusRow key={sa.id} sa={sa} />
+            ))}
+          </div>
+        )}
+
+        {!showSubaccountDetails && (
+          <div className="mt-3 flex gap-4 text-sm">
+            <span className="text-[var(--color-profit)]">
+              {fundedCount} funded
+            </span>
+            <span className="text-[var(--color-loss)]">
+              {data.subaccounts.filter((sa) => sa.status === 'underfunded').length} underfunded
+            </span>
+            <span className="text-[var(--color-text-tertiary)]">
+              {data.subaccounts.filter((sa) => !sa.exists).length} missing
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Config Summary - Minimal */}
+      <div className="card p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase">
+            Configuration
+          </h3>
+          {onNavigateToSettings && (
+            <button
+              onClick={onNavigateToSettings}
+              className="text-xs text-[var(--color-accent)] hover:underline flex items-center gap-1"
             >
-              {data.target_config.dry_run ? 'DRY RUN' : 'LIVE'}
-            </p>
+              <Edit2 className="w-3 h-3" />
+              Edit in Settings
+            </button>
+          )}
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+          <div>
+            <span className="text-[var(--color-text-tertiary)]">Subaccounts: </span>
+            <span className="font-medium">{data.config_summary.num_subaccounts}</span>
+          </div>
+          <div>
+            <span className="text-[var(--color-text-tertiary)]">Capital/Sub: </span>
+            <span className="font-medium">${data.config_summary.capital_per_subaccount}</span>
+          </div>
+          <div>
+            <span className="text-[var(--color-text-tertiary)]">Min Balance: </span>
+            <span className="font-medium">${data.config_summary.min_operational}</span>
+          </div>
+          <div>
+            <span className="text-[var(--color-text-tertiary)]">Max Live: </span>
+            <span className="font-medium">{data.config_summary.max_live_strategies}</span>
           </div>
         </div>
       </div>
@@ -1214,6 +1496,12 @@ function GoLiveTab() {
 
 export default function System() {
   const [activeTab, setActiveTab] = useState<TabType>('golive');
+  const [settingsSubTab, setSettingsSubTab] = useState<'services' | 'config'>('services');
+
+  const navigateToConfig = () => {
+    setSettingsSubTab('config');
+    setActiveTab('settings');
+  };
 
   return (
     <div className="space-y-6">
@@ -1246,10 +1534,10 @@ export default function System() {
       </div>
 
       {/* Tab Content */}
-      {activeTab === 'golive' && <GoLiveTab />}
+      {activeTab === 'golive' && <GoLiveTab onNavigateToSettings={navigateToConfig} />}
       {activeTab === 'tasks' && <TasksTab />}
       {activeTab === 'logs' && <LogsTab />}
-      {activeTab === 'settings' && <SettingsTab />}
+      {activeTab === 'settings' && <SettingsTab initialSubTab={settingsSubTab} />}
     </div>
   );
 }

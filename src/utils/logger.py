@@ -86,8 +86,20 @@ def setup_logging(
     plain_formatter = logging.Formatter(fmt=log_format, datefmt=date_format)
 
     # =========================================================================
-    # SINGLE STDOUT HANDLER (Supervisor captures stdout and writes to log file)
-    # Using redirect_stderr=true in supervisor config, all output goes to stdout
+    # FILE HANDLER with rotation (primary - always enabled)
+    # =========================================================================
+    file_handler = RotatingFileHandler(
+        filename=log_path,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding='utf-8'
+    )
+    file_handler.setLevel(getattr(logging, log_level.upper()))
+    file_handler.setFormatter(plain_formatter)
+    root_logger.addHandler(file_handler)
+
+    # =========================================================================
+    # STDOUT HANDLER (for supervisor capture and manual runs)
     # =========================================================================
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setLevel(getattr(logging, log_level.upper()))

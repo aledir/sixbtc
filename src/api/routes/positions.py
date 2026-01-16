@@ -3,7 +3,9 @@ Positions API routes
 
 GET /api/positions - Get all open positions from Hyperliquid (real-time)
 """
-from typing import List, Optional
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -17,10 +19,50 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 
+# Cache for positions (expensive API calls to Hyperliquid)
+_positions_cache: Dict[str, Any] = {}
+_positions_cache_time: float = 0
+POSITIONS_CACHE_TTL_SECONDS = 30  # Cache for 30 seconds
+
 
 def get_hyperliquid_client() -> HyperliquidClient:
     """Get or create HyperliquidClient instance."""
     return HyperliquidClient()
+
+
+def _fetch_subaccount_positions(
+    sub_id: int,
+    subaccount_strategies: Dict[int, str]
+) -> Tuple[int, List[PositionInfo]]:
+    """
+    Fetch positions for a single subaccount.
+
+    Returns tuple of (sub_id, positions) for thread-safe result collection.
+    """
+    try:
+        client = HyperliquidClient()
+        positions = client.get_positions(sub_id)
+
+        result = []
+        for pos in positions:
+            result.append(PositionInfo(
+                subaccount_id=sub_id,
+                strategy_name=subaccount_strategies.get(sub_id),
+                symbol=pos.symbol,
+                side=pos.side,
+                size=pos.size,
+                entry_price=pos.entry_price,
+                mark_price=pos.current_price,
+                unrealized_pnl=pos.unrealized_pnl,
+                leverage=pos.leverage,
+                liquidation_price=pos.liquidation_price,
+                margin_used=pos.margin_used,
+            ))
+        return (sub_id, result)
+
+    except Exception as e:
+        logger.warning(f"Failed to get positions for subaccount {sub_id}: {e}")
+        return (sub_id, [])
 
 
 def get_total_subaccounts() -> int:
@@ -37,6 +79,7 @@ async def get_all_positions(
     Get all open positions from Hyperliquid.
 
     Fetches real-time position data directly from the exchange.
+    Cached for 10 seconds to reduce API calls.
 
     Args:
         subaccount_id: Optional filter for specific subaccount (1-N)
@@ -44,6 +87,8 @@ async def get_all_positions(
     Returns:
         PositionsResponse with all positions and aggregated stats
     """
+    global _positions_cache, _positions_cache_time
+
     total_subaccounts = get_total_subaccounts()
 
     # Validate subaccount_id if provided
@@ -54,11 +99,15 @@ async def get_all_positions(
                 detail=f"Subaccount ID must be between 1 and {total_subaccounts}"
             )
 
+    # Check cache (only for "all positions" query, not filtered)
+    cache_key = f"all_{subaccount_id}" if subaccount_id else "all"
+    now = time.time()
+    if cache_key in _positions_cache and (now - _positions_cache_time) < POSITIONS_CACHE_TTL_SECONDS:
+        return _positions_cache[cache_key]
+
     all_positions: List[PositionInfo] = []
 
     try:
-        client = get_hyperliquid_client()
-
         # Get strategy names for each subaccount from DB
         subaccount_strategies = {}
         with get_session() as session:
@@ -77,40 +126,38 @@ async def get_all_positions(
         else:
             subaccount_ids = list(range(1, total_subaccounts + 1))
 
-        # Fetch positions from each subaccount
-        for sub_id in subaccount_ids:
-            try:
-                positions = client.get_positions(sub_id)
+        # Fetch positions from all subaccounts IN PARALLEL
+        # Each thread gets its own HyperliquidClient to avoid rate limit conflicts
+        with ThreadPoolExecutor(max_workers=min(8, len(subaccount_ids))) as executor:
+            futures = {
+                executor.submit(
+                    _fetch_subaccount_positions,
+                    sub_id,
+                    subaccount_strategies
+                ): sub_id
+                for sub_id in subaccount_ids
+            }
 
-                for pos in positions:
-                    all_positions.append(PositionInfo(
-                        subaccount_id=sub_id,
-                        strategy_name=subaccount_strategies.get(sub_id),
-                        symbol=pos.symbol,
-                        side=pos.side,
-                        size=pos.size,
-                        entry_price=pos.entry_price,
-                        mark_price=pos.current_price,
-                        unrealized_pnl=pos.unrealized_pnl,
-                        leverage=pos.leverage,
-                        liquidation_price=pos.liquidation_price,
-                        margin_used=pos.margin_used,
-                    ))
-
-            except Exception as e:
-                logger.warning(f"Failed to get positions for subaccount {sub_id}: {e}")
-                continue
+            for future in as_completed(futures):
+                sub_id, positions = future.result()
+                all_positions.extend(positions)
 
         # Calculate aggregates
         total_unrealized_pnl = sum(p.unrealized_pnl for p in all_positions)
         total_margin_used = sum(p.margin_used for p in all_positions)
 
-        return PositionsResponse(
+        response = PositionsResponse(
             positions=all_positions,
             total_unrealized_pnl=total_unrealized_pnl,
             total_positions=len(all_positions),
             total_margin_used=total_margin_used,
         )
+
+        # Cache the result
+        _positions_cache[cache_key] = response
+        _positions_cache_time = now
+
+        return response
 
     except HTTPException:
         raise

@@ -1,15 +1,22 @@
 """
 Performance analytics API endpoints
 """
+import time
+from typing import Any, Dict, List
+
 from fastapi import APIRouter, Query, HTTPException
 from datetime import datetime, timedelta, UTC
-from typing import List
 from sqlalchemy import func, and_
 
 from src.database import get_session, PerformanceSnapshot, Subaccount
 from src.api.schemas import PerformanceEquityResponse, EquityPoint
 
 router = APIRouter()
+
+# Cache for equity curve (expensive DB query)
+_equity_cache: Dict[str, Any] = {}
+_equity_cache_time: Dict[str, float] = {}
+EQUITY_CACHE_TTL_SECONDS = 60  # Cache for 60 seconds
 
 
 @router.get("/performance/equity", response_model=PerformanceEquityResponse)
@@ -22,7 +29,15 @@ async def get_equity_curve(
 
     Returns time-series of portfolio value (equity) over time.
     Portfolio equity comes from PerformanceSnapshot with strategy_id=NULL
+    Cached for 30 seconds to reduce DB load.
     """
+    # Check cache
+    cache_key = f"{period}_{strategy_id or 'portfolio'}"
+    now = time.time()
+    if cache_key in _equity_cache:
+        if (now - _equity_cache_time.get(cache_key, 0)) < EQUITY_CACHE_TTL_SECONDS:
+            return _equity_cache[cache_key]
+
     with get_session() as session:
         # Parse period to timedelta
         period_map = {
@@ -62,7 +77,7 @@ async def get_equity_curve(
             total_unrealized = session.query(func.sum(Subaccount.unrealized_pnl)).scalar() or 0
             current_equity = total_balance + total_unrealized
 
-            return PerformanceEquityResponse(
+            response = PerformanceEquityResponse(
                 period=period,
                 subaccount_id=None,
                 data_points=[
@@ -82,6 +97,12 @@ async def get_equity_curve(
                 current_drawdown=0.0,
                 total_return=0.0,
             )
+
+            # Cache the result
+            _equity_cache[cache_key] = response
+            _equity_cache_time[cache_key] = now
+
+            return response
 
         # Convert snapshots to EquityPoint
         data_points = []
@@ -121,7 +142,7 @@ async def get_equity_curve(
         # Total return
         total_return = (end_equity - start_equity) / start_equity if start_equity > 0 else 0
 
-        return PerformanceEquityResponse(
+        response = PerformanceEquityResponse(
             period=period,
             subaccount_id=None,
             data_points=data_points,
@@ -132,6 +153,12 @@ async def get_equity_curve(
             current_drawdown=current_dd,
             total_return=total_return,
         )
+
+        # Cache the result
+        _equity_cache[cache_key] = response
+        _equity_cache_time[cache_key] = now
+
+        return response
 
 
 @router.get("/performance/drawdown", response_model=dict)

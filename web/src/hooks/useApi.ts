@@ -3,9 +3,9 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as api from '../lib/api';
 
-// Refresh intervals (ms)
-const FAST_REFRESH = 10000;   // 10 seconds for live data
-const SLOW_REFRESH = 60000;   // 1 minute for less critical data
+// Refresh intervals (ms) - increased to reduce memory pressure
+const FAST_REFRESH = 30000;   // 30 seconds for live data (was 10s)
+const SLOW_REFRESH = 120000;  // 2 minutes for less critical data (was 60s)
 
 // Status
 export function useStatus() {
@@ -13,6 +13,7 @@ export function useStatus() {
     queryKey: ['status'],
     queryFn: api.getStatus,
     refetchInterval: FAST_REFRESH,
+    staleTime: 15000,  // 15 seconds - critical but not instant
   });
 }
 
@@ -22,6 +23,7 @@ export function useStrategies(params?: Parameters<typeof api.getStrategies>[0]) 
     queryKey: ['strategies', params],
     queryFn: () => api.getStrategies(params),
     refetchInterval: SLOW_REFRESH,
+    staleTime: 30000,  // 30 seconds - strategies don't change frequently
   });
 }
 
@@ -64,6 +66,7 @@ export function useSubaccounts() {
     queryKey: ['subaccounts'],
     queryFn: api.getSubaccounts,
     refetchInterval: FAST_REFRESH,
+    staleTime: 15000,  // 15 seconds - balance updates not instant
   });
 }
 
@@ -112,6 +115,36 @@ export function useThresholds() {
   return useQuery({
     queryKey: ['thresholds'],
     queryFn: api.getThresholds,
+    staleTime: Infinity,
+  });
+}
+
+export function useConfigYaml() {
+  return useQuery({
+    queryKey: ['configYaml'],
+    queryFn: api.getConfigYaml,
+    staleTime: Infinity, // Don't auto-refresh while editing
+  });
+}
+
+export function useUpdateConfigYaml() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (yamlContent: string) => api.updateConfigYaml(yamlContent),
+    onSuccess: () => {
+      // Invalidate all config-related queries
+      queryClient.invalidateQueries({ queryKey: ['configYaml'] });
+      queryClient.invalidateQueries({ queryKey: ['config'] });
+      queryClient.invalidateQueries({ queryKey: ['thresholds'] });
+    },
+  });
+}
+
+export function useConfigSections() {
+  return useQuery({
+    queryKey: ['configSections'],
+    queryFn: api.getConfigSections,
     staleTime: Infinity,
   });
 }
@@ -268,7 +301,8 @@ export function useMetricsSnapshot() {
   return useQuery({
     queryKey: ['metricsSnapshot'],
     queryFn: api.getMetricsSnapshot,
-    refetchInterval: SLOW_REFRESH,  // 60s - matches collection interval
+    refetchInterval: SLOW_REFRESH,  // 2 minutes - expensive query
+    staleTime: 60000,  // 1 minute - snapshot is heavy, cache longer
   });
 }
 
@@ -303,3 +337,13 @@ export function useApplyPreflightFixes() {
     },
   });
 }
+
+export function usePrepareConfig() {
+  return useQuery({
+    queryKey: ['prepareConfig'],
+    queryFn: api.getPrepareConfig,
+    staleTime: Infinity,  // Config rarely changes
+  });
+}
+
+// Note: useUpdatePrepareConfig removed - config editing now via System > Settings > Configuration

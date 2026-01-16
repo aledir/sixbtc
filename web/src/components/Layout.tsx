@@ -7,6 +7,7 @@ import {
   Settings,
   Sun,
   Moon,
+  AlertOctagon,
 } from 'lucide-react';
 import { useStatus } from '../hooks/useApi';
 import { useTheme } from '../contexts/ThemeContext';
@@ -168,6 +169,7 @@ function MobileHeader() {
 export default function Layout() {
   const { data: status } = useStatus();
   const hasAlerts = (status?.alerts.length ?? 0) > 0;
+  const hasEmergencyStops = (status?.emergency_stops?.length ?? 0) > 0;
 
   return (
     <div className="flex min-h-screen min-h-[100dvh] bg-[var(--color-bg-primary)]">
@@ -178,6 +180,25 @@ export default function Layout() {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Mobile Header */}
         <MobileHeader />
+
+        {/* Emergency Stop Banner - Most prominent */}
+        {hasEmergencyStops && (
+          <div className="bg-[var(--color-loss)] text-white px-4 py-3">
+            <div className="flex items-center gap-3">
+              <AlertOctagon className="w-5 h-5 flex-shrink-0" />
+              <div className="flex-1">
+                <span className="font-semibold">EMERGENCY STOP ACTIVE</span>
+                <span className="mx-2">-</span>
+                <span>
+                  {status?.emergency_stops?.map((e) => `[${e.scope}:${e.scope_id}] ${e.stop_reason || 'Unknown reason'}`).join(' | ')}
+                </span>
+              </div>
+              <span className="badge bg-white/20 text-white">
+                {status?.emergency_stops?.length}
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* Alert Banner */}
         {hasAlerts && (
@@ -195,7 +216,9 @@ export default function Layout() {
 
         {/* Page Content */}
         <main className="flex-1 overflow-auto p-[var(--spacing-page)] pb-24 md:pb-[var(--spacing-page)]">
-          <Outlet />
+          <div className="max-w-5xl mx-auto">
+            <Outlet />
+          </div>
         </main>
       </div>
 

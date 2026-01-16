@@ -4,6 +4,7 @@ SixBTC Control Center API
 FastAPI application for the web dashboard.
 Provides REST API endpoints + WebSocket for real-time updates.
 """
+import asyncio
 import logging
 import os
 import time
@@ -12,13 +13,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-# Initialize logging (supervisor handles file output)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+from src.config import load_config
+from src.utils import setup_logging, get_logger
+
+# Initialize logging with rotation
+_config = load_config()._raw_config
+setup_logging(
+    log_file='logs/api.log',
+    log_level=_config.get('logging', {}).get('level', 'INFO'),
 )
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Track startup time for uptime calculation
 START_TIME = time.time()
@@ -57,12 +61,57 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# Background task for snapshot refresh
+_snapshot_refresh_task = None
+SNAPSHOT_REFRESH_INTERVAL = 60  # Refresh every 60 seconds
+
+
+async def _refresh_snapshot_background():
+    """Background task to refresh the metrics snapshot periodically."""
+    from src.api.routes.metrics import _refresh_snapshot_cache
+
+    logger.info("Starting background snapshot refresh task")
+
+    # Initial computation (run immediately)
+    try:
+        logger.info("Pre-computing initial metrics snapshot...")
+        await asyncio.get_event_loop().run_in_executor(None, _refresh_snapshot_cache)
+        logger.info("Initial snapshot ready")
+    except Exception as e:
+        logger.error(f"Error computing initial snapshot: {e}")
+
+    # Periodic refresh
+    while True:
+        try:
+            await asyncio.sleep(SNAPSHOT_REFRESH_INTERVAL)
+            await asyncio.get_event_loop().run_in_executor(None, _refresh_snapshot_cache)
+        except asyncio.CancelledError:
+            logger.info("Background snapshot refresh task cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Error refreshing snapshot: {e}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler"""
+    global _snapshot_refresh_task
+
     logger.info("SixBTC Control Center API starting...")
+
+    # Start background snapshot refresh
+    _snapshot_refresh_task = asyncio.create_task(_refresh_snapshot_background())
+
     yield
+
+    # Cancel background task on shutdown
+    if _snapshot_refresh_task:
+        _snapshot_refresh_task.cancel()
+        try:
+            await _snapshot_refresh_task
+        except asyncio.CancelledError:
+            pass
+
     logger.info("SixBTC Control Center API shutting down...")
 
 

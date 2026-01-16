@@ -122,6 +122,32 @@
   box-sizing: border-box;
 }
 
+/* Ensure all interactive elements have pointer cursor */
+button,
+[role="button"],
+a,
+input[type="checkbox"],
+input[type="radio"],
+select,
+[onclick],
+.clickable {
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled,
+select:disabled,
+.disabled {
+  cursor: not-allowed;
+}
+
+/* Clickable table rows */
+.table tbody tr.clickable,
+tr[onClick],
+tr[data-clickable="true"] {
+  cursor: pointer;
+}
+
 html {
   font-family: var(--font-sans);
   line-height: 1.5;

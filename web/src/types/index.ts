@@ -34,12 +34,22 @@ export interface Alert {
   timestamp: string;
 }
 
+export interface EmergencyState {
+  scope: string;  // portfolio, subaccount, strategy, system
+  scope_id: string;  // global, 1-10, UUID, data_feed
+  is_stopped: boolean;
+  stop_reason: string | null;
+  stop_action: string | null;  // halt_entries, force_close
+  stopped_at: string | null;
+}
+
 export interface StatusResponse {
   uptime_seconds: number;
   pipeline: PipelineCounts;
   services: ServiceInfo[];
   portfolio: PortfolioSummary;
   alerts: Alert[];
+  emergency_stops: EmergencyState[];
 }
 
 export interface StrategyListItem {
@@ -927,12 +937,6 @@ export interface PreflightCheck {
   can_fix: boolean;
 }
 
-export interface ConfigMismatch {
-  key: string;
-  current: string;
-  target: string;
-}
-
 export interface SubaccountPreflightStatus {
   id: number;
   exists: boolean;
@@ -949,7 +953,6 @@ export interface EmergencyStopInfo {
 export interface PreflightResponse {
   ready: boolean;
   checks: PreflightCheck[];
-  config_mismatches: ConfigMismatch[];
   subaccounts: SubaccountPreflightStatus[];
   emergency_stops: EmergencyStopInfo[];
   pool_stats: {
@@ -958,7 +961,7 @@ export interface PreflightResponse {
     total: number;
     required: number;
   };
-  target_config: {
+  config_summary: {
     num_subaccounts: number;
     capital_per_subaccount: number;
     min_operational: number;
@@ -978,4 +981,30 @@ export interface PreflightApplyResponse {
   success: boolean;
   actions_taken: string[];
   errors: string[];
+}
+
+export interface PrepareConfig {
+  num_subaccounts: number;
+  capital_per_subaccount: number;
+  min_operational: number;
+  pool_max_size: number;
+  pool_min_for_live: number;
+  max_live_strategies: number;
+  dry_run: boolean;
+  require_funded: boolean;
+  require_pool: boolean;
+  clear_emergency_stops: boolean;
+}
+
+// YAML Config types (with comment preservation)
+export interface ConfigYamlResponse {
+  yaml_content: string;
+  sections: string[];
+  line_count: number;
+}
+
+export interface ConfigYamlUpdateResponse {
+  success: boolean;
+  message: string;
+  line_count: number;
 }

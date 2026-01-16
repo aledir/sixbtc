@@ -17,17 +17,22 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 
+# Project root directory (for absolute paths)
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
-# Map service names to log files
+# Map service names to log files (absolute paths)
 SERVICE_LOG_FILES = {
-    "generator": "logs/generator.log",
-    "backtester": "logs/backtester.log",
-    "validator": "logs/validator.log",
-    "executor": "logs/executor.log",
-    "monitor": "logs/monitor.log",
-    "scheduler": "logs/scheduler.log",
-    "data": "logs/data.log",
-    "api": "logs/api.log",
+    "executor": str(PROJECT_ROOT / "logs/executor.log"),
+    "generator": str(PROJECT_ROOT / "logs/generator.log"),
+    "backtester": str(PROJECT_ROOT / "logs/backtester.log"),
+    "validator": str(PROJECT_ROOT / "logs/validator.log"),
+    "rotator": str(PROJECT_ROOT / "logs/rotator.log"),
+    "monitor": str(PROJECT_ROOT / "logs/monitor.log"),
+    "metrics": str(PROJECT_ROOT / "logs/metrics.log"),
+    "scheduler": str(PROJECT_ROOT / "logs/scheduler.log"),
+    "api": str(PROJECT_ROOT / "logs/api.log"),
+    "frontend": str(PROJECT_ROOT / "logs/frontend.log"),
+    "subaccount": str(PROJECT_ROOT / "logs/subaccount.log"),
 }
 
 # Log level order for filtering
@@ -38,29 +43,64 @@ def parse_log_line(line: str) -> Optional[LogLine]:
     """
     Parse a log line into structured format.
 
-    Expected format: "2025-01-02 14:32:15 INFO     src.generator.main: Message here"
+    Supports multiple log formats:
+    1. Standard: "2025-01-02 14:32:15 INFO     src.generator.main: Message"
+    2. Metrics: "2025-01-02 14:32:15,123 - __main__ - INFO - Message"
+    3. API: "2025-01-02 14:32:15 - src.api.routes - INFO - Message"
+    4. Uvicorn: "INFO:     127.0.0.1:1234 - \"GET /api/...\" 200 OK"
 
     Returns None if line doesn't match expected format.
     """
-    # Pattern: timestamp level logger: message
-    pattern = r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(\w+)\s+(\S+):\s*(.*)$'
-    match = re.match(pattern, line)
+    # Try multiple patterns with named groups for clarity
+    # Pattern 1: Standard format - timestamp level logger: message
+    match = re.match(
+        r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(\w+)\s+(\S+):\s*(.*)$',
+        line
+    )
+    if match:
+        try:
+            timestamp_str, level, logger_name, message = match.groups()
+            timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+            return LogLine(
+                timestamp=timestamp,
+                level=level.upper(),
+                logger=logger_name,
+                message=message,
+            )
+        except (ValueError, AttributeError):
+            pass
 
-    if not match:
-        return None
+    # Pattern 2: Metrics/API format - timestamp - logger - level - message
+    match = re.match(
+        r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),?\d*\s+-\s+(\S+)\s+-\s+(\w+)\s+-\s*(.*)$',
+        line
+    )
+    if match:
+        try:
+            timestamp_str, logger_name, level, message = match.groups()
+            timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+            return LogLine(
+                timestamp=timestamp,
+                level=level.upper(),
+                logger=logger_name,
+                message=message,
+            )
+        except (ValueError, AttributeError):
+            pass
 
-    try:
-        timestamp_str, level, logger_name, message = match.groups()
-        timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-
+    # Pattern 3: Uvicorn format - LEVEL:     message
+    match = re.match(r'^(\w+):\s+(.*)$', line)
+    if match:
+        level, message = match.groups()
+        level_upper = level.upper()
         return LogLine(
-            timestamp=timestamp,
-            level=level.upper(),
-            logger=logger_name,
+            timestamp=datetime.now(),
+            level=level_upper if level_upper in LOG_LEVELS else "INFO",
+            logger="uvicorn",
             message=message,
         )
-    except (ValueError, AttributeError):
-        return None
+
+    return None
 
 
 def read_log_file(

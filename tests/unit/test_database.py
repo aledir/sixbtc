@@ -20,7 +20,6 @@ from src.database.models import (
     Trade,
     Coin,
     Subaccount,
-    ValidationCache,
     StrategyEvent,
     MarketRegime,
     EmergencyStopState,
@@ -184,37 +183,6 @@ class TestSubaccountModel:
 
         assert total_trades_col.default.arg == 0
         assert total_pnl_col.default.arg == 0.0
-
-
-# =============================================================================
-# VALIDATION CACHE MODEL TESTS
-# =============================================================================
-
-class TestValidationCacheModel:
-    """Tests for ValidationCache model attributes."""
-
-    def test_validation_cache_table_name(self):
-        """ValidationCache should have correct table name."""
-        assert ValidationCache.__tablename__ == 'validation_caches'
-
-    def test_validation_cache_primary_key(self):
-        """ValidationCache primary key should be code_hash."""
-        code_hash_col = ValidationCache.__table__.columns['code_hash']
-        assert code_hash_col.primary_key is True
-
-    def test_validation_cache_columns(self):
-        """ValidationCache should have test result columns."""
-        columns = [c.name for c in ValidationCache.__table__.columns]
-
-        assert 'code_hash' in columns
-        assert 'shuffle_passed' in columns
-        assert 'multi_window_passed' in columns
-        assert 'validated_at' in columns
-
-    def test_validation_cache_repr_method_exists(self):
-        """ValidationCache should have __repr__ method defined."""
-        assert hasattr(ValidationCache, '__repr__')
-        # The repr format is tested in integration tests with actual DB
 
 
 # =============================================================================

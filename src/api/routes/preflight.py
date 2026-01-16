@@ -2,26 +2,22 @@
 Pre-flight checks API for Go Live functionality.
 
 Provides endpoints to check system readiness and apply fixes before going live.
+All configuration is read from config.yaml (single source of truth).
 """
 import logging
 from datetime import datetime, UTC
-from pathlib import Path
 from typing import List, Optional
 
-import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from src.config import load_config
 from src.database.connection import get_session
 from src.database.models import Subaccount, Strategy, EmergencyStopState
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/preflight", tags=["Preflight"])
-
-# Paths
-PREPARE_CONFIG_PATH = Path("config/prepare_live.yaml")
-MAIN_CONFIG_PATH = Path("config/config.yaml")
 
 
 # =============================================================================
@@ -35,13 +31,6 @@ class CheckResult(BaseModel):
     message: str
     details: dict = {}
     can_fix: bool = False  # Can this be fixed via API?
-
-
-class ConfigMismatch(BaseModel):
-    """Single config mismatch"""
-    key: str
-    current: str
-    target: str
 
 
 class SubaccountStatus(BaseModel):
@@ -63,11 +52,10 @@ class PreflightResponse(BaseModel):
     """Full preflight check response"""
     ready: bool
     checks: List[CheckResult]
-    config_mismatches: List[ConfigMismatch] = []
     subaccounts: List[SubaccountStatus] = []
     emergency_stops: List[EmergencyStopInfo] = []
     pool_stats: dict = {}
-    target_config: dict = {}  # What prepare_live.yaml wants
+    config_summary: dict = {}  # Summary of relevant config values
 
 
 class ApplyRequest(BaseModel):
@@ -83,26 +71,47 @@ class ApplyResponse(BaseModel):
     errors: List[str] = []
 
 
+class PrepareConfig(BaseModel):
+    """Go Live configuration (read from config.yaml)"""
+    # Capital settings (from hyperliquid section)
+    num_subaccounts: int
+    capital_per_subaccount: int
+    min_operational: int
+
+    # Pool settings (from active_pool and rotator sections)
+    pool_max_size: int
+    pool_min_for_live: int
+
+    # Live settings (from hyperliquid and rotator sections)
+    max_live_strategies: int
+    dry_run: bool
+
+    # Preflight checks (from go_live section)
+    require_funded: bool
+    require_pool: bool
+    clear_emergency_stops: bool
+
+
 # =============================================================================
 # HELPERS
 # =============================================================================
 
-def load_prepare_config() -> dict:
-    """Load prepare_live.yaml configuration."""
-    if not PREPARE_CONFIG_PATH.exists():
-        raise HTTPException(status_code=404, detail="prepare_live.yaml not found")
+def get_config_values() -> dict:
+    """Extract relevant config values for preflight checks."""
+    config = load_config()
 
-    with open(PREPARE_CONFIG_PATH) as f:
-        return yaml.safe_load(f)
-
-
-def load_main_config() -> dict:
-    """Load main config.yaml."""
-    if not MAIN_CONFIG_PATH.exists():
-        raise HTTPException(status_code=404, detail="config.yaml not found")
-
-    with open(MAIN_CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+    return {
+        'num_subaccounts': config.hyperliquid['subaccounts']['count'],
+        'capital_per_subaccount': config.hyperliquid['funds']['topup_target_usd'],
+        'min_operational': config.hyperliquid['funds']['min_operational_usd'],
+        'pool_max_size': config.active_pool['max_size'],
+        'pool_min_for_live': config.rotator['min_pool_size'],
+        'max_live_strategies': config.rotator['max_live_strategies'],
+        'dry_run': config.hyperliquid['dry_run'],
+        'require_funded': config.go_live['preflight_checks']['require_funded'],
+        'require_pool': config.go_live['preflight_checks']['require_pool'],
+        'clear_emergency_stops': config.go_live['preflight_checks']['clear_emergency_stops'],
+    }
 
 
 # =============================================================================
@@ -115,108 +124,24 @@ async def get_preflight_status():
     Run all preflight checks and return system readiness status.
 
     Checks:
-    1. Config alignment (config.yaml vs prepare_live.yaml)
-    2. Subaccounts exist in DB
-    3. Funding status
-    4. Pool size (ACTIVE + LIVE strategies)
-    5. Emergency stops
+    1. Subaccounts exist in DB
+    2. Funding status
+    3. Pool size (ACTIVE + LIVE strategies)
+    4. Emergency stops
     """
-    prep_config = load_prepare_config()
-    main_config = load_main_config()
+    cfg = get_config_values()
 
     checks: List[CheckResult] = []
-    config_mismatches: List[ConfigMismatch] = []
     subaccounts: List[SubaccountStatus] = []
     emergency_stops: List[EmergencyStopInfo] = []
     pool_stats = {}
 
-    # Extract target values
-    target_subs = prep_config['capital']['num_subaccounts']
-    target_capital = prep_config['capital']['capital_per_subaccount']
-    min_operational = prep_config['capital']['min_operational']
-    target_max_live = prep_config['live']['max_live_strategies']
-    target_pool_max = prep_config['pool']['max_size']
-    target_min_pool = prep_config['pool']['min_for_live']
-    target_dry_run = prep_config['live']['dry_run']
+    target_subs = cfg['num_subaccounts']
+    min_operational = cfg['min_operational']
+    target_min_pool = cfg['pool_min_for_live']
 
     # ==========================================================================
-    # CHECK 1: Config Alignment
-    # ==========================================================================
-    mismatches = []
-
-    # Subaccounts count
-    current_subs = main_config.get('subaccounts', {}).get('count', 5)
-    if current_subs != target_subs:
-        mismatches.append(ConfigMismatch(
-            key='subaccounts.count',
-            current=str(current_subs),
-            target=str(target_subs)
-        ))
-
-    # Max live strategies
-    current_max = main_config.get('rotator', {}).get('max_live_strategies', 5)
-    if current_max != target_max_live:
-        mismatches.append(ConfigMismatch(
-            key='rotator.max_live_strategies',
-            current=str(current_max),
-            target=str(target_max_live)
-        ))
-
-    # Pool max size
-    current_pool = main_config.get('active_pool', {}).get('max_size', 300)
-    if current_pool != target_pool_max:
-        mismatches.append(ConfigMismatch(
-            key='active_pool.max_size',
-            current=str(current_pool),
-            target=str(target_pool_max)
-        ))
-
-    # Min pool size
-    current_min = main_config.get('rotator', {}).get('min_pool_size', 100)
-    if current_min != target_min_pool:
-        mismatches.append(ConfigMismatch(
-            key='rotator.min_pool_size',
-            current=str(current_min),
-            target=str(target_min_pool)
-        ))
-
-    # Dry run
-    current_dry = main_config.get('trading', {}).get('dry_run', True)
-    if current_dry != target_dry_run:
-        mismatches.append(ConfigMismatch(
-            key='trading.dry_run',
-            current=str(current_dry),
-            target=str(target_dry_run)
-        ))
-
-    # Fund settings
-    current_topup = main_config.get('funds', {}).get('topup_target_usd', 100)
-    if current_topup != target_capital:
-        mismatches.append(ConfigMismatch(
-            key='funds.topup_target_usd',
-            current=str(current_topup),
-            target=str(target_capital)
-        ))
-
-    current_min_op = main_config.get('funds', {}).get('min_operational_usd', 50)
-    if current_min_op != min_operational:
-        mismatches.append(ConfigMismatch(
-            key='funds.min_operational_usd',
-            current=str(current_min_op),
-            target=str(min_operational)
-        ))
-
-    config_mismatches = mismatches
-    checks.append(CheckResult(
-        name='Config Alignment',
-        status='pass' if not mismatches else 'warn',
-        message=f'{len(mismatches)} mismatches' if mismatches else 'Config aligned',
-        details={'mismatch_count': len(mismatches)},
-        can_fix=False  # Config changes must be manual
-    ))
-
-    # ==========================================================================
-    # CHECK 2: Subaccounts Exist
+    # CHECK 1: Subaccounts Exist
     # ==========================================================================
     with get_session() as session:
         existing_subs = session.query(Subaccount).all()
@@ -258,14 +183,14 @@ async def get_preflight_status():
     ))
 
     # ==========================================================================
-    # CHECK 3: Funding Status
+    # CHECK 2: Funding Status
     # ==========================================================================
     funded_count = sum(1 for sa in subaccounts if sa.status == 'funded')
     underfunded_count = sum(1 for sa in subaccounts if sa.status == 'underfunded')
     unknown_count = sum(1 for sa in subaccounts if sa.status in ('unknown', 'missing'))
 
     funding_ok = (underfunded_count == 0 and unknown_count == 0)
-    if prep_config['checks'].get('require_funded', True):
+    if cfg['require_funded']:
         checks.append(CheckResult(
             name='Funding Status',
             status='pass' if funding_ok else 'fail',
@@ -292,7 +217,7 @@ async def get_preflight_status():
         ))
 
     # ==========================================================================
-    # CHECK 4: Pool Size
+    # CHECK 3: Pool Size
     # ==========================================================================
     with get_session() as session:
         active_count = session.query(Strategy).filter(
@@ -312,7 +237,7 @@ async def get_preflight_status():
     }
 
     pool_ok = total_ready >= target_min_pool
-    if prep_config['checks'].get('require_pool', True):
+    if cfg['require_pool']:
         checks.append(CheckResult(
             name='Pool Size',
             status='pass' if pool_ok else 'fail',
@@ -330,7 +255,7 @@ async def get_preflight_status():
         ))
 
     # ==========================================================================
-    # CHECK 5: Emergency Stops
+    # CHECK 4: Emergency Stops
     # ==========================================================================
     with get_session() as session:
         active_stops = session.query(EmergencyStopState).filter(
@@ -349,7 +274,18 @@ async def get_preflight_status():
         status='pass' if not emergency_stops else 'warn',
         message=f'{len(emergency_stops)} active stops' if emergency_stops else 'No active stops',
         details={'count': len(emergency_stops)},
-        can_fix=True if emergency_stops else False
+        can_fix=True if emergency_stops and cfg['clear_emergency_stops'] else False
+    ))
+
+    # ==========================================================================
+    # CHECK 5: Dry Run Mode
+    # ==========================================================================
+    checks.append(CheckResult(
+        name='Trading Mode',
+        status='warn' if cfg['dry_run'] else 'pass',
+        message='DRY RUN (no real trades)' if cfg['dry_run'] else 'LIVE MODE (real trades)',
+        details={'dry_run': cfg['dry_run']},
+        can_fix=False  # Must change in config.yaml
     ))
 
     # ==========================================================================
@@ -361,18 +297,17 @@ async def get_preflight_status():
     return PreflightResponse(
         ready=ready,
         checks=checks,
-        config_mismatches=config_mismatches,
         subaccounts=subaccounts,
         emergency_stops=emergency_stops,
         pool_stats=pool_stats,
-        target_config={
+        config_summary={
             'num_subaccounts': target_subs,
-            'capital_per_subaccount': target_capital,
+            'capital_per_subaccount': cfg['capital_per_subaccount'],
             'min_operational': min_operational,
-            'max_live_strategies': target_max_live,
-            'pool_max_size': target_pool_max,
+            'max_live_strategies': cfg['max_live_strategies'],
+            'pool_max_size': cfg['pool_max_size'],
             'pool_min_for_live': target_min_pool,
-            'dry_run': target_dry_run
+            'dry_run': cfg['dry_run']
         }
     )
 
@@ -385,10 +320,8 @@ async def apply_preflight_fixes(request: ApplyRequest):
     Available fixes:
     - create_subaccounts: Create missing subaccounts in DB
     - clear_emergency_stops: Clear all active emergency stops
-
-    Note: Config changes must be done manually (not via API for safety).
     """
-    prep_config = load_prepare_config()
+    cfg = get_config_values()
     actions_taken: List[str] = []
     errors: List[str] = []
 
@@ -396,8 +329,8 @@ async def apply_preflight_fixes(request: ApplyRequest):
     # CREATE MISSING SUBACCOUNTS
     # ==========================================================================
     if request.create_subaccounts:
-        target_subs = prep_config['capital']['num_subaccounts']
-        capital = prep_config['capital']['capital_per_subaccount']
+        target_subs = cfg['num_subaccounts']
+        capital = cfg['capital_per_subaccount']
 
         try:
             with get_session() as session:
@@ -434,31 +367,34 @@ async def apply_preflight_fixes(request: ApplyRequest):
     # CLEAR EMERGENCY STOPS
     # ==========================================================================
     if request.clear_emergency_stops:
-        try:
-            with get_session() as session:
-                active_stops = session.query(EmergencyStopState).filter(
-                    EmergencyStopState.is_stopped == True
-                ).all()
+        if not cfg['clear_emergency_stops']:
+            errors.append("Clearing emergency stops is disabled in config")
+        else:
+            try:
+                with get_session() as session:
+                    active_stops = session.query(EmergencyStopState).filter(
+                        EmergencyStopState.is_stopped == True
+                    ).all()
 
-                cleared = []
-                for stop in active_stops:
-                    stop.is_stopped = False
-                    stop.stop_reason = None
-                    stop.stopped_at = None
-                    stop.cooldown_until = None
-                    cleared.append(f"{stop.scope}:{stop.scope_id}")
+                    cleared = []
+                    for stop in active_stops:
+                        stop.is_stopped = False
+                        stop.stop_reason = None
+                        stop.stopped_at = None
+                        stop.cooldown_until = None
+                        cleared.append(f"{stop.scope}:{stop.scope_id}")
 
-                session.commit()
+                    session.commit()
 
-                if cleared:
-                    actions_taken.append(f"Cleared emergency stops: {cleared}")
-                    logger.info(f"Cleared emergency stops: {cleared}")
-                else:
-                    actions_taken.append("No emergency stops to clear")
+                    if cleared:
+                        actions_taken.append(f"Cleared emergency stops: {cleared}")
+                        logger.info(f"Cleared emergency stops: {cleared}")
+                    else:
+                        actions_taken.append("No emergency stops to clear")
 
-        except Exception as e:
-            errors.append(f"Failed to clear emergency stops: {str(e)}")
-            logger.error(f"Failed to clear emergency stops: {e}")
+            except Exception as e:
+                errors.append(f"Failed to clear emergency stops: {str(e)}")
+                logger.error(f"Failed to clear emergency stops: {e}")
 
     success = len(errors) == 0
 
@@ -466,4 +402,28 @@ async def apply_preflight_fixes(request: ApplyRequest):
         success=success,
         actions_taken=actions_taken,
         errors=errors
+    )
+
+
+@router.get("/config", response_model=PrepareConfig)
+async def get_prepare_config():
+    """
+    Get the Go Live configuration from config.yaml.
+
+    Returns the current configuration used for preflight checks.
+    To modify these values, use System > Settings in the frontend.
+    """
+    cfg = get_config_values()
+
+    return PrepareConfig(
+        num_subaccounts=cfg['num_subaccounts'],
+        capital_per_subaccount=cfg['capital_per_subaccount'],
+        min_operational=cfg['min_operational'],
+        pool_max_size=cfg['pool_max_size'],
+        pool_min_for_live=cfg['pool_min_for_live'],
+        max_live_strategies=cfg['max_live_strategies'],
+        dry_run=cfg['dry_run'],
+        require_funded=cfg['require_funded'],
+        require_pool=cfg['require_pool'],
+        clear_emergency_stops=cfg['clear_emergency_stops']
     )

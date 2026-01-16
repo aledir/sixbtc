@@ -4,19 +4,27 @@ Status API routes
 GET /api/status - System status overview
 """
 import subprocess
+import time
 from datetime import datetime, timedelta, UTC
-from typing import Dict, List
+from typing import Dict, List, Optional, Any
 
 from fastapi import APIRouter, HTTPException
 
+# Cache for status endpoint (reduces subprocess and DB calls)
+_status_cache: Dict[str, Any] = {}
+_status_cache_time: float = 0
+STATUS_CACHE_TTL_SECONDS = 5  # Cache status for 5 seconds
+
 from src.api.schemas import (
     Alert,
+    EmergencyState,
     PipelineCounts,
     PortfolioSummary,
     ServiceInfo,
     StatusResponse,
 )
 from src.database import Strategy, Trade, PerformanceSnapshot, get_session
+from src.database.models import EmergencyStopState
 from src.utils import get_logger
 
 logger = get_logger(__name__)
@@ -24,12 +32,26 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+# Cache for supervisor status (expensive subprocess call)
+_supervisor_cache: List[ServiceInfo] = []
+_supervisor_cache_time: float = 0
+SUPERVISOR_CACHE_TTL_SECONDS = 5  # Cache for 5 seconds
+
+
 def get_supervisor_status() -> List[ServiceInfo]:
     """
     Get status of sixbtc supervisor-managed services.
 
     Returns list of ServiceInfo objects (only sixbtc:* services).
+    Cached for 5 seconds to reduce subprocess overhead.
     """
+    global _supervisor_cache, _supervisor_cache_time
+
+    # Check cache
+    now = time.time()
+    if _supervisor_cache and (now - _supervisor_cache_time) < SUPERVISOR_CACHE_TTL_SECONDS:
+        return _supervisor_cache
+
     services = []
 
     try:
@@ -98,6 +120,10 @@ def get_supervisor_status() -> List[ServiceInfo]:
     except Exception as e:
         logger.error(f"Error getting supervisor status: {e}")
 
+    # Update cache
+    _supervisor_cache = services
+    _supervisor_cache_time = now
+
     return services
 
 
@@ -136,6 +162,7 @@ def get_pipeline_counts() -> Dict[str, int]:
     Get strategy counts by status.
 
     Returns dict with status -> count.
+    Uses single GROUP BY query instead of 6 separate COUNT queries.
     """
     counts = {
         "GENERATED": 0,
@@ -147,10 +174,17 @@ def get_pipeline_counts() -> Dict[str, int]:
     }
 
     try:
+        from sqlalchemy import func
         with get_session() as session:
-            for status in counts.keys():
-                count = session.query(Strategy).filter(Strategy.status == status).count()
-                counts[status] = count
+            # Single query with GROUP BY instead of 6 separate queries
+            results = session.query(
+                Strategy.status,
+                func.count(Strategy.id)
+            ).group_by(Strategy.status).all()
+
+            for status, count in results:
+                if status in counts:
+                    counts[status] = count
     except Exception as e:
         logger.error(f"Error getting pipeline counts: {e}")
 
@@ -272,23 +306,70 @@ def get_system_alerts() -> List[Alert]:
     return alerts
 
 
+def get_emergency_stops() -> List[EmergencyState]:
+    """
+    Get all active emergency stops.
+
+    Returns list of EmergencyState objects for all stopped scopes.
+    """
+    stops = []
+
+    try:
+        with get_session() as session:
+            active_stops = session.query(EmergencyStopState).filter(
+                EmergencyStopState.is_stopped == True
+            ).all()
+
+            for stop in active_stops:
+                stops.append(EmergencyState(
+                    scope=stop.scope,
+                    scope_id=stop.scope_id,
+                    is_stopped=True,
+                    stop_reason=stop.stop_reason,
+                    stop_action=stop.stop_action,
+                    stopped_at=stop.stopped_at,
+                ))
+    except Exception as e:
+        logger.error(f"Error getting emergency stops: {e}")
+
+    return stops
+
+
 @router.get("/status", response_model=StatusResponse)
 async def get_status():
     """
     Get full system status.
 
-    Returns pipeline counts, service states, portfolio summary, and alerts.
+    Returns pipeline counts, service states, portfolio summary, alerts, and emergency stops.
+    Cached for 5 seconds to reduce subprocess and DB load.
     """
+    global _status_cache, _status_cache_time
+
     from src.api.main import get_uptime_seconds
 
+    # Check cache
+    now = time.time()
+    if _status_cache and (now - _status_cache_time) < STATUS_CACHE_TTL_SECONDS:
+        # Update uptime (always fresh) but use cached data for expensive operations
+        _status_cache["uptime_seconds"] = get_uptime_seconds()
+        return StatusResponse(**_status_cache)
+
     try:
-        return StatusResponse(
-            uptime_seconds=get_uptime_seconds(),
-            pipeline=get_pipeline_counts(),
-            services=get_supervisor_status(),
-            portfolio=get_portfolio_summary(),
-            alerts=get_system_alerts(),
-        )
+        # Build fresh response
+        response_data = {
+            "uptime_seconds": get_uptime_seconds(),
+            "pipeline": get_pipeline_counts(),
+            "services": get_supervisor_status(),
+            "portfolio": get_portfolio_summary(),
+            "alerts": get_system_alerts(),
+            "emergency_stops": get_emergency_stops(),
+        }
+
+        # Cache the result
+        _status_cache = response_data
+        _status_cache_time = now
+
+        return StatusResponse(**response_data)
     except Exception as e:
         logger.error(f"Error in /status endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -32,7 +32,6 @@ from sqlalchemy.orm import joinedload
 
 from src.config import load_config
 from src.database import get_session, Strategy, BacktestResult, StrategyProcessor
-from src.database.models import ValidationCache
 from src.backtester.backtest_engine import BacktestEngine
 from src.backtester.data_loader import BacktestDataLoader
 from src.backtester.parametric_backtest import ParametricBacktester
@@ -2717,9 +2716,9 @@ class ContinuousBacktesterProcess:
         Flow:
         1. Calculate score from backtest result (5-component formula)
         2. If score < min_score -> reject (no shuffle test needed)
-        3. Run shuffle test (cached by base_code_hash)
+        3. Run shuffle test (lookahead bias detection)
         4. If shuffle fails -> reject
-        5. Run WFA validation with fixed params (NOT cached - per-strategy)
+        5. Run WFA validation with fixed params (per-strategy)
         6. If WFA fails -> reject
         7. Try to enter pool (leaderboard logic)
 
@@ -2940,7 +2939,7 @@ class ContinuousBacktesterProcess:
 
     def _run_shuffle_test(self, strategy_id: UUID, strategy: Strategy) -> bool:
         """
-        Run shuffle test on strategy. Uses cache by base_code_hash.
+        Run shuffle test on strategy to detect lookahead bias.
 
         Args:
             strategy_id: Strategy UUID
@@ -2955,27 +2954,8 @@ class ContinuousBacktesterProcess:
         base_code_hash = strategy.base_code_hash
         start_time = time.time()
 
-        # Check cache first
-        cached_result = self._get_cached_shuffle_result(base_code_hash)
-        if cached_result is not None:
-            duration_ms = int((time.time() - start_time) * 1000)
-            if cached_result:
-                logger.debug(f"[{strategy.name}] Shuffle test PASSED (cached)")
-                EventTracker.shuffle_test_passed(
-                    strategy_id, strategy.name, cached=True,
-                    duration_ms=duration_ms, base_code_hash=base_code_hash
-                )
-            else:
-                logger.info(f"[{strategy.name}] Shuffle test FAILED (cached)")
-                EventTracker.shuffle_test_failed(
-                    strategy_id, strategy.name, reason="cached_failure",
-                    cached=True, duration_ms=duration_ms, base_code_hash=base_code_hash
-                )
-            return cached_result
-
-        # Cache miss - run actual shuffle test
         EventTracker.shuffle_test_started(
-            strategy_id, strategy.name, cached=False, base_code_hash=base_code_hash
+            strategy_id, strategy.name, base_code_hash=base_code_hash
         )
 
         try:
@@ -3004,13 +2984,10 @@ class ContinuousBacktesterProcess:
             result = self.lookahead_tester.validate(strategy_instance, self.test_data)
             duration_ms = int((time.time() - start_time) * 1000)
 
-            # Cache the result
-            self._cache_shuffle_result(base_code_hash, result.passed)
-
             if result.passed:
                 logger.debug(f"[{strategy.name}] Shuffle test PASSED")
                 EventTracker.shuffle_test_passed(
-                    strategy_id, strategy.name, cached=False,
+                    strategy_id, strategy.name,
                     duration_ms=duration_ms, base_code_hash=base_code_hash
                 )
             else:
@@ -3030,58 +3007,6 @@ class ContinuousBacktesterProcess:
                 duration_ms=duration_ms, base_code_hash=base_code_hash
             )
             return False
-
-    def _get_cached_shuffle_result(self, base_code_hash: Optional[str]) -> Optional[bool]:
-        """
-        Check if shuffle test result is cached for this base_code_hash.
-
-        Returns:
-            True if cached and passed, False if cached and failed, None if not cached
-        """
-        if not base_code_hash:
-            return None
-
-        try:
-            with get_session() as session:
-                cache_entry = session.query(ValidationCache).filter(
-                    ValidationCache.code_hash == base_code_hash
-                ).first()
-
-                if cache_entry:
-                    return cache_entry.shuffle_passed
-                return None
-        except Exception as e:
-            logger.warning(f"Error reading validation cache: {e}")
-            return None
-
-    def _cache_shuffle_result(self, base_code_hash: Optional[str], passed: bool) -> None:
-        """Save shuffle test result to cache."""
-        if not base_code_hash:
-            return
-
-        try:
-            with get_session() as session:
-                existing = session.query(ValidationCache).filter(
-                    ValidationCache.code_hash == base_code_hash
-                ).first()
-
-                if existing:
-                    existing.shuffle_passed = passed
-                    existing.validated_at = datetime.now(UTC)
-                else:
-                    cache_entry = ValidationCache(
-                        code_hash=base_code_hash,
-                        shuffle_passed=passed,
-                        validated_at=datetime.now(UTC)
-                    )
-                    session.add(cache_entry)
-
-            logger.debug(
-                f"Cached shuffle result for {base_code_hash[:8]}: "
-                f"{'PASSED' if passed else 'FAILED'}"
-            )
-        except Exception as e:
-            logger.warning(f"Error writing validation cache: {e}")
 
     # NOTE: _run_multi_window_validation removed - replaced by WFA with parameter
     # re-optimization (see _run_wfa_with_optimization). WFA checks param stability

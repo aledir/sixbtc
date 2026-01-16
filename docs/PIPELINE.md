@@ -1092,21 +1092,6 @@ Pipeline Completa Aggiornata:
 ║  │      (es: df['future_price'] > df['close'])                            │  ║
 ║  └────────────────────────────────────────────────────────────────────────┘  ║
 ║                                                                              ║
-║  ┌────────────────────────────────────────────────────────────────────────┐  ║
-║  │ CACHING (by base_code_hash)                                            │  ║
-║  ├────────────────────────────────────────────────────────────────────────┤  ║
-║  │                                                                        │  ║
-║  │  - Lookahead e' proprieta' del BASE CODE, non dei parametri            │  ║
-║  │  - Se base code passa -> tutte le strategie parametriche passano       │  ║
-║  │  - Cache in ValidationCache table                                      │  ║
-║  │  - Cache HIT: ~0ms, Cache MISS: ~50-100ms                              │  ║
-║  │                                                                        │  ║
-║  │  Lookup: ValidationCache.get(base_code_hash, 'shuffle_test')           │  ║
-║  │    - EXISTS + passed=True  -> skip test, return PASS                   │  ║
-║  │    - EXISTS + passed=False -> skip test, return FAIL                   │  ║
-║  │    - NOT EXISTS -> esegui test, salva risultato                        │  ║
-║  └────────────────────────────────────────────────────────────────────────┘  ║
-║                                                                              ║
 ║  Output:                                                                     ║
 ║    - PASS -> procede a WFA FIXED PARAMS                                      ║
 ║    - FAIL -> return (False, "shuffle_test_failed")                           ║

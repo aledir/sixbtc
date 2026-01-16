@@ -188,7 +188,24 @@ class ContinuousExecutorProcess:
         catchup_count = await self.reconciliation_service.startup_catchup()
         logger.info(f"Ledger catchup complete: {catchup_count} events processed")
 
-        # 3. Validate subaccount state to prevent false emergency stops
+        # 3. Auto-fund subaccounts from master if underfunded
+        from src.funds.manager import FundManager
+        fund_manager = FundManager(self.config._raw_config)
+        logger.info("Checking subaccount funding levels...")
+        fund_result = fund_manager.check_all_subaccounts()
+        logger.info(
+            f"Fund check: {fund_result['healthy']} healthy, "
+            f"{fund_result['topped_up']} topped up, "
+            f"{fund_result['skipped']} skipped (master low)"
+        )
+        if fund_result['alerts']:
+            for alert in fund_result['alerts']:
+                if alert['level'] == 'critical':
+                    logger.critical(f"FUND ALERT: {alert['message']}")
+                else:
+                    logger.warning(f"FUND ALERT: {alert['message']}")
+
+        # 4. Validate subaccount state to prevent false emergency stops
         self._validate_subaccount_state()
 
         # =======================================================================

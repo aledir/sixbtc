@@ -607,7 +607,6 @@ class EventTracker:
     def shuffle_test_started(
         strategy_id: UUID,
         strategy_name: str,
-        cached: bool = False,
         base_code_hash: Optional[str] = None
     ) -> bool:
         """Emit event when shuffle test starts."""
@@ -617,15 +616,13 @@ class EventTracker:
             status="started",
             strategy_id=strategy_id,
             strategy_name=strategy_name,
-            base_code_hash=base_code_hash,
-            cached=cached
+            base_code_hash=base_code_hash
         )
 
     @staticmethod
     def shuffle_test_passed(
         strategy_id: UUID,
         strategy_name: str,
-        cached: bool = False,
         duration_ms: Optional[int] = None,
         base_code_hash: Optional[str] = None
     ) -> bool:
@@ -637,8 +634,7 @@ class EventTracker:
             strategy_id=strategy_id,
             strategy_name=strategy_name,
             base_code_hash=base_code_hash,
-            duration_ms=duration_ms,
-            cached=cached
+            duration_ms=duration_ms
         )
 
     @staticmethod
@@ -646,7 +642,6 @@ class EventTracker:
         strategy_id: UUID,
         strategy_name: str,
         reason: str,
-        cached: bool = False,
         duration_ms: Optional[int] = None,
         base_code_hash: Optional[str] = None,
         **details: Any
@@ -660,7 +655,6 @@ class EventTracker:
             strategy_name=strategy_name,
             base_code_hash=base_code_hash,
             duration_ms=duration_ms,
-            cached=cached,
             reason=reason,
             **details
         )

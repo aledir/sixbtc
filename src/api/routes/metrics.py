@@ -18,12 +18,38 @@ from src.metrics.collector import MetricsCollector
 # Singleton MetricsCollector instance for /snapshot endpoint
 _metrics_collector: Optional[MetricsCollector] = None
 
+# Cache for expensive snapshot computation
+_snapshot_cache: Dict = {}
+_snapshot_cache_time: Optional[datetime] = None
+SNAPSHOT_CACHE_TTL_SECONDS = 60  # Cache for 60 seconds (expensive computation)
+
 def get_metrics_collector() -> MetricsCollector:
     """Get or create singleton MetricsCollector instance."""
     global _metrics_collector
     if _metrics_collector is None:
         _metrics_collector = MetricsCollector()
     return _metrics_collector
+
+
+def _refresh_snapshot_cache() -> None:
+    """
+    Refresh the snapshot cache. Called by background task.
+
+    This function is designed to be called from a thread pool executor
+    since it performs blocking I/O (database queries).
+    """
+    global _snapshot_cache, _snapshot_cache_time
+
+    import time
+    import logging
+
+    start = time.time()
+    collector = get_metrics_collector()
+    _snapshot_cache = collector.get_full_snapshot()
+    _snapshot_cache_time = datetime.now(UTC)
+    elapsed = time.time() - start
+    logging.getLogger(__name__).info(f"Snapshot refreshed in {elapsed:.1f}s (background)")
+
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
@@ -670,6 +696,9 @@ async def get_full_snapshot() -> Dict:
     metrics service logs every 60 seconds. This is the richest endpoint
     for dashboard display.
 
+    Data is pre-computed by a background task and refreshed every 60 seconds.
+    Never blocks the request - returns cached data or loading state.
+
     Includes:
     - Pipeline status and trading mode
     - Capital summary (main + subaccounts)
@@ -684,7 +713,25 @@ async def get_full_snapshot() -> Dict:
     - Scheduler task status
 
     Returns:
-        Dict with full snapshot data
+        Dict with full snapshot data (or loading state if not ready)
     """
-    collector = get_metrics_collector()
-    return collector.get_full_snapshot()
+    global _snapshot_cache, _snapshot_cache_time
+
+    # Return cached data if available (background task keeps it fresh)
+    if _snapshot_cache and _snapshot_cache_time:
+        return _snapshot_cache
+
+    # Snapshot not ready yet - return loading state instead of blocking
+    return {
+        'status': 'LOADING',
+        'issue': 'Initial snapshot computation in progress...',
+        'timestamp': datetime.now(UTC).isoformat(),
+        'trading_mode': 'UNKNOWN',
+        'capital': {'total': 0, 'main_account': 0, 'subaccounts': 0},
+        'queue_depths': {},
+        'generator': {},
+        'validator': {},
+        'pool': {},
+        'live': {},
+        'subaccounts': [],
+    }

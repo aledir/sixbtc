@@ -31,13 +31,14 @@ from sqlalchemy import select, func, and_, or_, desc, cast, Integer, text
 from src.config import load_config
 from src.database import get_session, PipelineMetricsSnapshot, Strategy
 from src.database.models import StrategyEvent, BacktestResult, ScheduledTaskExecution, Subaccount
+from src.utils import setup_logging, get_logger
 
 # TYPE_CHECKING imports to avoid circular dependencies
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.executor.statistics_service import StatisticsService
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class MetricsCollector:
@@ -265,6 +266,7 @@ class MetricsCollector:
                 WITH base AS (
                     SELECT
                         id,
+                        strategy_id,
                         event_data,
                         duration_ms
                     FROM strategy_events
@@ -289,13 +291,13 @@ class MetricsCollector:
                     FROM base
                     GROUP BY 1
                 ),
-                -- By type (from strategies table - current state, not historical events)
+                -- By type (from event_data - persists even if strategy deleted)
                 by_type AS (
                     SELECT
-                        s.strategy_type as stype,
+                        event_data->>'strategy_type' as stype,
                         COUNT(*) as cnt
-                    FROM strategies s
-                    WHERE s.strategy_type IS NOT NULL
+                    FROM base
+                    WHERE event_data->>'strategy_type' IS NOT NULL
                     GROUP BY 1
                 ),
                 -- By direction
@@ -698,7 +700,7 @@ class MetricsCollector:
             ))
         ).scalar() or 0
 
-        # Score OK (passed score threshold) - counts non-cached shuffle starts
+        # Score OK (passed score threshold) - counts shuffle_test.started events
         score_ok = session.execute(
             select(func.count(StrategyEvent.id))
             .where(and_(
@@ -856,15 +858,16 @@ class MetricsCollector:
         """
         Get validation passed/failed counts by generation_mode (source).
 
-        Joins strategy_events with strategies table to get generation_mode.
+        Uses generation events to get generation_mode (works even if strategy deleted).
         Returns dict with 'passed' and 'failed' sub-dicts by source.
         """
-        # Query validation events joined with strategies for generation_mode
+        # Query validation events joined with generation events for generation_mode
+        # This works even when strategies are deleted (events persist)
         result = session.execute(
             text("""
                 WITH validation_events AS (
                     SELECT
-                        e.strategy_id,
+                        e.strategy_name,
                         CASE
                             WHEN e.event_type = 'completed' AND e.status = 'completed' THEN 'passed'
                             WHEN e.status = 'failed' THEN 'failed'
@@ -876,14 +879,30 @@ class MetricsCollector:
                           (e.event_type = 'completed' AND e.status = 'completed')
                           OR e.status = 'failed'
                       )
+                ),
+                generation_events AS (
+                    SELECT DISTINCT ON (strategy_name)
+                        strategy_name,
+                        COALESCE(
+                            event_data->>'generation_mode',
+                            CASE
+                                WHEN (event_data->>'pattern_based')::boolean = true THEN 'pattern'
+                                ELSE 'ai_free'
+                            END
+                        ) as generation_mode
+                    FROM strategy_events
+                    WHERE timestamp >= :since
+                      AND stage = 'generation'
+                      AND event_type = 'created'
+                    ORDER BY strategy_name, timestamp DESC
                 )
                 SELECT
-                    COALESCE(s.generation_mode, 'unknown') as source,
+                    COALESCE(g.generation_mode, 'unknown') as source,
                     v.result,
                     COUNT(*) as cnt
                 FROM validation_events v
-                JOIN strategies s ON s.id = v.strategy_id
-                GROUP BY s.generation_mode, v.result
+                LEFT JOIN generation_events g ON g.strategy_name = v.strategy_name
+                GROUP BY g.generation_mode, v.result
             """),
             {'since': since}
         ).all()
@@ -949,13 +968,24 @@ class MetricsCollector:
         """
         result = session.execute(
             text("""
+                WITH valid_bases AS (
+                    -- Only count bases that have a matching generation.created event
+                    -- (excludes orphan parametric_stats from previous sessions after reset)
+                    SELECT DISTINCT base_code_hash
+                    FROM strategy_events
+                    WHERE stage = 'generation'
+                      AND event_type = 'created'
+                      AND timestamp >= :since
+                )
                 SELECT
                     COALESCE(SUM((event_data->'combo_stats'->>'total')::int), 0) as total_combos,
                     COALESCE(SUM((event_data->'combo_stats'->>'passed')::int), 0) as passed_combos,
                     COALESCE(SUM((event_data->'combo_stats'->>'failed')::int), 0) as failed_combos,
                     COUNT(DISTINCT CASE WHEN (event_data->'combo_stats'->>'passed')::int > 0
+                          AND base_code_hash IN (SELECT base_code_hash FROM valid_bases)
                           THEN base_code_hash END) as bases_with_passed,
                     COUNT(DISTINCT CASE WHEN (event_data->'combo_stats'->>'passed')::int = 0
+                          AND base_code_hash IN (SELECT base_code_hash FROM valid_bases)
                           THEN base_code_hash END) as bases_with_failed,
                     COALESCE(SUM((event_data->'combo_stats'->'fail_reasons'->>'sharpe')::int), 0) as fail_sharpe,
                     COALESCE(SUM((event_data->'combo_stats'->'fail_reasons'->>'trades')::int), 0) as fail_trades,
@@ -1004,16 +1034,10 @@ class MetricsCollector:
                             (event_data->'combo_stats'->>'passed')::int) /
                         SUM((event_data->'combo_stats'->>'passed')::int)
                     ELSE 0 END as passed_avg_trades,
-                    -- Count only bases that have a matching generation.created event
-                    -- (excludes orphan parametric_stats from previous sessions after reset)
+                    -- Count total valid bases (using CTE defined above)
                     COUNT(DISTINCT CASE
-                        WHEN base_code_hash IN (
-                            SELECT DISTINCT base_code_hash
-                            FROM strategy_events
-                            WHERE stage = 'generation'
-                              AND event_type = 'created'
-                              AND timestamp >= :since
-                        ) THEN base_code_hash
+                        WHEN base_code_hash IN (SELECT base_code_hash FROM valid_bases)
+                        THEN base_code_hash
                     END) as total_bases,
                     -- Duration stats per base (parametric backtest time)
                     AVG(duration_ms) as avg_duration_ms,
@@ -1214,18 +1238,6 @@ class MetricsCollector:
             ))
         ).scalar() or 0
 
-        # Shuffle cached count (for info)
-        shuffle_cached = session.execute(
-            text("""
-                SELECT COUNT(*)
-                FROM strategy_events
-                WHERE timestamp >= :since
-                  AND stage = 'shuffle_test'
-                  AND (event_data->>'cached')::boolean = true
-            """),
-            {'since': since}
-        ).scalar() or 0
-
         # Multi-window failed
         mw_fail = session.execute(
             select(func.count(StrategyEvent.id))
@@ -1251,7 +1263,6 @@ class MetricsCollector:
             'parametric_fail': parametric_fail,
             'score_reject': score_reject,
             'shuffle_fail': shuffle_fail,
-            'shuffle_cached': shuffle_cached,
             'mw_fail': mw_fail,
             'pool_reject': pool_reject,
         }
@@ -1766,7 +1777,8 @@ class MetricsCollector:
         return {
             'tested': retested,
             'passed': passed,
-            'failed': reason_counts.get('retest_failed', 0),
+            'failed': retested - passed,  # All retested that are no longer ACTIVE
+            'failed_degradation': reason_counts.get('retest_failed', 0),  # Specifically due to degradation
             'evicted': reason_counts.get('evicted', 0),
             'score_below_min': reason_counts.get('score_below_min', 0),
             'pool_rejected': reason_counts.get('pool_rejected', 0),
@@ -2767,10 +2779,9 @@ class MetricsCollector:
         shuf = funnel["shuffle_ok"]
         shuffle_tested = funnel["shuffle_tested"]
         shuffle_fail = failures["shuffle_fail"]
-        shuffle_cached = failures.get("shuffle_cached", 0)
 
         logger.info(f'[7/10 SHUFFLE] 24h: {shuf}/{shuffle_tested} passed ({fmt_pct(funnel["shuffle_ok_pct"])})')
-        logger.info(f'[7/10 SHUFFLE] timing: {fmt_time(timing.get("shuffle"))} | bias_failures: {shuffle_fail} | cached: {shuffle_cached}')
+        logger.info(f'[7/10 SHUFFLE] timing: {fmt_time(timing.get("shuffle"))} | bias_failures: {shuffle_fail}')
 
         # =====================================================================
         # [8/10 WFA]
@@ -2817,7 +2828,7 @@ class MetricsCollector:
         logger.info(
             f'[9/10 POOL] 24h_retired: score<min={retest_stats["score_below_min"]}, '
             f'wfa_failed={retest_stats["pool_rejected"]}, robustness={retest_stats["robustness_failed"]}, '
-            f'retest={retest_stats["failed"]}, evicted={retest_stats["evicted"]}'
+            f'retest={retest_stats["failed_degradation"]}, evicted={retest_stats["evicted"]}'
         )
         logger.info(f'[9/10 POOL] 24h_added: {fmt_sources(pool_added_by_source)}')
         logger.info(f'[9/10 POOL] sources: {fmt_sources(pool_by_source)}')
@@ -3147,7 +3158,6 @@ class MetricsCollector:
                     # Shuffle test (step 7)
                     'shuffle': {
                         'failed': failures.get('shuffle_fail', 0),
-                        'cached': failures.get('shuffle_cached', 0),
                     },
 
                     # WFA/Multi-window (step 8)
@@ -3219,9 +3229,10 @@ class MetricsCollector:
 
 def main():
     """Entry point for running as a service."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    _config = load_config()._raw_config
+    setup_logging(
+        log_file='logs/metrics.log',
+        log_level=_config.get('logging', {}).get('level', 'INFO'),
     )
 
     collector = MetricsCollector()
