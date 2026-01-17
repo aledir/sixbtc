@@ -211,9 +211,10 @@ class GeneticPatternGenerator:
 
         # Parse from code docstring
         if strategy.code:
-            match = re.search(r'Blocks:\s*([A-Z_,\s]+)', strategy.code)
+            # Match blocks until end of line (avoid capturing newlines)
+            match = re.search(r'Blocks:\s*([A-Z_,\ ]+)', strategy.code)
             if match:
-                blocks_str = match.group(1)
+                blocks_str = match.group(1).strip()
                 blocks = [b.strip() for b in blocks_str.split(',') if b.strip()]
                 # Validate block IDs
                 return [b for b in blocks if b in BLOCKS_BY_ID]
