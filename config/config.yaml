@@ -244,7 +244,7 @@ generation:
       genetic:
         enabled: true            # Enable genetic evolution
         min_pool_score: 40       # Min score to enter genetic pool
-        min_pool_size: 50        # Min ACTIVE strategies before genetic starts
+        min_pool_size: 30        # Min ACTIVE strategies before genetic starts (20% of pool)
         smart_ratio: 0.70        # 70% smart when both available
         genetic_ratio: 0.30      # 30% genetic when both available
         tournament_size: 3       # Tournament selection size
@@ -274,7 +274,7 @@ generation:
       genetic:
         enabled: true            # Enable genetic evolution for unger
         min_pool_score: 40       # Min score to enter genetic pool
-        min_pool_size: 50        # Min ACTIVE unger strategies before genetic starts
+        min_pool_size: 30        # Min ACTIVE unger strategies before genetic starts (20% of pool)
         smart_ratio: 0.70        # 70% smart when both available
         genetic_ratio: 0.30      # 30% genetic when both available
         tournament_size: 3       # Tournament selection size
@@ -309,7 +309,7 @@ generation:
 # New strategies enter if: score >= min_score AND (pool not full OR score > min(pool))
 # NOTE: All strategies in ACTIVE are eligible for LIVE deployment (single threshold)
 active_pool:
-  max_size: 100                  # Max strategies in pool (10x buffer with 10 subaccounts)
+  max_size: 150                  # Max strategies in pool (15x buffer with 10 subaccounts)
   min_score: 40                  # Minimum score to enter pool (and be LIVE eligible)
 
 # ==============================================================================
