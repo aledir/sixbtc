@@ -1,0 +1,177 @@
+/* SixBTC MkDocs Custom Styles (Freqtrade-inspired) */
+
+/* Wider content area */
+.md-grid {
+  max-width: 75rem;
+}
+
+/* Small buttons */
+.md-button--sm {
+  padding: 0.2em 1em;
+  font-size: 12px;
+  font-weight: 600;
+  background: #f6f8fa;
+  color: #24292f;
+  border: 1px solid #d0d7de;
+  border-radius: 0.25em;
+}
+.md-button--sm:hover {
+  background: #e5eaee;
+}
+
+/* Tables - wider first column */
+.md-typeset__table th:first-of-type {
+  width: 35%;
+}
+
+/* Admonition custom colors for trading */
+.md-typeset .admonition.profit,
+.md-typeset details.profit {
+  border-color: #4caf50;
+}
+.md-typeset .profit > .admonition-title,
+.md-typeset .profit > summary {
+  background-color: rgba(76, 175, 80, 0.1);
+}
+.md-typeset .profit > .admonition-title::before,
+.md-typeset .profit > summary::before {
+  background-color: #4caf50;
+  -webkit-mask-image: var(--md-admonition-icon--tip);
+  mask-image: var(--md-admonition-icon--tip);
+}
+
+.md-typeset .admonition.loss,
+.md-typeset details.loss {
+  border-color: #f44336;
+}
+.md-typeset .loss > .admonition-title,
+.md-typeset .loss > summary {
+  background-color: rgba(244, 67, 54, 0.1);
+}
+.md-typeset .loss > .admonition-title::before,
+.md-typeset .loss > summary::before {
+  background-color: #f44336;
+  -webkit-mask-image: var(--md-admonition-icon--danger);
+  mask-image: var(--md-admonition-icon--danger);
+}
+
+/* Trading status badges */
+.status-live {
+  background-color: #4caf50;
+  color: white;
+  padding: 0.1em 0.5em;
+  border-radius: 0.25em;
+  font-size: 0.75em;
+  font-weight: 600;
+}
+
+.status-active {
+  background-color: #2196f3;
+  color: white;
+  padding: 0.1em 0.5em;
+  border-radius: 0.25em;
+  font-size: 0.75em;
+  font-weight: 600;
+}
+
+.status-failed {
+  background-color: #f44336;
+  color: white;
+  padding: 0.1em 0.5em;
+  border-radius: 0.25em;
+  font-size: 0.75em;
+  font-weight: 600;
+}
+
+/* Code block enhancements */
+.md-typeset pre > code {
+  font-size: 0.85em;
+}
+
+/* ===========================================
+   MOBILE-FIRST STYLES
+   =========================================== */
+
+/* Mermaid diagrams - scrollable on mobile */
+.mermaid {
+  text-align: center;
+  margin: 1em 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Mermaid container for mobile scroll */
+.md-typeset .mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Tables - horizontal scroll on mobile */
+.md-typeset__scrollwrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.md-typeset table:not([class]) {
+  display: block;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  font-size: 0.85rem;
+}
+
+/* Mobile: stack table columns */
+@media screen and (max-width: 600px) {
+  /* Smaller font for tables */
+  .md-typeset table:not([class]) {
+    font-size: 0.8rem;
+  }
+
+  .md-typeset table:not([class]) th,
+  .md-typeset table:not([class]) td {
+    padding: 0.4em 0.6em;
+    white-space: nowrap;
+  }
+
+  /* First column not fixed width on mobile */
+  .md-typeset__table th:first-of-type {
+    width: auto;
+  }
+
+  /* Code blocks smaller on mobile */
+  .md-typeset pre > code {
+    font-size: 0.75em;
+  }
+
+  /* Admonitions more compact */
+  .md-typeset .admonition,
+  .md-typeset details {
+    margin: 0.8em 0;
+    padding: 0 0.8rem;
+  }
+
+  /* Narrower grid on mobile */
+  .md-grid {
+    max-width: 100%;
+    margin: 0 0.5rem;
+  }
+
+  /* Smaller headings on mobile */
+  .md-typeset h1 {
+    font-size: 1.6rem;
+  }
+
+  .md-typeset h2 {
+    font-size: 1.3rem;
+  }
+
+  .md-typeset h3 {
+    font-size: 1.1rem;
+  }
+}
+
+/* Tablet adjustments */
+@media screen and (max-width: 960px) {
+  .md-grid {
+    max-width: 100%;
+  }
+}

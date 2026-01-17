@@ -12,6 +12,7 @@ import {
   usePreflight,
   useApplyPreflightFixes,
   useConfigYaml,
+  useUpdateConfigYaml,
 } from '../hooks/useApi';
 import type { ServiceInfo, LogLine, SubaccountPreflightStatus } from '../types';
 import {
@@ -35,6 +36,7 @@ import {
   ChevronUp,
   ChevronDown,
   X,
+  Save,
 } from 'lucide-react';
 
 // === Types ===
@@ -744,10 +746,13 @@ function ThresholdsSection() {
 
 function ConfigViewer() {
   const { data, isLoading, error, refetch } = useConfigYaml();
+  const saveConfigMutation = useUpdateConfigYaml();
   const [yamlContent, setYamlContent] = useState('');
+  const [editedContent, setEditedContent] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedSection, setSelectedSection] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isEditMode, setIsEditMode] = useState(false);
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -763,31 +768,34 @@ function ConfigViewer() {
 
   // Initialize content when data loads
   useEffect(() => {
-    if (data?.yaml_content && !yamlContent) {
+    if (data?.yaml_content) {
       setYamlContent(data.yaml_content);
+      if (!editedContent) {
+        setEditedContent(data.yaml_content);
+      }
     }
-  }, [data, yamlContent]);
+  }, [data]);
 
   // Reset current match when search changes
   useEffect(() => {
     setCurrentMatchIndex(0);
   }, [searchTerm]);
 
+  // Get content to display (edited if in edit mode, otherwise original)
+  const getDisplaySource = () => {
+    return isEditMode ? editedContent : yamlContent || data?.yaml_content || '';
+  };
+
   // Get filtered content based on section and search
   const getFilteredContent = () => {
-    let content = yamlContent || data?.yaml_content || '';
+    let content = getDisplaySource();
 
-    // Filter by section if selected
-    if (selectedSection && data?.sections) {
-      // Find the section header (# ==== / # NAME / # ====)
+    // Filter by section if selected (only in view mode)
+    if (selectedSection && data?.sections && !isEditMode) {
       const sectionIndex = content.indexOf(`# ${selectedSection}`);
       if (sectionIndex !== -1) {
-        // Find start of section (the ==== line before the name)
         const beforeSection = content.substring(0, sectionIndex);
         const headerStart = beforeSection.lastIndexOf('# ==');
-
-        // Find the next section header (full 3-line pattern: ====, NAME, ====)
-        // Pattern matches: \n# ====...\n# SECTION_NAME\n# ====...
         const nextSectionPattern = /\n# ={5,}\n# [A-Z][^\n]+\n# ={5,}/g;
         nextSectionPattern.lastIndex = sectionIndex + selectedSection.length;
         const nextMatch = nextSectionPattern.exec(content);
@@ -814,10 +822,8 @@ function ConfigViewer() {
     if (textareaRef.current && data?.yaml_content) {
       const sectionIndex = data.yaml_content.indexOf(`# ${section}`);
       if (sectionIndex !== -1) {
-        // Count lines to this position
         const linesBeforeSection = data.yaml_content.substring(0, sectionIndex).split('\n').length - 1;
-        // Scroll textarea to approximately that position
-        textareaRef.current.scrollTop = linesBeforeSection * 16; // ~16px per line
+        textareaRef.current.scrollTop = linesBeforeSection * 16;
       }
     }
   };
@@ -826,8 +832,9 @@ function ConfigViewer() {
   const getMatchCount = () => {
     if (!searchTerm) return 0;
     const content = getFilteredContent();
-    const matches = content.toLowerCase().split(searchTerm.toLowerCase()).length - 1;
-    return matches;
+    const regex = new RegExp(searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    const matches = content.match(regex);
+    return matches ? matches.length : 0;
   };
 
   const matchCount = getMatchCount();
@@ -835,23 +842,26 @@ function ConfigViewer() {
   // Navigate to next/previous match
   const handleNextMatch = () => {
     if (matchCount > 0) {
-      setCurrentMatchIndex((prev) => (prev + 1) % matchCount);
-      scrollToMatch((currentMatchIndex + 1) % matchCount);
+      const newIndex = (currentMatchIndex + 1) % matchCount;
+      setCurrentMatchIndex(newIndex);
+      scrollToMatch(newIndex);
     }
   };
 
   const handlePrevMatch = () => {
     if (matchCount > 0) {
-      setCurrentMatchIndex((prev) => (prev - 1 + matchCount) % matchCount);
-      scrollToMatch((currentMatchIndex - 1 + matchCount) % matchCount);
+      const newIndex = (currentMatchIndex - 1 + matchCount) % matchCount;
+      setCurrentMatchIndex(newIndex);
+      scrollToMatch(newIndex);
     }
   };
 
   const scrollToMatch = (index: number) => {
     if (!contentRef.current || !searchTerm) return;
-    const highlights = contentRef.current.querySelectorAll('[data-match="true"]');
-    if (highlights[index]) {
-      highlights[index].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const highlights = contentRef.current.querySelectorAll('[data-match-index]');
+    const target = Array.from(highlights).find(el => el.getAttribute('data-match-index') === String(index));
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   };
 
@@ -859,6 +869,31 @@ function ConfigViewer() {
     setSearchTerm('');
     setCurrentMatchIndex(0);
   };
+
+  // Edit mode handlers
+  const handleEnterEditMode = () => {
+    setEditedContent(yamlContent || data?.yaml_content || '');
+    setIsEditMode(true);
+    setSelectedSection(null); // Show all content in edit mode
+  };
+
+  const handleCancelEdit = () => {
+    setEditedContent(yamlContent || data?.yaml_content || '');
+    setIsEditMode(false);
+  };
+
+  const handleSaveConfig = async () => {
+    try {
+      await saveConfigMutation.mutateAsync(editedContent);
+      setYamlContent(editedContent);
+      setIsEditMode(false);
+    } catch {
+      // Error is handled by the mutation
+    }
+  };
+
+  // Check if content has redacted values
+  const hasRedactedValues = editedContent.includes('[REDACTED]') || editedContent.includes('[ENV_VAR]');
 
   if (isLoading) {
     return (
@@ -881,6 +916,89 @@ function ConfigViewer() {
 
   const displayContent = getFilteredContent();
 
+  // Render content with search highlighting
+  const renderContent = () => {
+    if (isEditMode) {
+      return (
+        <textarea
+          ref={textareaRef}
+          value={editedContent}
+          onChange={(e) => setEditedContent(e.target.value)}
+          className="flex-1 p-4 font-mono text-xs text-[var(--color-text-secondary)] bg-transparent resize-none outline-none whitespace-pre"
+          spellCheck={false}
+        />
+      );
+    }
+
+    let matchCounter = 0;
+
+    return (
+      <pre className="flex-1 p-4 font-mono text-xs text-[var(--color-text-secondary)] whitespace-pre">
+        {searchTerm
+          ? displayContent.split('\n').map((line, lineIdx) => {
+              const lowerLine = line.toLowerCase();
+              const lowerSearch = searchTerm.toLowerCase();
+              if (lowerLine.includes(lowerSearch)) {
+                const parts: React.ReactNode[] = [];
+                let lastIndex = 0;
+                let index = lowerLine.indexOf(lowerSearch);
+                while (index !== -1) {
+                  parts.push(line.substring(lastIndex, index));
+                  const isCurrentMatch = matchCounter === currentMatchIndex;
+                  parts.push(
+                    <span
+                      key={`${lineIdx}-${index}`}
+                      data-match-index={matchCounter}
+                      className={isCurrentMatch
+                        ? 'bg-orange-500 text-white font-semibold'
+                        : 'bg-yellow-300/50 text-yellow-900 dark:bg-yellow-500/30 dark:text-yellow-200'
+                      }
+                    >
+                      {line.substring(index, index + searchTerm.length)}
+                    </span>
+                  );
+                  matchCounter++;
+                  lastIndex = index + searchTerm.length;
+                  index = lowerLine.indexOf(lowerSearch, lastIndex);
+                }
+                parts.push(line.substring(lastIndex));
+                return (
+                  <div key={lineIdx} className="bg-yellow-100/30 dark:bg-yellow-900/20">
+                    {parts}
+                  </div>
+                );
+              }
+              return <div key={lineIdx}>{line || ' '}</div>;
+            })
+          : displayContent.split('\n').map((line, i) => {
+              let className = '';
+              if (line.startsWith('#')) {
+                className = 'text-[var(--color-text-tertiary)]';
+              } else if (line.match(/^\s*[a-z_]+:/i) && !line.includes('[REDACTED]')) {
+                const colonIdx = line.indexOf(':');
+                const key = line.substring(0, colonIdx + 1);
+                const value = line.substring(colonIdx + 1);
+                return (
+                  <div key={i}>
+                    <span className="text-[var(--color-accent)]">{key}</span>
+                    <span className={value.includes('#') ? '' : 'text-[var(--color-profit)]'}>
+                      {value}
+                    </span>
+                  </div>
+                );
+              } else if (line.includes('[REDACTED]') || line.includes('[ENV_VAR]')) {
+                className = 'text-[var(--color-loss)]';
+              }
+              return (
+                <div key={i} className={className}>
+                  {line || ' '}
+                </div>
+              );
+            })}
+      </pre>
+    );
+  };
+
   return (
     <div className="space-y-4">
       {/* Header with controls */}
@@ -894,83 +1012,145 @@ function ConfigViewer() {
               {data?.line_count} lines • {data?.sections?.length || 0} sections
             </p>
           </div>
-          <button
-            onClick={handleRefresh}
-            disabled={isRefreshing}
-            className="btn btn-ghost text-sm"
-            title="Refresh configuration"
-          >
-            <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-          </button>
-        </div>
-
-        {/* Info message - edit via file */}
-        <div className="flex items-center gap-3 p-3 bg-[var(--color-text-tertiary)]/10 border border-[var(--color-text-tertiary)]/30 rounded-lg mb-4">
-          <AlertCircle className="w-4 h-4 text-[var(--color-text-secondary)] flex-shrink-0" />
-          <p className="text-xs text-[var(--color-text-secondary)]">
-            Read-only view. To edit, modify <code className="bg-[var(--color-bg-tertiary)] px-1 rounded">config/config.yaml</code> directly and restart services.
-          </p>
-        </div>
-
-        {/* Filters row */}
-        <div className="flex flex-col sm:flex-row gap-3 mb-4">
-          {/* Section filter */}
-          <select
-            value={selectedSection || ''}
-            onChange={(e) => setSelectedSection(e.target.value || null)}
-            className="input sm:w-64"
-          >
-            <option value="">All Sections</option>
-            {data?.sections?.map((section) => (
-              <option key={section} value={section}>
-                {section}
-              </option>
-            ))}
-          </select>
-
-          {/* Search with navigation */}
-          <div className="flex items-center gap-1 flex-1 sm:flex-initial">
-            <div className="relative flex-1 sm:w-64">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-text-tertiary)] pointer-events-none" />
-              <input
-                type="text"
-                placeholder="Search..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="input pl-9 pr-16 w-full"
-              />
-              {searchTerm && (
-                <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 text-xs text-[var(--color-text-tertiary)]">
-                  <span>{matchCount > 0 ? `${currentMatchIndex + 1}/${matchCount}` : '0/0'}</span>
-                  <button onClick={clearSearch} className="p-0.5 hover:text-[var(--color-text-primary)]">
-                    <X className="w-3 h-3" />
-                  </button>
-                </div>
-              )}
-            </div>
-            {searchTerm && matchCount > 0 && (
+          <div className="flex items-center gap-2">
+            {isEditMode ? (
               <>
                 <button
-                  onClick={handlePrevMatch}
-                  className="btn btn-ghost p-1.5"
-                  title="Previous match"
+                  onClick={handleCancelEdit}
+                  className="btn btn-ghost text-sm"
                 >
-                  <ChevronUp className="w-4 h-4" />
+                  <X className="w-4 h-4 mr-1" />
+                  Cancel
                 </button>
                 <button
-                  onClick={handleNextMatch}
-                  className="btn btn-ghost p-1.5"
-                  title="Next match"
+                  onClick={handleSaveConfig}
+                  disabled={saveConfigMutation.isPending || hasRedactedValues}
+                  className="btn btn-primary text-sm"
+                  title={hasRedactedValues ? 'Cannot save with [REDACTED] or [ENV_VAR] values' : 'Save configuration'}
                 >
-                  <ChevronDown className="w-4 h-4" />
+                  <Save className={`w-4 h-4 mr-1 ${saveConfigMutation.isPending ? 'animate-spin' : ''}`} />
+                  Save
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={handleRefresh}
+                  disabled={isRefreshing}
+                  className="btn btn-ghost text-sm"
+                  title="Refresh configuration"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+                </button>
+                <button
+                  onClick={handleEnterEditMode}
+                  className="btn btn-primary text-sm"
+                >
+                  <Edit2 className="w-4 h-4 mr-1" />
+                  Edit
                 </button>
               </>
             )}
           </div>
         </div>
 
-        {/* Quick section links */}
-        {data?.sections && data.sections.length > 0 && (
+        {/* Edit mode warning */}
+        {isEditMode && (
+          <div className="flex items-center gap-3 p-3 bg-[var(--color-warning)]/10 border border-[var(--color-warning)]/30 rounded-lg mb-4">
+            <AlertTriangle className="w-4 h-4 text-[var(--color-warning)] flex-shrink-0" />
+            <div className="text-xs text-[var(--color-warning)]">
+              <p className="font-semibold">Edit Mode</p>
+              <p>Changes will be saved to config file. Restart services to apply.</p>
+              {hasRedactedValues && (
+                <p className="text-[var(--color-loss)] mt-1">
+                  Cannot save: Replace [REDACTED] and [ENV_VAR] with actual values first.
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Save error message */}
+        {saveConfigMutation.isError && (
+          <div className="flex items-center gap-3 p-3 bg-[var(--color-loss)]/10 border border-[var(--color-loss)]/30 rounded-lg mb-4">
+            <XCircle className="w-4 h-4 text-[var(--color-loss)] flex-shrink-0" />
+            <p className="text-xs text-[var(--color-loss)]">
+              {(saveConfigMutation.error as Error)?.message || 'Failed to save configuration'}
+            </p>
+          </div>
+        )}
+
+        {/* Save success message */}
+        {saveConfigMutation.isSuccess && !isEditMode && (
+          <div className="flex items-center gap-3 p-3 bg-[var(--color-profit)]/10 border border-[var(--color-profit)]/30 rounded-lg mb-4">
+            <CheckCircle className="w-4 h-4 text-[var(--color-profit)] flex-shrink-0" />
+            <p className="text-xs text-[var(--color-profit)]">
+              Configuration saved. Restart services to apply changes.
+            </p>
+          </div>
+        )}
+
+        {/* Filters row - only in view mode */}
+        {!isEditMode && (
+          <div className="flex flex-col sm:flex-row gap-3 mb-4">
+            {/* Section filter */}
+            <select
+              value={selectedSection || ''}
+              onChange={(e) => setSelectedSection(e.target.value || null)}
+              className="input sm:w-64"
+            >
+              <option value="">All Sections</option>
+              {data?.sections?.map((section) => (
+                <option key={section} value={section}>
+                  {section}
+                </option>
+              ))}
+            </select>
+
+            {/* Search with navigation */}
+            <div className="flex items-center gap-1 flex-1 sm:flex-initial">
+              <div className="relative flex-1 sm:w-64">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-text-tertiary)] pointer-events-none" />
+                <input
+                  type="text"
+                  placeholder="Search..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="input pl-9 pr-16 w-full"
+                />
+                {searchTerm && (
+                  <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 text-xs text-[var(--color-text-tertiary)]">
+                    <span>{matchCount > 0 ? `${currentMatchIndex + 1}/${matchCount}` : '0/0'}</span>
+                    <button onClick={clearSearch} className="p-0.5 hover:text-[var(--color-text-primary)]">
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                )}
+              </div>
+              {searchTerm && matchCount > 0 && (
+                <>
+                  <button
+                    onClick={handlePrevMatch}
+                    className="btn btn-ghost p-1.5"
+                    title="Previous match"
+                  >
+                    <ChevronUp className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={handleNextMatch}
+                    className="btn btn-ghost p-1.5"
+                    title="Next match"
+                  >
+                    <ChevronDown className="w-4 h-4" />
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Quick section links - only in view mode */}
+        {!isEditMode && data?.sections && data.sections.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-4">
             {data.sections.slice(0, 10).map((section) => (
               <button
@@ -999,78 +1179,19 @@ function ConfigViewer() {
         <div ref={contentRef} className="flex h-[500px] overflow-auto">
           {/* Line numbers */}
           <div className="sticky left-0 flex-shrink-0 py-4 pl-4 pr-2 bg-[var(--color-bg-tertiary)] text-[var(--color-text-tertiary)] font-mono text-xs text-right select-none border-r border-[var(--color-border-primary)]">
-            <pre>{getLineNumbers(displayContent)}</pre>
+            <pre>{getLineNumbers(isEditMode ? editedContent : displayContent)}</pre>
           </div>
           {/* Content */}
-          <pre className="flex-1 p-4 font-mono text-xs text-[var(--color-text-secondary)] whitespace-pre">
-                {searchTerm
-                  ? displayContent.split('\n').map((line, i) => {
-                      const lowerLine = line.toLowerCase();
-                      const lowerSearch = searchTerm.toLowerCase();
-                      if (lowerLine.includes(lowerSearch)) {
-                        // Highlight matching text
-                        const parts = [];
-                        let lastIndex = 0;
-                        let index = lowerLine.indexOf(lowerSearch);
-                        while (index !== -1) {
-                          parts.push(line.substring(lastIndex, index));
-                          parts.push(
-                            <span key={`${i}-${index}`} className="bg-[var(--color-warning)]/40 text-[var(--color-warning)]">
-                              {line.substring(index, index + searchTerm.length)}
-                            </span>
-                          );
-                          lastIndex = index + searchTerm.length;
-                          index = lowerLine.indexOf(lowerSearch, lastIndex);
-                        }
-                        parts.push(line.substring(lastIndex));
-                        return (
-                          <div key={i} data-match="true" className="bg-[var(--color-warning)]/10">
-                            {parts}
-                          </div>
-                        );
-                      }
-                      return <div key={i}>{line || ' '}</div>;
-                    })
-                  : displayContent.split('\n').map((line, i) => {
-                      // Syntax highlighting
-                      let className = '';
-                      if (line.startsWith('#')) {
-                        className = 'text-[var(--color-text-tertiary)]'; // Comments
-                      } else if (line.match(/^\s*[a-z_]+:/i) && !line.includes('[REDACTED]')) {
-                        // Keys
-                        const colonIdx = line.indexOf(':');
-                        const key = line.substring(0, colonIdx + 1);
-                        const value = line.substring(colonIdx + 1);
-                        return (
-                          <div key={i}>
-                            <span className="text-[var(--color-accent)]">{key}</span>
-                            <span className={value.includes('#') ? '' : 'text-[var(--color-profit)]'}>
-                              {value}
-                            </span>
-                          </div>
-                        );
-                      } else if (line.includes('[REDACTED]') || line.includes('[ENV_VAR]')) {
-                        className = 'text-[var(--color-loss)]';
-                      }
-                      return (
-                        <div key={i} className={className}>
-                          {line || ' '}
-                        </div>
-                      );
-                    })}
-          </pre>
+          {renderContent()}
         </div>
       </div>
 
       {/* Status bar */}
       <div className="text-xs text-[var(--color-text-tertiary)] flex items-center gap-4">
-        <span>{displayContent.split('\n').length} lines shown</span>
-        {selectedSection && <span>Section: {selectedSection}</span>}
-        {searchTerm && (
-          <span>
-            {displayContent.toLowerCase().split(searchTerm.toLowerCase()).length - 1} matches
-          </span>
-        )}
+        <span>{(isEditMode ? editedContent : displayContent).split('\n').length} lines shown</span>
+        {isEditMode && <span className="text-[var(--color-warning)]">Editing</span>}
+        {!isEditMode && selectedSection && <span>Section: {selectedSection}</span>}
+        {!isEditMode && searchTerm && <span>{matchCount} matches</span>}
       </div>
     </div>
   );

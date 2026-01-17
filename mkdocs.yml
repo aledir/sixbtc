@@ -1,0 +1,150 @@
+site_name: SixBTC
+site_url: https://localhost:8001/
+site_description: AI-Powered Trading System - Internal Documentation
+site_author: bitwolf
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  palette:
+    # Light mode (Freqtrade-inspired: blue grey + teal)
+    - scheme: default
+      primary: blue grey
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    # Dark mode
+    - scheme: slate
+      primary: blue grey
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+  features:
+    - content.code.annotate
+    - content.code.copy
+    - content.tabs.link
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - toc.follow
+
+plugins:
+  - search:
+      lang: en
+  - minify:
+      minify_html: true
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.magiclink
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+# Navigation structure
+nav:
+  - Home: index.md
+  - Getting Started:
+    - getting-started/index.md
+    - Installation: getting-started/installation.md
+    - Quickstart: getting-started/quickstart.md
+    - Configuration: getting-started/configuration.md
+  - Architecture:
+    - architecture/index.md
+    - System Overview: architecture/system-overview.md
+    - Processes: architecture/processes.md
+    - Data Flow: architecture/data-flow.md
+  - Pipeline:
+    - pipeline/index.md
+    - 1. Generator: pipeline/01-generator.md
+    - 2. Validator: pipeline/02-validator.md
+    - 3. Parametric: pipeline/03-parametric.md
+    - 4. Backtest IS: pipeline/04-backtest-is.md
+    - 5. Backtest OOS: pipeline/05-backtest-oos.md
+    - 6. Score: pipeline/06-score.md
+    - 7. Shuffle Test: pipeline/07-shuffle.md
+    - 8. Walk-Forward: pipeline/08-wfa.md
+    - 8b. Robustness: pipeline/08b-robustness.md
+    - 9. Pool: pipeline/09-pool.md
+    - 10. Rotation: pipeline/10-rotation.md
+    - Auxiliary: pipeline/aux.md
+  - Modules:
+    - Generator:
+      - modules/generator/index.md
+    - Executor:
+      - modules/executor/index.md
+    - Backtester:
+      - modules/backtester/index.md
+    - Scorer:
+      - modules/scorer/index.md
+  - Database:
+    - database/index.md
+    - Schema: database/schema.md
+  - API:
+    - api/index.md
+  - Config:
+    - config/index.md
+    - Reference: config/reference.md
+  - Frontend:
+    - frontend/index.md
+  - Operations:
+    - operations/index.md
+    - Troubleshooting: operations/troubleshooting.md
+    - Decision Trees: operations/decision-trees.md
+    - When to Worry: operations/when-to-worry.md
+  - Integrations:
+    - integrations/index.md
+    - Hyperliquid: integrations/hyperliquid.md
+    - Balance Management: integrations/balance-management.md
+  - Reference:
+    - reference/index.md
+    - Risk Management: reference/risk.md
+    - Coin Universe: reference/coin.md
+    - ATR Statistics: reference/atr-statistics.md
+    - Coding Examples: reference/coding-examples.md

@@ -6,7 +6,65 @@
 
 ## STARTUP - READ FIRST
 
-**At the start of EVERY new chat session**, read `docs/PIPELINE_OVERVIEW.md` for current pipeline architecture.
+**At the start of EVERY new chat session**, read `docs/pipeline/index.md` for current pipeline architecture.
+
+---
+
+## DOCUMENTATION GUIDELINES
+
+> *"Simplicity is the ultimate sophistication"* - Leonardo da Vinci
+
+**CRITICAL**: SixBTC is a PRIVATE, PERSONAL project. The documentation is written EXCLUSIVELY for the owner (bitwolf).
+
+### Obiettivo Documentazione
+
+La documentazione deve permettere di capire TUTTO anche dopo mesi senza toccare il codice:
+
+1. **Come funziona** - Il sistema, i flussi, le decisioni
+2. **Perché funziona così** - La logica dietro ogni scelta
+3. **Cosa succede se...** - Conseguenze di modifiche ai parametri
+4. **Quando preoccuparsi** - Segnali di problemi, cosa controllare
+
+### Principi Chiave
+
+| Principio | Significa | NON significa |
+|-----------|-----------|---------------|
+| **Semplicità** | Concetti chiari, esempi concreti | Testi lunghi, ripetizioni |
+| **Praticità** | "Se X, fai Y", formule, checklist | Teoria astratta |
+| **Completezza** | Tutti gli aspetti coperti | Ridondanza tra sezioni |
+| **WHY** | Spiegare perché, non solo cosa | Documentare l'ovvio |
+
+### Continuous Improvement
+
+La documentazione è un **work in progress continuo**. Ad ogni sessione:
+
+1. Se trovi qualcosa di poco chiaro → migliora
+2. Se aggiungi funzionalità → documenta
+3. Se risolvi un problema → aggiungi a troubleshooting
+4. Se cambi config → aggiorna reference
+
+### Cosa NON fare
+
+- ❌ Documentazione ridondante (stesso concetto in più posti)
+- ❌ Testi lunghi quando bastano tabelle/bullet
+- ❌ Spiegare concetti base (Python, trading, etc.)
+- ❌ Marketing fluff ("potente", "robusto", "avanzato")
+- ❌ Documentare codice auto-esplicativo
+
+### Struttura Documentazione
+
+```
+docs/
+├── index.md              # Entry point con quick links
+├── config/reference.md   # TUTTI i parametri (sezione critica)
+├── pipeline/             # Come funziona la pipeline
+├── operations/           # Troubleshooting, comandi
+└── [altri]/              # Approfondimenti per area
+```
+
+**File più importante**: `config/reference.md` - deve rispondere a "cosa fa questo parametro e cosa succede se lo cambio?"
+
+**Rendering**: MkDocs Material su porta 8002 (`supervisorctl restart sixbtc:docs`)
 
 ---
 
@@ -51,6 +109,7 @@ Tutto il resto esiste SOLO per servire questo obiettivo. IN CASO DI CONFLITTO: I
 
 - **ALL code/comments in English**
 - **ALL logs ASCII only** (no emojis)
+- **MkDocs documentation (`/docs/`) in Italian**
 - **Italian for chat responses only**
 - PEP 8, Black (line length: 100), isort
 
@@ -107,6 +166,7 @@ GENERATION → VALIDATION → BACKTESTING → ROTATION → MONITORING
 |---------|---------|
 | `sixbtc:api` | FastAPI backend (port 8080) |
 | `sixbtc:frontend` | Vite dev server (port 5173) |
+| `sixbtc:docs` | MkDocs server (port 8002) |
 | `sixbtc:generator` | Strategy generation |
 | `sixbtc:validator` | Validation pipeline |
 | `sixbtc:backtester` | Backtesting + scoring |
@@ -145,13 +205,21 @@ Skip trade if: `margin_needed > available_margin` OR `notional < 10 USDC`
 
 ### Process Management
 ```bash
-# ALWAYS use supervisorctl (no sudo)
-supervisorctl status
+# ALWAYS use supervisorctl WITHOUT sudo
+supervisorctl status sixbtc:*
 supervisorctl restart sixbtc:*
+supervisorctl start sixbtc:docs
+supervisorctl stop sixbtc:executor
 
-# NEVER start manually with python -m ...
-# NEVER use pkill/kill for services
+# Reload config after changes to supervisor.conf:
+supervisorctl reread && supervisorctl update
 ```
+
+**CRITICAL RULES:**
+- **NO SUDO** - supervisorctl works without sudo on this system
+- **NEVER** start processes manually (`python -m ...`, `mkdocs serve`, etc.) - creates zombie duplicates
+- **NEVER** use `pkill`/`kill` for services - use `supervisorctl stop`
+- **ALWAYS** use supervisorctl for ALL service management
 
 ### Testing
 ```bash

@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:docs": "cd .. && .venv/bin/mkdocs build -d web/dist/docs",
+    "build:all": "npm run build && npm run build:docs",
+    "dev:docs": "cd .. && .venv/bin/mkdocs serve -a localhost:8002",
     "lint": "eslint .",
     "preview": "vite preview"
   },

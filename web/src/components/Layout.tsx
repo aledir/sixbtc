@@ -8,9 +8,13 @@ import {
   Sun,
   Moon,
   AlertOctagon,
+  BookOpen,
 } from 'lucide-react';
 import { useStatus } from '../hooks/useApi';
 import { useTheme } from '../contexts/ThemeContext';
+
+// Get docs URL based on current hostname (works with localhost and tailscale)
+const getDocsUrl = () => `http://${window.location.hostname}:8002/`;
 
 // Main navigation items (shown in bottom bar on mobile)
 const mainNavItems = [
@@ -19,6 +23,7 @@ const mainNavItems = [
   { to: '/strategies', icon: TrendingUp, label: 'Strategies' },
   { to: '/pipeline', icon: Activity, label: 'Pipeline' },
   { to: '/system', icon: Settings, label: 'System' },
+  { to: 'docs', icon: BookOpen, label: 'Docs', external: true, dynamic: true },
 ];
 
 // All navigation items for desktop sidebar and mobile menu
@@ -28,6 +33,7 @@ const allNavItems = [
   { to: '/strategies', icon: TrendingUp, label: 'Strategies' },
   { to: '/pipeline', icon: Activity, label: 'Pipeline' },
   { to: '/system', icon: Settings, label: 'System' },
+  { to: 'docs', icon: BookOpen, label: 'Docs', external: true, dynamic: true },
 ];
 
 function formatUptime(seconds: number): string {
@@ -94,23 +100,36 @@ function DesktopSidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 p-3 overflow-y-auto">
-        {allNavItems.map(({ to, icon: Icon, label }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={to === '/'}
-            className={({ isActive }) =>
-              `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors mb-1 ${
-                isActive
-                  ? 'bg-[var(--color-accent-muted)] text-[var(--color-accent)] font-medium'
-                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
-              }`
-            }
-          >
-            <Icon size={18} />
-            {label}
-          </NavLink>
-        ))}
+        {allNavItems.map(({ to, icon: Icon, label, external, dynamic }) =>
+          external ? (
+            <a
+              key={to}
+              href={dynamic ? getDocsUrl() : to}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors mb-1 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]"
+            >
+              <Icon size={18} />
+              {label}
+            </a>
+          ) : (
+            <NavLink
+              key={to}
+              to={to}
+              end={to === '/'}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors mb-1 ${
+                  isActive
+                    ? 'bg-[var(--color-accent-muted)] text-[var(--color-accent)] font-medium'
+                    : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
+                }`
+              }
+            >
+              <Icon size={18} />
+              {label}
+            </NavLink>
+          )
+        )}
       </nav>
 
       {/* Footer */}
@@ -129,23 +148,36 @@ function MobileTabBar() {
   return (
     <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-[var(--color-bg-elevated)] border-t border-[var(--color-border-primary)] safe-bottom z-40">
       <div className="flex items-center justify-around h-16">
-        {mainNavItems.map(({ to, icon: Icon, label }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={to === '/'}
-            className={({ isActive }) =>
-              `flex flex-col items-center justify-center gap-1 flex-1 h-full transition-colors ${
-                isActive
-                  ? 'text-[var(--color-accent)]'
-                  : 'text-[var(--color-text-tertiary)]'
-              }`
-            }
-          >
-            <Icon size={22} />
-            <span className="text-[10px] font-medium">{label}</span>
-          </NavLink>
-        ))}
+        {mainNavItems.map(({ to, icon: Icon, label, external, dynamic }) =>
+          external ? (
+            <a
+              key={to}
+              href={dynamic ? getDocsUrl() : to}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex flex-col items-center justify-center gap-1 flex-1 h-full transition-colors text-[var(--color-text-tertiary)]"
+            >
+              <Icon size={22} />
+              <span className="text-[10px] font-medium">{label}</span>
+            </a>
+          ) : (
+            <NavLink
+              key={to}
+              to={to}
+              end={to === '/'}
+              className={({ isActive }) =>
+                `flex flex-col items-center justify-center gap-1 flex-1 h-full transition-colors ${
+                  isActive
+                    ? 'text-[var(--color-accent)]'
+                    : 'text-[var(--color-text-tertiary)]'
+                }`
+              }
+            >
+              <Icon size={22} />
+              <span className="text-[10px] font-medium">{label}</span>
+            </NavLink>
+          )
+        )}
       </div>
     </nav>
   );
