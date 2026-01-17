@@ -2565,7 +2565,8 @@ class ContinuousBacktesterProcess:
                 # Mark strategy for retirement (data quality degraded)
                 self.pool_manager._retire_strategy(
                     strategy_id,
-                    f"Re-test failed: {status}"
+                    f"Re-test failed: {status}",
+                    "retest_failed"
                 )
                 return (False, f"Pair validation failed: {status}")
 
@@ -2600,7 +2601,7 @@ class ContinuousBacktesterProcess:
 
             if not validation['passed']:
                 logger.info(f"[{strategy_name}] RETEST: OOS failed ({validation['reason']})")
-                self.pool_manager._retire_strategy(strategy_id, f"Re-test OOS: {validation['reason']}")
+                self.pool_manager._retire_strategy(strategy_id, f"Re-test OOS: {validation['reason']}", "retest_failed")
                 return (False, f"OOS validation failed: {validation['reason']}")
 
             # Calculate final metrics

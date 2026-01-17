@@ -1685,38 +1685,20 @@ class MetricsCollector:
         """Get score calculation statistics for last 24h.
 
         Includes ALL scored strategies (both passed and failed min_score threshold).
-        Sources:
-        - shuffle_test.started: strategies that passed score threshold
-        - backtest.score_rejected: strategies that failed score threshold
+        Source: backtest.scored contains all strategies after scoring.
         """
-        # Query combines both passed (shuffle_test.started) and failed (score_rejected)
+        # backtest.scored includes ALL scores (before threshold check)
         result = session.execute(
             text("""
-                WITH all_scores AS (
-                    -- Strategies that passed score threshold (went to shuffle test)
-                    SELECT (event_data->>'score')::float as score
-                    FROM strategy_events
-                    WHERE timestamp >= :since
-                      AND stage = 'shuffle_test'
-                      AND event_type = 'started'
-                      AND event_data->>'score' IS NOT NULL
-
-                    UNION ALL
-
-                    -- Strategies that failed score threshold (score_rejected event)
-                    SELECT (event_data->>'score')::float as score
-                    FROM strategy_events
-                    WHERE timestamp >= :since
-                      AND stage = 'backtest'
-                      AND event_type = 'score_rejected'
-                      AND event_data->>'score' IS NOT NULL
-                )
                 SELECT
-                    MIN(score) as min_score,
-                    MAX(score) as max_score,
-                    AVG(score) as avg_score
-                FROM all_scores
-                WHERE score IS NOT NULL
+                    MIN((event_data->>'score')::float) as min_score,
+                    MAX((event_data->>'score')::float) as max_score,
+                    AVG((event_data->>'score')::float) as avg_score
+                FROM strategy_events
+                WHERE timestamp >= :since
+                  AND stage = 'backtest'
+                  AND event_type = 'scored'
+                  AND event_data->>'score' IS NOT NULL
             """),
             {'since': since}
         ).first()
@@ -2656,8 +2638,8 @@ class MetricsCollector:
         is_passed = is_stats.get('passed', 0)
         is_failed = is_stats.get('failed', 0)
 
-        is_passed_pct = int(100 * is_passed // is_count) if is_count > 0 else 0
-        is_failed_pct = int(100 * is_failed // is_count) if is_count > 0 else 0
+        is_passed_pct = round(100 * is_passed / is_count) if is_count > 0 else 0
+        is_failed_pct = round(100 * is_failed / is_count) if is_count > 0 else 0
 
         logger.info(f'[4/10 IS_BACKTEST] 24h: {is_count} strategies tested')
         logger.info(f'[4/10 IS_BACKTEST] passed: {is_passed} ({is_passed_pct}%)')
@@ -2706,8 +2688,8 @@ class MetricsCollector:
         oos_passed = oos_stats.get('passed', 0)
         oos_failed = oos_stats.get('failed', 0)
 
-        oos_passed_pct = int(100 * oos_passed // oos_count) if oos_count > 0 else 0
-        oos_failed_pct = int(100 * oos_failed // oos_count) if oos_count > 0 else 0
+        oos_passed_pct = round(100 * oos_passed / oos_count) if oos_count > 0 else 0
+        oos_failed_pct = round(100 * oos_failed / oos_count) if oos_count > 0 else 0
 
         logger.info(f'[5/10 OOS_BACKTEST] 24h: {oos_count} strategies tested')
         logger.info(f'[5/10 OOS_BACKTEST] passed: {oos_passed} ({oos_passed_pct}%)')
@@ -2982,10 +2964,22 @@ class MetricsCollector:
         logger.info(f'[SCHEDULER] status: {total_ok}/{total_tasks} tasks OK')
 
         # Format task status lines
+        now = datetime.now(UTC)
+        today = now.date()
+
         def fmt_task_time(dt: Optional[datetime]) -> str:
             if dt is None:
                 return "never"
-            return dt.strftime("%H:%M UTC")
+            time_str = dt.strftime("%H:%M UTC")
+            # Add date indicator if not today
+            dt_date = dt.date()
+            if dt_date > today:
+                days_diff = (dt_date - today).days
+                time_str += f" +{days_diff}d"
+            elif dt_date < today:
+                days_diff = (today - dt_date).days
+                time_str += f" -{days_diff}d"
+            return time_str
 
         def fmt_task_status(status: str) -> str:
             if status == "SUCCESS":
