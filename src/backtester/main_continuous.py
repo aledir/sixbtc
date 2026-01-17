@@ -2860,7 +2860,7 @@ class ContinuousBacktesterProcess:
                 logger.info(
                     f"[{strategy_name}] Robustness check failed: "
                     f"{robustness:.2f} < {min_robustness} "
-                    f"(OOS/IS={oos_sharpe/is_sharpe:.2f if is_sharpe > 0 else 0})"
+                    f"(OOS/IS={(oos_sharpe/is_sharpe if is_sharpe > 0 else 0):.2f})"
                 )
                 return (False, f"robustness_below_threshold:{robustness:.2f}")
 
