@@ -56,8 +56,9 @@ docker-compose up -d postgres
 # 6. Run database migrations
 alembic upgrade head
 
-# 7. Verify setup
-python main.py --help
+# 7. Start all services
+sudo supervisorctl reread && sudo supervisorctl update
+supervisorctl start sixbtc:*
 ```
 
 ### Configuration
@@ -72,69 +73,44 @@ See [CLAUDE.md](CLAUDE.md) for detailed configuration guidelines.
 
 ## 🚀 Usage
 
-### Generate Strategies
+SixBTC is a **fully automated system** managed via Supervisor. No manual CLI commands needed.
+
+### Service Management
 
 ```bash
-# Generate 50 new strategies
-python main.py generate --count 50
+# Start all services
+supervisorctl start sixbtc:*
 
-# Monitor generation progress
-python main.py status --module generator
+# Stop all services
+supervisorctl stop sixbtc:*
+
+# Restart all services
+supervisorctl restart sixbtc:*
+
+# Check status
+supervisorctl status sixbtc:*
 ```
 
-### Backtest Strategies
+### Web Dashboard
+
+- **Frontend**: http://localhost:5173
+- **API**: http://localhost:8080
+- **Docs**: http://localhost:8002
+
+### Logs
 
 ```bash
-# Backtest all pending strategies
-python main.py backtest --all
-
-# Backtest specific strategy
-python main.py backtest --strategy Strategy_MOM_abc123
-
-# Backtest with custom parameters
-python main.py backtest --all --lookback-days 180 --workers 20
+# View specific service log
+tail -f logs/generator.log
+tail -f logs/executor.log
+tail -f logs/rotator.log
 ```
 
-### Deploy to Live
+### Emergency Stop
 
+Use the web dashboard or API endpoint:
 ```bash
-# Classify and select top 10 strategies
-python main.py classify
-
-# Deploy to subaccounts (dry-run first)
-python main.py deploy --dry-run
-
-# Deploy for real
-python main.py deploy
-
-# Check deployment status
-python main.py status --live
-```
-
-### Monitor Performance
-
-```bash
-# Real-time dashboard
-python main.py monitor
-
-# Check specific subaccount
-python main.py status --subaccount 5
-
-# View recent trades
-python main.py trades --limit 50
-```
-
-### Emergency Controls
-
-```bash
-# Emergency stop all positions
-python main.py emergency-stop --all
-
-# Stop specific subaccount
-python main.py emergency-stop --subaccount 3
-
-# Pause strategy rotation
-python main.py pause-rotation
+curl -X POST http://localhost:8080/api/emergency-stop
 ```
 
 ## 📊 Architecture
@@ -294,11 +270,14 @@ supervisorctl restart sixbtc:orchestrator
 
 **Strategy generation slow**:
 ```bash
-# Check AI provider status
-python main.py status --ai-providers
+# Check generator logs
+tail -f logs/generator.log
 
 # Increase parallel workers in config
 # config/config.yaml → generation.parallel_workers: 20
+
+# Restart generator
+supervisorctl restart sixbtc:generator
 ```
 
 ## 📊 Monitoring & Logging
